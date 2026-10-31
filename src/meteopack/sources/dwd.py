@@ -542,6 +542,7 @@ class DwdStations:
             return fetch_file(
                 unit.url,
                 dest,
+                unit_key=unit.key,
                 session=self._session,
                 limiter=self._limiter,
                 retries=rl.max_retries,
