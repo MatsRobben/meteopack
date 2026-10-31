@@ -1,0 +1,34 @@
+# DMI (Danish Meteorological Institute) Open Data, metObs collection
+# (opendataapi.dmi.dk/v2/metObs), an OGC API - Features service.
+#
+# Keyless since March 2026 — the `api-key` query parameter the v2 docs still
+# mention is no longer required and is not sent. One feature per
+# (stationId, parameterId, observed, value), so a tidy frame is built by
+# querying per station x parameter x window and pivoting; see
+# meteopack.sources.dmi.
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: dmi
+
+base_url: https://opendataapi.dmi.dk/v2/metObs/collections
+
+rate_limit:
+  # Measured at ~0.23 files/s: this service is server-latency bound, not
+  # bandwidth bound, so concurrency buys the throughput and request rate buys
+  # nothing. Twelve workers ran a full backfill without a single 429; the
+  # request cap is set where it stops being polite rather than where the
+  # server starts complaining.
+  requests_per_second: 6.0
+  max_workers: 12
+  max_retries: 5
+  backoff_seconds: 1.0
+
+# Open data: nothing to authenticate with.
+credentials_env: []
+
+extra:
+  # A three-year page is ~160k features and a few MB of JSON; generous, because
+  # a slow response is the normal case here.
+  timeout_seconds: 120
+  user_agent: "meteopack/0.1 (+dmi-opendata)"

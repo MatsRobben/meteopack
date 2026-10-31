@@ -159,14 +159,20 @@ def fetch_file(
     retries: int = 5,
     backoff: float = 1.0,
     timeout: float = 60.0,
+    overwrite: bool = False,
 ) -> RawFile:
     """Download `url` to `dest` atomically; a no-op re-hash if `dest` exists.
+
+    `overwrite` exists for volatile units — archives rewritten upstream under an
+    unchanged filename. Without it the ledger re-queues them and this function
+    then skips because the file is there, so the ledger refreshes and the bytes
+    never do: the live tail silently freezes while everything looks healthy.
 
     The `.part` file is always removed on failure so an interrupted job can
     never leave something that looks like a finished download.
     """
     dest = Path(dest)
-    if dest.exists():
+    if dest.exists() and not overwrite:
         digest, n = _sha256_file(dest)
         return RawFile(path=dest, sha256=digest, n_bytes=n, unit_key=unit_key)
 

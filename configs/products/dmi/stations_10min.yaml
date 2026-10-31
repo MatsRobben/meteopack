@@ -1,0 +1,253 @@
+# DMI metObs 10-minute station observations, clipped to the KNMI radar footprint.
+#
+# Loads into meteopack.core.config.ProductConfig. The variable map is the whole
+# of the source-specific knowledge: `source_key` is a metObs `parameterId`,
+# which is exactly what `observation/items?parameterId=` filters on and what
+# the pivot in `parse` keys its columns by. Adding a parameter is a config
+# change; so is dropping one, and dropping one is also how the hourly, 12 h and
+# 24 h aggregates stay out — only the 10-minute-native parameters are listed
+# below, so no other request is ever made.
+#
+# `precip_past1min` is excluded on purpose: stations advertise it but metObs
+# does not populate it through this endpoint, so it would be a column of nulls.
+#
+# metObs publishes RAW, un-quality-controlled values. valid_min / valid_max are
+# therefore load-bearing rather than belt-and-braces: nonphysical readings do
+# occur. They are expressed in the canonical units below (i.e. post-scale), and
+# JSON null is turned into null before any scaling.
+
+source: dmi
+product: stations_10min
+version: 1
+
+cadence_seconds: 600          # the feed's native 10-minute step
+grid_id: knmi_1km_stereo      # stations outside this footprint are dropped;
+                              # ~29 of the 113 Danish stations qualify
+
+store:
+  kind: points
+  chunks:
+    time: 4032                # 4 weeks of 10-minute steps
+    station: 64
+  compressor: zstd
+  compression_level: 3
+  partition_by: [year]
+
+raw_layout:
+  archive: none               # one JSON page per station-parameter-window
+  granularity: year
+
+retention:
+  raw:
+    keep: true
+    tier: cold                # a few MB per station-parameter-window, and the
+                              # API is slow enough that re-pulling hurts
+  canonical:
+    keep: true
+  derived:
+    keep: true
+
+variables:
+  - name: air_temperature
+    source_key: temp_dry
+    units: degC
+    long_name: Air temperature at 2 m
+    dtype: float32
+    valid_min: -60.0
+    valid_max: 60.0
+
+  - name: dew_point_temperature
+    source_key: temp_dew
+    units: degC
+    long_name: Dew point temperature
+    dtype: float32
+    valid_min: -70.0
+    valid_max: 60.0
+
+  - name: grass_temperature
+    source_key: temp_grass
+    units: degC
+    long_name: Temperature at grass level
+    dtype: float32
+    valid_min: -70.0
+    valid_max: 80.0
+
+  - name: soil_temperature
+    source_key: temp_soil
+    units: degC
+    long_name: Soil temperature at 10 cm
+    dtype: float32
+    valid_min: -40.0
+    valid_max: 60.0
+
+  - name: relative_humidity
+    source_key: humidity
+    units: "%"
+    long_name: Relative humidity
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 100.5          # DMI reports a hair above 100 at saturation
+
+  - name: air_pressure
+    source_key: pressure
+    units: hPa
+    long_name: Air pressure at station height
+    dtype: float32
+    valid_min: 800.0
+    valid_max: 1100.0
+
+  - name: air_pressure_at_sea_level
+    source_key: pressure_at_sea
+    units: hPa
+    long_name: Air pressure reduced to mean sea level
+    dtype: float32
+    valid_min: 900.0
+    valid_max: 1080.0
+
+  - name: precipitation_amount
+    source_key: precip_past10min
+    units: mm
+    long_name: Precipitation sum over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 200.0
+
+  - name: precipitation_duration
+    source_key: precip_dur_past10min
+    units: s
+    long_name: Duration of precipitation over the preceding 10 minutes
+    dtype: float32
+    scale: 60.0               # DMI publishes this in minutes
+    valid_min: 0.0
+    valid_max: 600.0
+
+  - name: wind_speed
+    source_key: wind_speed
+    units: m s-1
+    long_name: Mean wind speed over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 120.0
+
+  - name: wind_from_direction
+    source_key: wind_dir
+    units: degree
+    long_name: Mean wind direction over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 360.0
+
+  - name: wind_speed_of_gust
+    source_key: wind_max
+    units: m s-1
+    long_name: Maximum 3-second wind gust over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 150.0
+
+  - name: wind_speed_min
+    source_key: wind_min
+    units: m s-1
+    long_name: Minimum wind speed over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 120.0
+
+  - name: cloud_area_fraction
+    source_key: cloud_cover
+    units: "%"
+    long_name: Total cloud cover
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 100.0          # DMI reports percent, not oktas
+
+  - name: cloud_base_height
+    source_key: cloud_height
+    units: m
+    long_name: Cloud base height of the lowest layer
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 30000.0
+
+  - name: visibility_in_air
+    source_key: visibility
+    units: m
+    long_name: Horizontal visibility (instantaneous)
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 80000.0
+
+  - name: visibility_in_air_mean_10min
+    source_key: visib_mean_last10min
+    units: m
+    long_name: Mean horizontal visibility over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 80000.0
+
+  - name: present_weather
+    source_key: weather
+    units: "1"
+    long_name: Present weather, WMO synop/automatic code
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 511.0
+
+  - name: surface_downwelling_shortwave_flux
+    source_key: radia_glob
+    units: W m-2
+    long_name: Global radiation, mean over the preceding 10 minutes
+    dtype: float32
+    valid_min: -50.0          # a pyranometer reads slightly negative at night
+    valid_max: 1600.0
+
+  - name: sunshine_duration
+    source_key: sun_last10min_glob
+    units: s
+    long_name: Bright sunshine duration over the preceding 10 minutes
+    dtype: float32
+    scale: 60.0               # DMI publishes this in minutes
+    valid_min: 0.0
+    valid_max: 600.0
+
+  - name: leaf_wetness_duration
+    source_key: leav_hum_dur_past10min
+    units: s
+    long_name: Leaf wetness duration over the preceding 10 minutes
+    dtype: float32
+    scale: 60.0               # DMI publishes this in minutes
+    valid_min: 0.0
+    valid_max: 600.0
+
+# The metObs feature-property set, as `scan` reports it. This is the record
+# schema `parse` reads (observed / value / parameterId / stationId), not the
+# parameter list — which parameters a file carries is decided above and varies
+# per unit by construction. Pinned on 2026-10-31 from the live endpoint;
+# re-pin only after looking at what moved.
+schema_fingerprint: "fa79054fff4fbdb2"
+
+extra:
+  # Three years of 10-minute data is ~158k features, comfortably under the
+  # 300000-feature page cap. `list` refuses a width that could overflow it,
+  # because an overflowing page comes back truncated rather than failing.
+  #
+  # This width is sized for a backfill. The block containing "now" is marked
+  # volatile and therefore re-downloaded on every run, so a job that only
+  # follows the live tail should use a narrower window -- at the cost of a
+  # different set of unit keys, since the width is what blocks them.
+  window_years: 3
+  # Windows are blocked from this year rather than from the requested start, so
+  # the same station-parameter always lands in the same unit key however a
+  # backfill happens to be sliced. metObs starts around 1953; 1950 is a round
+  # number before it and is never changed once a store exists, because changing
+  # it rewrites every key.
+  window_anchor_year: 1950
+  page_limit: 300000
+  # `station/items` has no paging in practice; this is the whole Danish network
+  # several times over.
+  station_limit: 10000
+  # Missing arrives as JSON null; this is here for a feed that pushes a numeric
+  # sentinel through instead. Applied before scale/offset.
+  missing_sentinels: []
+  # Drop observations that are not on the 600 s grid rather than snapping them.
+  drop_off_cadence: true

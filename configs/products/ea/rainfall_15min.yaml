@@ -1,0 +1,84 @@
+# EA Hydrology quality-controlled 15-minute rainfall, clipped to England and Wales.
+#
+# Loads into meteopack.core.config.ProductConfig. `source_key` is the column in
+# the `readings.csv` response, so adding a column would be a config change --
+# though this feed has exactly one observation column and is unlikely to grow.
+#
+# Missing arrives two ways and both are nulled BEFORE scale/offset: an empty
+# `value`, and a row flagged by `quality` (see extra.missing_quality).
+# valid_min / valid_max are expressed in the canonical units below.
+
+source: ea
+product: rainfall_15min
+version: 1
+
+cadence_seconds: 900          # the feed's native 15-minute step (period=900)
+
+# The UK sits outside every grid in configs/grids.yaml, so clipping is done
+# with extra.bbox below rather than with a grid footprint. Set grid_id once a
+# UK or north-west-European grid exists and the bbox becomes a pre-filter.
+grid_id: null
+
+store:
+  kind: points
+  chunks:
+    time: 2688                # 4 weeks of 15-minute steps
+    station: 64
+  compressor: zstd
+  compression_level: 3
+  partition_by: [year]
+
+raw_layout:
+  archive: none               # one CSV per station-year is already coarse enough
+  granularity: year
+
+retention:
+  raw:
+    keep: true
+    tier: cold                # ~1-6 MB per station-year; slow to re-pull (~0.8 s each)
+  canonical:
+    keep: true
+  derived:
+    keep: true
+
+variables:
+  - name: precipitation_amount
+    source_key: value
+    units: mm
+    long_name: Precipitation sum over the preceding 15 minutes (tipping-bucket)
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 200.0          # a 15-minute total; the UK record is far below this
+
+# Pinned on 2026-10-31 from live readings.csv responses. `scan` reports the
+# fingerprints it sees; re-pin here only after looking at what moved.
+schema_fingerprint: c83f3e9c827b4340
+
+extra:
+  # England and Wales, from the live catalogue's own extent (lon -5.57..1.74,
+  # lat 50.04..55.77) with a margin. Stations outside it are dropped.
+  bbox: [-6.5, 49.5, 2.2, 56.5]
+
+  # `quality` values whose rows carry no usable number. "Missing" always comes
+  # with an empty `value`. Add "Suspect" and/or "Unchecked" here to drop
+  # provider-flagged readings too -- that is a product decision, so it lives
+  # in config rather than in the reader.
+  missing_quality: [Missing]
+
+  # Here for the day EA pushes a numeric sentinel through instead of a blank.
+  # Applied before scale/offset.
+  missing_sentinels: []
+
+  # Drop observations that are not on the 900 s grid rather than snapping them.
+  drop_off_cadence: true
+
+  # How long quality control lags real time. A station-year whose end is still
+  # inside this window is rewritten upstream under the same URL, so `list`
+  # marks it volatile and the ledger never skips it on key alone. Roughly 360
+  # of 9450 station-years in the existing archive are empty for exactly this
+  # reason -- they are the recent tail QC has not reached, not failures.
+  qc_lag_days: 180
+
+  # `_limit` on the station catalogue query. 995 rainfall gauges carried a
+  # 15-minute measure on 2026-10-31, so this is headroom, not a cap.
+  catalogue_limit: 10000

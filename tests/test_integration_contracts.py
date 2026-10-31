@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from typing import ClassVar
 
 from meteopack.core import http
 from meteopack.sources import dwd
@@ -139,3 +140,80 @@ def test_sources_constructed_without_a_session_can_still_fetch(monkeypatch, tmp_
     esoh_unit = Unit(key="k", url="https://example.invalid/x.json", meta={})
     EsohObservations().fetch(esoh_unit, tmp_path)
     assert captured["session"] is not None, "EsohObservations passed a None session"
+
+
+def test_volatile_units_are_actually_refetched(monkeypatch, tmp_path):
+    """A volatile unit must hit the network again, not just the ledger.
+
+    The ledger re-queues volatile units, but fetch_file skips when the file is
+    already there — so the ledger refreshed and the bytes never did, and the
+    live tail would freeze while every status looked healthy. Measured before
+    the fix: zero HTTP requests on the second fetch of a volatile unit.
+    """
+    import inspect
+
+    from meteopack.core import http
+    from meteopack.sources.base import RawFile
+    from meteopack.sources.dwd import DwdStations
+
+    real_sig = inspect.signature(http.fetch_file)
+    seen: list[bool] = []
+
+    def strict(*args, **kwargs):
+        bound = real_sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        seen.append(bool(bound.arguments["overwrite"]))
+        dest = Path(bound.arguments["dest"])
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x")
+        return RawFile(dest, "0" * 64, 1, bound.arguments["unit_key"])
+
+    monkeypatch.setattr(http, "fetch_file", strict)
+    src = DwdStations()
+    common = {"group": "air_temperature", "subdir": "now", "filename": "x.zip"}
+
+    src.fetch(Unit(key="v", url="https://example.invalid/x.zip",
+                   meta={**common, "volatile": True}), tmp_path)
+    src.fetch(Unit(key="i", url="https://example.invalid/x.zip", meta=common), tmp_path)
+
+    assert seen == [True, False], "volatile must request overwrite, immutable must not"
+
+
+def test_fetch_file_honours_overwrite(tmp_path):
+    """The mechanism itself: an existing destination is replaced only on request."""
+    from meteopack.core import http
+
+    dest = tmp_path / "a.bin"
+    dest.write_bytes(b"old")
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url, **kw):
+            self.calls += 1
+
+            class R:
+                status_code = 200
+                headers: ClassVar[dict] = {}
+
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *a):
+                    return False
+
+                def iter_content(self_inner, chunk_size=0):
+                    yield b"new"
+
+                def raise_for_status(self_inner):
+                    pass
+
+            return R()
+
+    s = FakeSession()
+    http.fetch_file("https://example.invalid/a.bin", dest, unit_key="k", session=s)
+    assert dest.read_bytes() == b"old" and s.calls == 0, "default must skip"
+
+    http.fetch_file("https://example.invalid/a.bin", dest, unit_key="k", session=s, overwrite=True)
+    assert dest.read_bytes() == b"new" and s.calls == 1, "overwrite must refetch"

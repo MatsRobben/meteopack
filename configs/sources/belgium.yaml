@@ -1,0 +1,41 @@
+# RMI Belgium open data (opendata.meteo.be), an OGC WFS 2.0 GeoServer endpoint.
+#
+# Keyless, no registration, no quota published. The rate limit below is not
+# politeness, it is the only setting observed to work.
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: belgium
+
+base_url: https://opendata.meteo.be/service/ows
+
+rate_limit:
+  # DO NOT RAISE THESE. This server fails on CONCURRENCY, not on size: a
+  # single-threaded station-year export is reliable and takes a couple of
+  # seconds, while several in flight at once return 500, and sustained parallel
+  # load gets our whole egress IP rate-limited for tens of minutes -- which on a
+  # shared cluster takes out everyone's downloads, not just this job. That has
+  # happened here. One request per second, one worker.
+  #
+  # It is also sufficient: 14 stations x ~25 years is ~350 requests, so a full
+  # backfill is about six minutes of wall clock.
+  requests_per_second: 1.0
+  max_workers: 1
+  # Generous retries with a long backoff, because the failure mode worth
+  # surviving is a cooldown measured in minutes, not a dropped packet.
+  max_retries: 6
+  backoff_seconds: 5.0
+
+# Open data: nothing to authenticate with.
+credentials_env: []
+
+extra:
+  # A whole station-year export is a few MB and the server is unhurried. A short
+  # timeout here just turns a slow success into a retry, which is exactly the
+  # load this endpoint cannot take.
+  timeout_seconds: 180
+  user_agent: "meteopack/0.1 (+rmi-opendata)"
+  # The 10-minute AWS product and its station catalogue. RMI serves a synoptic
+  # pair (synop:synop_data / synop:synop_station) on the same endpoint.
+  data_layer: "aws:aws_10min"
+  station_layer: "aws:aws_station"

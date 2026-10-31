@@ -1,0 +1,47 @@
+# Met Office MIDAS Open, served by the CEDA archive.
+#
+# This is the one source here that needs a credential. The token itself NEVER
+# appears in this file, in the repo, or in a log: `extra.token_file` names a
+# path outside the tree, $CEDA_TOKEN_FILE overrides it, and the token is read
+# from there at the moment a download is attempted. CEDA tokens expire after
+# about three days, so refreshing that file is routine operations.
+#
+# Two hosts: data.ceda.ac.uk serves keyless `?json` catalogue listings (which is
+# why unit enumeration works before anybody has a token), dap.ceda.ac.uk serves
+# the files and wants `Authorization: Bearer`. A stale token there is answered
+# with a 302 to a Keycloak login page, which `requests` follows to an HTTP 200
+# HTML body -- so every payload is checked for the BADC-CSV signature before it
+# is believed.
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: midas
+
+base_url: https://dap.ceda.ac.uk
+
+rate_limit:
+  # Station-years are ~100-600 kB each and CEDA is a shared national facility
+  # with no published quota. Deliberately gentle: this is set below what the
+  # service would tolerate rather than at it.
+  requests_per_second: 3.0
+  max_workers: 4
+  max_retries: 5
+  backoff_seconds: 2.0
+
+# Declared so `validate` can report it. Note this names the FILE holding the
+# token, never the token: there is no environment variable carrying the secret.
+credentials_env: [CEDA_TOKEN_FILE]
+
+extra:
+  timeout_seconds: 120
+  user_agent: "meteopack/0.1 (+midas-ceda)"
+
+  # Keyless catalogue listings.
+  catalogue_url: https://data.ceda.ac.uk
+
+  # Where the bearer token lives. Outside the repo, mode 600. $CEDA_TOKEN_FILE
+  # takes precedence, so one job can be pointed at a fresh token without
+  # editing this shared file.
+  token_file: ~/.ceda_token
+
+  dataset: uk-hourly-weather-obs

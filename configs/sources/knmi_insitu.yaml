@@ -1,0 +1,40 @@
+# KNMI 10-minute in-situ meteorological observations (KMDS), from the local
+# archive of daily tars.
+#
+# This source does not download. The KNMI dataplatform publishes ONE netCDF
+# file per ten minutes and meters on request count rather than bytes, so the
+# archive was pulled once into daily tars and is read from disk ever since; see
+# meteopack.sources.knmi_insitu for the full story. `base_url` is therefore a
+# file:// path, not an endpoint.
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: knmi_insitu
+
+base_url: file:///vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi/10-minute-in-situ-meteorological-observations_tar
+
+rate_limit:
+  # Nothing here is rate limited: a unit is a local hardlink, not a request.
+  # These numbers only bound how many days a driver copies in parallel, which
+  # is a disk question. Kept small because 25 MB/day x 5211 days is a lot of
+  # metadata traffic for a shared filesystem.
+  requests_per_second: 50.0
+  max_workers: 8
+  max_retries: 2
+  backoff_seconds: 0.5
+
+# The local archive needs no credentials. Re-pulling from the dataplatform API
+# would need KNMI_API_KEY; that is deliberately not wired up here, because the
+# whole point of the tar archive is not to make 750k requests again.
+credentials_env: []
+
+extra:
+  # Wins over base_url when set; lets a test or a scratch copy point elsewhere
+  # without editing the URL.
+  # archive_dir: /some/other/path
+
+  # Hardlink the day's tar into the raw layer instead of copying it. The bytes
+  # are identical and immutable, and copying the archive costs ~130 GB to
+  # produce a second copy of what is already there. Falls back to a copy
+  # automatically when the raw layer is on another filesystem.
+  link_raw: true

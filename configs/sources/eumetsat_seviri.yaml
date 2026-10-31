@@ -1,0 +1,43 @@
+# EUMETSAT MSG/SEVIRI level 1.5 imagery, read from the local archive copy.
+#
+# Nothing is downloaded here: the scenes are already on disk, so `fetch` only
+# publishes them into the raw layer. `base_url` is therefore a filesystem path
+# rather than a URL, and is the last fallback for the archive root (the product
+# config's extra.archive_root wins, and an explicit archive_root= wins over
+# that).
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: eumetsat_seviri
+
+base_url: /vol/knmimo-nobackup/users/mrobben/data/raw/eumetsat_seviri/msg15_rss
+
+rate_limit:
+  # There is no remote host to be polite to. What this still decides is the
+  # parse fan-out. One parse holds a 1392 x 3712 float32 array per channel
+  # (~20 MB), the ~98 MB native file it was decoded from, and a resampled
+  # 765 x 700 frame per channel -- call it ~300 MB resident for four channels,
+  # plus the extraction in extra.extract_dir. Four workers is comfortable in a
+  # 4 GB task; the bound is memory, not bandwidth.
+  requests_per_second: 1000.0
+  max_workers: 4
+  max_retries: 0
+  backoff_seconds: 0.0
+
+# A local archive: nothing in this module authenticates, and nothing in it
+# imports eumdac. A live feed would need an EUMETSAT Data Store consumer key
+# and secret -- eumdac reads them from ~/.eumdac/credentials, not from the
+# environment -- in a `list` that queries the EO:EUM:DAT:MSG:MSG15-RSS
+# collection and a `fetch` that calls meteopack.core.http.fetch_file with the
+# product's download URL. Neither would touch `parse`.
+credentials_env: []
+
+extra:
+  # How `fetch` publishes a scene into the raw layer.
+  #   hardlink - the default: same inode, zero bytes, zero seconds. Correct as
+  #              long as the archive is never rewritten in place, because the
+  #              raw copy would follow the rewrite and the recorded sha256 would
+  #              go stale.
+  #   symlink  - same, but breaks if the archive is unmounted or moved.
+  #   copy     - a real second copy (~37 MB per scene, ~10 GB per day).
+  link_mode: hardlink

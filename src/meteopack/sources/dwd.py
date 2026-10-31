@@ -548,6 +548,9 @@ class DwdStations:
                 retries=rl.max_retries,
                 backoff=rl.backoff_seconds,
                 timeout=self.timeout,
+                # Rewritten upstream under the same name: the ledger re-queues it,
+                # so the download must actually happen rather than skip.
+                overwrite=bool((unit.meta or {}).get("volatile")),
             )
         except NotFoundError:
             logger.info("dwd: no upstream file for %s (404)", unit.key)

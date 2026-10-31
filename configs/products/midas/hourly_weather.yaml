@@ -1,0 +1,222 @@
+# MIDAS Open UK hourly weather observations, clipped to the UK and Ireland.
+#
+# Loads into meteopack.core.config.ProductConfig. `source_key` is the MIDAS
+# column name in the BADC-CSV table, so adding a parameter is a config change.
+#
+# UNIT HARMONISATION IS THE POINT OF THIS FILE. MIDAS stores wind in knots and
+# visibility and cloud base in decametres; every one of those is converted by
+# the per-variable `scale` below, never by ad-hoc code, and `extra.expected_units`
+# pins what each file's own header must declare so the assumption is checked
+# rather than trusted. `NA` is nulled BEFORE scale/offset, and valid_min /
+# valid_max are expressed in the canonical units below (i.e. post-scale).
+
+source: midas
+product: hourly_weather
+version: 1
+
+cadence_seconds: 3600         # the feed's native hourly step
+
+# The UK sits outside every grid in configs/grids.yaml, so clipping is done
+# with extra.bbox below rather than with a grid footprint. Set grid_id once a
+# UK or north-west-European grid exists and the bbox becomes a pre-filter.
+grid_id: null
+
+store:
+  kind: points
+  chunks:
+    time: 672                 # 4 weeks of hourly steps
+    station: 64
+  compressor: zstd
+  compression_level: 3
+  partition_by: [year]
+
+raw_layout:
+  archive: none               # one BADC-CSV per station-year is already coarse enough
+  granularity: year
+
+retention:
+  raw:
+    keep: true
+    tier: cold                # ~100-600 kB per station-year, behind a token that expires
+  canonical:
+    keep: true
+  derived:
+    keep: true
+
+variables:
+  - name: air_temperature
+    source_key: air_temperature
+    units: degC
+    long_name: Air temperature
+    dtype: float32
+    valid_min: -60.0
+    valid_max: 60.0
+
+  - name: dew_point_temperature
+    source_key: dewpoint
+    units: degC
+    long_name: Dew point temperature
+    dtype: float32
+    valid_min: -70.0
+    valid_max: 60.0
+
+  - name: wet_bulb_temperature
+    source_key: wetb_temp
+    units: degC
+    long_name: Wet bulb temperature
+    dtype: float32
+    valid_min: -60.0
+    valid_max: 60.0
+
+  - name: relative_humidity
+    source_key: rltv_hum
+    units: "%"
+    long_name: Relative humidity (calculated)
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 100.5          # MIDAS reports a calculated value that can just exceed 100
+
+  - name: wind_speed
+    source_key: wind_speed
+    units: m s-1
+    long_name: Mean wind speed
+    dtype: float32
+    scale: 0.514444           # MIDAS publishes wind in knots
+    valid_min: 0.0
+    valid_max: 120.0
+
+  - name: wind_from_direction
+    source_key: wind_direction
+    units: degree
+    long_name: Mean wind direction (true)
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 360.0
+
+  - name: wind_speed_of_gust
+    source_key: q10mnt_mxgst_spd
+    units: m s-1
+    long_name: Maximum gust speed over the preceding 10 minutes
+    dtype: float32
+    scale: 0.514444           # knots again
+    valid_min: 0.0
+    valid_max: 150.0
+
+  - name: air_pressure_at_sea_level
+    source_key: msl_pressure
+    units: hPa
+    long_name: Air pressure reduced to mean sea level
+    dtype: float32
+    valid_min: 800.0
+    valid_max: 1100.0
+
+  - name: air_pressure
+    source_key: stn_pres
+    units: hPa
+    long_name: Air pressure at station height
+    dtype: float32
+    valid_min: 500.0
+    valid_max: 1100.0
+
+  - name: visibility_in_air
+    source_key: visibility
+    units: m
+    long_name: Horizontal visibility
+    dtype: float32
+    scale: 10.0               # MIDAS publishes visibility in decametres
+    valid_min: 0.0
+    valid_max: 150000.0
+
+  - name: cloud_base_height
+    source_key: cld_base_ht
+    units: m
+    long_name: Height of the lowest cloud base
+    dtype: float32
+    scale: 10.0               # decametres again
+    valid_min: 0.0
+    valid_max: 30000.0
+
+  - name: cloud_amount
+    source_key: cld_ttl_amt_id
+    units: okta
+    long_name: Total cloud amount
+    dtype: float32
+    valid_min: 0.0
+    # 9 is the code for "sky obscured", not nine oktas. Masking it here keeps a
+    # code out of a column that gets averaged; the obscured case comes back as
+    # a null, which is what it means.
+    valid_max: 8.0
+
+  - name: sunshine_duration
+    source_key: drv_hr_sun_dur
+    units: s
+    long_name: Derived sunshine duration over the preceding hour
+    dtype: float32
+    scale: 3600.0             # MIDAS publishes it in hours; dwd/stations_10min uses seconds
+    valid_min: 0.0
+    valid_max: 3600.0
+
+  - name: surface_snow_thickness
+    source_key: snow_depth
+    units: m
+    long_name: Snow depth
+    dtype: float32
+    scale: 0.01               # MIDAS publishes snow depth in cm, as esoh/observations does
+    valid_min: 0.0
+    valid_max: 10.0
+
+  - name: present_weather
+    source_key: prst_wx_id
+    units: "1"
+    long_name: Present weather code (WMO ww)
+    dtype: int16
+    valid_min: 0.0
+    valid_max: 99.0
+
+# Pinned on 2026-10-31 from the local dv-202607 archive; the 104-column table
+# was identical across all 400 files sampled. `scan` reports the fingerprints
+# it sees; re-pin here only after looking at what moved.
+schema_fingerprint: 70f448bc6c8d8e2f
+
+extra:
+  # Which release to read. A MIDAS Open version is frozen, which is why the
+  # resolved version goes in the unit key and no unit needs to be volatile.
+  # `latest` resolves against the live catalogue listing instead.
+  dataset_version: "202607"
+
+  # 1 is the current best version of each observation; 0 is the message as
+  # received. Rows repeating one ob_time are reduced to the highest version_num.
+  qc_version: 1
+
+  # The UK and Ireland, with a margin for Shetland and the Western Isles.
+  # Stations outside it are dropped.
+  bbox: [-11.0, 49.5, 2.5, 61.5]
+
+  # What each file's own `long_name,<column>,<description>,<units>` header line
+  # must say. Every `scale` above encodes one of these assumptions, so pinning
+  # them turns "upstream switched wind to m/s" from a series that is quietly
+  # wrong by a factor of two into a stopped job. Captured on 2026-10-31.
+  expected_units:
+    air_temperature: degC
+    dewpoint: degC
+    wetb_temp: degC
+    rltv_hum: "%"
+    wind_speed: knots
+    wind_direction: deg true
+    q10mnt_mxgst_spd: knots
+    msl_pressure: hPa
+    stn_pres: hPa
+    visibility: decametres
+    cld_base_ht: decametres
+    cld_ttl_amt_id: Oktas
+    drv_hr_sun_dur: hours
+    snow_depth: cm
+
+  # `NA` is the documented missing flag and is handled by the reader. This is
+  # here for the numeric sentinels some MIDAS code columns carry. Applied
+  # before scale/offset.
+  missing_sentinels: []
+
+  # Drop observations that are not on the 3600 s grid rather than snapping them.
+  # Stations reporting once a day do so at 09:00 UTC, which is on the grid.
+  drop_off_cadence: true

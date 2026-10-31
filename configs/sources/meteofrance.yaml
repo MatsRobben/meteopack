@@ -1,0 +1,30 @@
+# Météo-France open climatological data ("données climatologiques de base"),
+# served as per-département gzipped CSV from a public OVH S3 bucket.
+#
+# Keyless: only the near-real-time API needs a token, and this is not it. The
+# bucket answers ListObjectsV2 (`?list-type=2&prefix=...`), which is what
+# `list` reads — no data.gouv.fr round trip and no hard-coded period table.
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: meteofrance
+
+base_url: https://meteofrance.s3.sbg.io.cloud.ovh.net
+
+rate_limit:
+  # Few requests, large responses: ~30 listings and ~90 files per backfill, the
+  # biggest around 16 MB gzipped. Object storage is happy to serve those in
+  # parallel, so the limits are about not monopolising the link rather than
+  # about the server.
+  requests_per_second: 4.0
+  max_workers: 6
+  max_retries: 5
+  backoff_seconds: 1.0
+
+# Open data: nothing to authenticate with.
+credentials_env: []
+
+extra:
+  # A 16 MB gzip over a slow link; the default 60 s is not enough.
+  timeout_seconds: 300
+  user_agent: "meteopack/0.1 (+meteofrance-opendata)"

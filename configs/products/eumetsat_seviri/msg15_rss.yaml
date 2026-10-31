@@ -1,0 +1,183 @@
+# MSG/SEVIRI Level 1.5 rapid-scan imagery (MSG15 RSS), 5-minute scenes,
+# resampled onto the KNMI radar grid.
+#
+# Loads into meteopack.core.config.ProductConfig.
+#
+# `source_key` is a SEVIRI channel name, optionally with the calibration to
+# apply after a colon: "IR_108" takes the default for that channel (reflectance
+# for the solar ones, brightness temperature for the thermal ones) and
+# "IR_108:radiance" pins something else. The units satpy reports and the units
+# declared below are both checked against the calibration, so a channel that
+# silently starts arriving as radiance fails loudly instead of writing an
+# archive of plausible numbers two orders of magnitude out.
+
+source: eumetsat_seviri
+product: msg15_rss
+version: 1
+
+cadence_seconds: 300          # the rapid-scan repeat cycle
+
+# WHY THE RADAR GRID. The point of this product in this repo is a satellite
+# field co-registered with the radar composite, so the two can be stacked as
+# channels of one training sample without a second resampling step. SEVIRI is
+# ~3 km at nadir and ~5.5 km north-south over the Netherlands, so writing it on
+# a 1 km grid is a 5-6x upsample: the stored field has no more information than
+# the instrument measured, it is just already on the grid everything else uses.
+#
+# If you want SEVIRI at its own resolution instead, that wants its own entry in
+# configs/grids.yaml (the `msg_rss_nl_crop` placeholder commented out there) and
+# only this one line changes. Storage is the reason to care: a 765 x 700 float32
+# frame is 2.1 MB, so one channel is 617 MB/day uncompressed and the four below
+# are ~2.4 GB/day before zstd.
+grid_id: knmi_1km_stereo
+
+store:
+  kind: gridded
+  # One frame per inner chunk, one UTC day per shard. See the module docstring
+  # of meteopack.core.store.gridded: 1-frame chunks serve 63-89 warm frame
+  # reads/s against 3-5 for a packed day-sized chunk, and sharding is what keeps
+  # that to one file per day instead of 288.
+  chunks:
+    time: 1
+    y: 765
+    x: 700
+  shard:
+    time: 288                 # 288 x 300 s = one UTC day
+    y: 765
+    x: 700
+  compressor: zstd
+  compression_level: 3
+  partition_by: [year]
+
+raw_layout:
+  archive: none               # upstream ships one zip per scene
+  granularity: day            # ...and `fetch` files them one directory per day
+
+retention:
+  raw:
+    keep: true
+    tier: cold                # hardlinked to the archive, so ~0 extra bytes
+  canonical:
+    keep: true
+  derived:
+    keep: true
+
+# CONSEQUENCE FOR THE PLANNER: one unit is one 5-minute scene, so the 288 units
+# of a UTC day all land in the same 288-frame shard. That is safe only because
+# every unit carries `valid_time` and jobs.plan splits gridded work in `bucket`
+# mode, which keeps a whole shard with one task. The default epoch timeline
+# origin is already midnight-aligned at this cadence, so no `timeline_origin` is
+# needed here -- unlike knmi_radar, whose day starts at 08:05.
+
+variables:
+  # Four channels, not eleven: see the storage note above. This set is the
+  # usual nowcasting minimum -- one solar, one water-vapour, one window, one
+  # short-wave window that separates thin cirrus and low cloud at night.
+  - name: vis006_reflectance
+    source_key: "VIS006"
+    units: "%"
+    long_name: SEVIRI 0.635 um channel bidirectional reflectance (no solar zenith correction)
+    dtype: float32
+    # Not 0..100: satpy's reflectance is radiance over the band-integrated solar
+    # irradiance at 1 AU with no solar zenith correction, so bright convective
+    # tops and sun glint legitimately exceed 100%, and the calibration offset
+    # puts dark ocean a little below 0. The range is here to catch a decode
+    # going wrong, not to clip the physics.
+    valid_min: -5.0
+    valid_max: 150.0
+
+  - name: ir039_brightness_temperature
+    source_key: "IR_039"
+    units: K
+    long_name: SEVIRI 3.9 um channel brightness temperature
+    dtype: float32
+    valid_min: 150.0
+    valid_max: 350.0
+
+  - name: wv062_brightness_temperature
+    source_key: "WV_062"
+    units: K
+    long_name: SEVIRI 6.2 um water vapour channel brightness temperature
+    dtype: float32
+    # This channel sees the upper troposphere and never the warm surface, so
+    # its ceiling is far below the window channels'.
+    valid_min: 150.0
+    valid_max: 300.0
+
+  - name: ir108_brightness_temperature
+    source_key: "IR_108"
+    units: K
+    long_name: SEVIRI 10.8 um window channel brightness temperature
+    dtype: float32
+    valid_min: 150.0
+    valid_max: 350.0
+
+# Hash of extra.known_layouts below, as `scan` reports it (product_fingerprint).
+# Editing that list without re-pinning this makes `parse` fail loudly rather
+# than quietly widening what counts as known.
+schema_fingerprint: d09b927ae2711f38
+
+extra:
+  # Where the scene zips live, one directory per day. Overrides the source
+  # config's base_url.
+  archive_root: /vol/knmimo-nobackup/users/mrobben/data/raw/eumetsat_seviri/msg15_rss
+
+  # How that root is organised.
+  #   year/month/day - the default: <root>/<YYYY>/<MM>/<DD>/<scene>.zip
+  #   flat           - one directory of scenes, which is what a scratch copy
+  #                    and the test fixtures look like.
+  # Loose .nat files are accepted wherever a .zip is.
+  archive_layout: year/month/day
+
+  # Nearest neighbour, and nothing else is accepted. The target grid is finer
+  # than the source everywhere this product is used (1 km against 3 km), and an
+  # interpolator asked to upsample invents gradients between SEVIRI pixels that
+  # the instrument never measured.
+  resampler: nearest
+
+  # Metres, and a real parameter rather than a formality. A SEVIRI pixel is
+  # ~3 km across but ~5.5 km along the meridian at 52 N, because the
+  # sub-satellite point is on the equator. Measured on the KNMI domain: at
+  # 3000 m, 11.8% of the target cells find no neighbour and read back NaN; at
+  # 6000 m, none of them do.
+  radius_of_influence_m: 6000
+
+  # Where a scene zip is extracted so satpy's reader can open the .nat. ~98 MB
+  # per concurrent parse, deleted on the way out, failure included. /dev/shm is
+  # a tmpfs: fast, node-local, and -- unlike a shared /tmp -- it cannot fill up
+  # under somebody else's job. It does count against the task's memory cgroup,
+  # so 4 workers want ~400 MB of headroom on top of the parse itself. Remove
+  # this line on a node without /dev/shm and the system temp directory is used.
+  extract_dir: /dev/shm
+
+  # satpy's flip to the conventional north-up, east-right orientation. The area
+  # definition is flipped with the data, so the resample is correct either way.
+  upper_right_corner: NE
+
+  # Every distinct product layout seen, as `scan` reports it. A layout is the
+  # U-MARF product header fields that describe the product's shape and identity
+  # -- platform, instrument, scan mode, sub-satellite longitude, selected bands,
+  # the selected line/column rectangle and the section sizes -- hashed together.
+  # Times, per-scene quality flags and file sizes that follow from the rectangle
+  # are deliberately not part of it.
+  #
+  # Captured on 2026-10-31 from 42 scenes: one 2024-06 sample, one 2026-06
+  # sample and 40 scenes of the 2026-10-25/27 feed. All one layout:
+  #
+  #   833859d106dda181  MSG4 / SEVI / MSG15 / REDSCN at 9.5 E, all 12 bands,
+  #                     lines 2321-3712 x columns 1-3712, (1392, 3712) VIS/IR
+  #
+  # That is a SAMPLE of two days plus two spot checks. A platform change, a
+  # different rapid-scan rectangle or a band dropped from the dissemination all
+  # move this, and `parse` will refuse such a scene rather than reproject it
+  # into a different footprint without saying so. Run `scan` over the whole
+  # archive before a full backfill and re-pin both this and schema_fingerprint
+  # after checking what moved.
+  known_layouts:
+    - 833859d106dda181
+
+  # Extra per-channel values that mean "no data", applied before any scaling.
+  # Normally empty: satpy already masks the product's own no-data count (0),
+  # which is why the whole off-disc area reads back as NaN. This is the escape
+  # hatch for a feed that smuggles a sentinel through as a plausible number.
+  sentinel_values: {}

@@ -20,6 +20,13 @@ BUILTIN: dict[str, str] = {
     "dwd": "meteopack.sources.dwd:DwdStations",
     "esoh": "meteopack.sources.esoh:EsohObservations",
     "knmi_radar": "meteopack.sources.knmi_radar:KnmiRadar",
+    "belgium": "meteopack.sources.belgium:RmiAws",
+    "dmi": "meteopack.sources.dmi:DmiStations",
+    "ea": "meteopack.sources.ea:EaRainfall",
+    "eumetsat_seviri": "meteopack.sources.eumetsat_seviri:EumetsatSeviri",
+    "knmi_insitu": "meteopack.sources.knmi_insitu:KnmiInsitu",
+    "meteofrance": "meteopack.sources.meteofrance:MeteoFranceStations",
+    "midas": "meteopack.sources.midas:MidasOpen",
 }
 
 
