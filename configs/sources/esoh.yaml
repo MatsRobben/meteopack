@@ -1,0 +1,33 @@
+# EUMETNET E-SOH surface observations, served by MeteoGate
+# (observations.meteogate.eu), an OGC API - EDR service.
+#
+# No key, no registration, JSON in and JSON out. What it is not is an archive:
+# the `observations` collection is a rolling ~24 hour window, and on 2026-10-31
+# its advertised temporal extent was 2026-10-30T19:59:48Z/2026-10-31T20:00:00Z.
+# Anything that falls out of that window is gone for good, so this source is
+# only ever useful on a schedule that runs more often than the window is wide.
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: esoh
+
+base_url: https://observations.meteogate.eu
+
+rate_limit:
+  # One request per station per harvest slot, each a few kB of JSON. The cost
+  # is per request and the service is a free public good with no published
+  # quota, so this is set well below what the server would tolerate rather than
+  # at what it would tolerate. Raise only with a reason.
+  requests_per_second: 4.0
+  max_workers: 4
+  max_retries: 5
+  backoff_seconds: 1.0
+
+# Keyless by design: E-SOH is published as open data.
+credentials_env: []
+
+extra:
+  timeout_seconds: 60
+  user_agent: "meteopack/0.1 (+esoh-meteogate)"
+  # MeteoGate serves more than one collection; this is the surface in-situ one.
+  collection: observations

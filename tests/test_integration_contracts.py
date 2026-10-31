@@ -103,3 +103,39 @@ def test_gridded_round_trip_through_the_real_grid_registry(tmp_path):
     values = ds["rain"].values
     assert np.allclose(values[3], 2.5)
     assert np.isnan(values[0]).all(), "frames nobody wrote read back as NaN"
+
+
+def test_sources_constructed_without_a_session_can_still_fetch(monkeypatch, tmp_path):
+    """A source built with no session must make one, not pass None downstream.
+
+    `DwdStations()` stored `session=None` and handed it straight to fetch_file,
+    which then did `None.get(...)`. The CLI always supplies a session, so this
+    only broke scripts and notebooks — the paths least likely to be tested.
+    """
+    import inspect
+
+    from meteopack.core import http
+    from meteopack.sources.base import RawFile
+    from meteopack.sources.dwd import DwdStations
+    from meteopack.sources.esoh import EsohObservations
+
+    real_sig = inspect.signature(http.fetch_file)
+    captured = {}
+
+    def strict(*args, **kwargs):
+        bound = real_sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        captured["session"] = bound.arguments["session"]
+        return RawFile(Path(bound.arguments["dest"]), "0" * 64, 0, bound.arguments["unit_key"])
+
+    monkeypatch.setattr(http, "fetch_file", strict)
+
+    unit = Unit(key="k", url="https://example.invalid/x.zip",
+                meta={"group": "air_temperature", "subdir": "now", "filename": "x.zip"})
+    DwdStations().fetch(unit, tmp_path)
+    assert captured["session"] is not None, "DwdStations passed a None session"
+
+    captured.clear()
+    esoh_unit = Unit(key="k", url="https://example.invalid/x.json", meta={})
+    EsohObservations().fetch(esoh_unit, tmp_path)
+    assert captured["session"] is not None, "EsohObservations passed a None session"

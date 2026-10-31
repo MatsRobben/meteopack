@@ -543,7 +543,7 @@ class DwdStations:
                 unit.url,
                 dest,
                 unit_key=unit.key,
-                session=self._session,
+                session=self._requests_session(),
                 limiter=self._limiter,
                 retries=rl.max_retries,
                 backoff=rl.backoff_seconds,
