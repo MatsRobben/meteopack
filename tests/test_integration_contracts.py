@@ -265,22 +265,25 @@ def test_scan_group_key_is_read_under_either_name():
     """dwd calls the pin key `group`, meteofrance `token`. Reading only one
     compared nothing for the other while printing a clean bill of health.
     """
+    from types import SimpleNamespace
+
     from meteopack.cli import _compare_schema, _variant_group
 
     assert _variant_group({"group": "wind"}) == "wind"
     assert _variant_group({"token": "latest-2025-2026"}) == "latest-2025-2026"
     assert _variant_group({"fingerprint": "abc"}) is None
 
-    class Cfg:
-        extra = {"schema_fingerprints": {"a": "fp1", "b": "fp2"}}
-        schema_fingerprint = None
+    cfg = SimpleNamespace(
+        extra={"schema_fingerprints": {"a": "fp1", "b": "fp2"}},
+        schema_fingerprint=None,
+    )
 
-    ok, _ = _compare_schema(Cfg(), {"variants": [{"token": "a", "fingerprint": "fp1"}]})
+    ok, _ = _compare_schema(cfg, {"variants": [{"token": "a", "fingerprint": "fp1"}]})
     assert ok == []
 
-    drift, _ = _compare_schema(Cfg(), {"variants": [{"token": "a", "fingerprint": "other"}]})
+    drift, _ = _compare_schema(cfg, {"variants": [{"token": "a", "fingerprint": "other"}]})
     assert drift and "fp1" in drift[0]
 
     # A variant with no group key compared nothing at all; that must be loud.
-    blind, _ = _compare_schema(Cfg(), {"variants": [{"fingerprint": "fp1"}]})
+    blind, _ = _compare_schema(cfg, {"variants": [{"fingerprint": "fp1"}]})
     assert blind and "no group key" in blind[0]

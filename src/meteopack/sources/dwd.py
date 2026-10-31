@@ -45,8 +45,8 @@ from typing import TYPE_CHECKING
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
-from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
 from meteopack.sources.base import RawFile, TimeWindow, Unit
+from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
     import polars as pl
