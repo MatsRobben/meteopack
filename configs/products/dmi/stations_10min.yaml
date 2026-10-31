@@ -17,6 +17,8 @@
 # JSON null is turned into null before any scaling.
 
 source: dmi
+description: >-
+  Danish DMI automatic stations, 10-minute observations from the MetObs API.
 product: stations_10min
 version: 1
 

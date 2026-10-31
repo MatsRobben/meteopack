@@ -19,6 +19,8 @@
 # directly comparable across borders.
 
 source: meteofrance
+description: >-
+  Meteo-France hourly climatological observations for the departements inside the radar domain.
 product: hourly_all
 version: 1
 

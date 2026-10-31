@@ -9,6 +9,8 @@
 # valid_min / valid_max are expressed in the canonical units below.
 
 source: ea
+description: >-
+  England & Wales Environment Agency tipping-bucket rain gauges, 15-minute rainfall.
 product: rainfall_15min
 version: 1
 

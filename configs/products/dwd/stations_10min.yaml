@@ -9,6 +9,8 @@
 # valid_max are expressed in the canonical units below (i.e. post-scale).
 
 source: dwd
+description: >-
+  German DWD automatic stations, 10-minute observations across five variable groups.
 product: stations_10min
 version: 1
 

@@ -16,6 +16,8 @@
 # series really does reach 35.9 degC (2022-07-19, verified live).
 
 source: belgium
+description: >-
+  Belgian RMI automatic weather stations, 10-minute observations (open synoptic network).
 product: aws_10min
 version: 1
 

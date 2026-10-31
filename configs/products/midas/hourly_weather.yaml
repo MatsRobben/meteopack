@@ -11,6 +11,8 @@
 # valid_max are expressed in the canonical units below (i.e. post-scale).
 
 source: midas
+description: >-
+  UK Met Office MIDAS-Open hourly surface observations, via CEDA (needs a CEDA account).
 product: hourly_weather
 version: 1
 

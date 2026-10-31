@@ -55,6 +55,7 @@ class Manifest:
     store_id: str
     layer: str
     kind: str
+    description: str | None
     config_hash: str
     code_version: str
     created_at: str
@@ -68,8 +69,10 @@ class Manifest:
     @classmethod
     def new(cls, store_id: str, layer: str, kind: str, cfg: BaseModel | dict, **kw) -> Manifest:
         now = datetime.now(UTC).isoformat(timespec="seconds")
+        described = cfg.model_dump() if isinstance(cfg, BaseModel) else cfg
         return cls(
             store_id=store_id, layer=layer, kind=kind,
+            description=kw.pop("description", None) or described.get("description"),
             config_hash=config_hash(cfg), code_version=code_version(),
             created_at=now, updated_at=now, **kw,
         )

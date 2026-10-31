@@ -114,6 +114,9 @@ class ProductConfig(BaseModel):
     source: str
     product: str
     version: int = 1
+    #: One line, for a human opening the data root. Copied into the store's
+    #: manifest so the store says what it is without the config beside it.
+    description: str | None = None
     cadence_seconds: Annotated[int, Field(gt=0)] = 600
     grid_id: str | None = None
     variables: list[Variable] = Field(default_factory=list)
@@ -153,6 +156,7 @@ class DeriveConfig(BaseModel):
 
     name: str
     version: int = 1
+    description: str | None = None
     inputs: list[str]
     grid_id: str
     cadence_seconds: Annotated[int, Field(gt=0)] = 300

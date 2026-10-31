@@ -12,6 +12,8 @@
 # lists both.
 
 source: knmi_radar
+description: >-
+  KNMI real-time corrected radar rainfall over the Netherlands, 5-minute accumulations on the 765x700 national grid.
 product: rtcor_5min
 version: 1
 

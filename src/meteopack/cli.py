@@ -73,6 +73,7 @@ class Context:
     """Everything a stage needs, resolved once."""
 
     def __init__(self, args: argparse.Namespace) -> None:
+        from meteopack.core import readme
         from meteopack.core.catalog import Catalog
         from meteopack.core.config import data_root
         from meteopack.jobs import plan as planning
@@ -84,6 +85,10 @@ class Context:
         self.catalog = Catalog(self.root)
         self.window = parse_window(args.window)
         self._src = None
+        # The data root outlives the checkout that made it, so it carries its
+        # own explanation of what `raw/`, `canonical/`, `derived/` and
+        # `catalog/` hold. Best effort, and never read back.
+        readme.write(self.root)
 
     @property
     def src(self):
@@ -335,16 +340,69 @@ def _coalesce_observations(df):
     return merged
 
 
+def _files_for_window(ctx, files: list[Path]) -> tuple[list[Path], int]:
+    """Drop raw files that cannot contribute to `--window`.
+
+    Without this, `pack --window <one day>` still reads the whole archive:
+    packing one day of SEVIRI decompressed and reprojected all 576 scenes on
+    disk (25 GB) to write 288 frames, and timed out. The window was honoured
+    only when sizing the time axis, never when choosing what to open.
+
+    Only gridded stores are filtered, and that restriction is the point. A
+    points partition is *replaced* on write, not appended to (see
+    `core.store.points`), so packing a subset of a partition's files would
+    silently drop the rest of the partition - a windowed pack of one month
+    would delete the other eleven. Gridded frames land in their own slots, so a
+    subset writes a subset and touches nothing else.
+
+    A file is kept unless it is known to fall outside the window. The source
+    says what span a file covers via the optional `span_of`; whatever it cannot
+    date is kept, because dropping data that might be in range is far worse
+    than reading a file that turns out not to be.
+    """
+    if not ctx.args.window or ctx.cfg.store.kind != "gridded":
+        return files, 0
+
+    span_of = getattr(ctx.src, "span_of", None)
+    if span_of is None:
+        return files, 0
+
+    start, end = ctx.window.start, ctx.window.end
+    keep: list[Path] = []
+    undated = 0
+    for path in files:
+        try:
+            span = span_of(path)
+        except Exception:  # noqa: BLE001 - an undatable file is kept, not fatal
+            span = None
+        if span is None:
+            undated += 1
+            keep.append(path)
+            continue
+        first, last = span
+        if last >= start and first < end:
+            keep.append(path)
+    return keep, undated
+
+
 def stage_pack(ctx: Context) -> int:
     from meteopack.core.store import manifest
     from meteopack.jobs import packing
 
-    files = ctx.raw_files()
-    if not files:
+    found = ctx.raw_files()
+    if not found:
         print(f"no raw files under {ctx.raw_root}; run `meteopack fetch {ctx.cfg.source}` first")
         return 1
+    files, undated = _files_for_window(ctx, found)
+    if not files:
+        print(f"none of the {len(found)} raw file(s) under {ctx.raw_root} fall in the window")
+        return 1
     workers = ctx.args.workers or min(len(files), len(os.sched_getaffinity(0)))
-    print(f"packing {len(files)} raw file(s) with {workers} worker(s)")
+    skipped = len(found) - len(files)
+    note = f" ({skipped} outside the window)" if skipped else ""
+    if undated:
+        note += f" ({undated} could not be dated and are packed anyway)"
+    print(f"packing {len(files)} raw file(s) with {workers} worker(s){note}")
     if ctx.args.dry_run:
         return 0
 
@@ -519,12 +577,43 @@ def stage_validate(ctx: Context) -> int:
 
 
 def stage_catalog(ctx: Context) -> int:
+    """What is in this data root, and what the pipeline thinks it has done.
+
+    The directory names say which layer a store belongs to, not what is in it,
+    so the stores are listed with the description from their own manifest.
+    """
+    import json
+
     cat = ctx.catalog
     files, stores, jobs = cat.files(), cat.stores(), cat.jobs()
-    print(f"catalog at {cat.root}")
-    print(f"  files : {len(files)}")
-    print(f"  stores: {len(stores)}")
-    print(f"  jobs  : {len(jobs)}")
+    print(f"data root {ctx.root}")
+    print("  (see README.md there for what each directory holds)")
+
+    print("\nstores")
+    rows = []
+    for layer in ("canonical", "derived"):
+        base = ctx.root / layer
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("manifest.json")):
+            try:
+                man = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            rows.append((layer, man.get("store_id", path.parent.name),
+                         man.get("kind", "?"), man.get("n_records", 0),
+                         man.get("description") or ""))
+    if not rows:
+        print("  (none yet - run `meteopack pack <source>`)")
+    for layer, store_id, kind, n, desc in rows:
+        print(f"  {layer:9s} {store_id:34s} {kind:8s} {n:>12,} records")
+        if desc:
+            print(f"            {desc}")
+
+    print(f"\nbookkeeping at {cat.root}")
+    print(f"  files : {len(files):>6}  raw files fetched")
+    print(f"  stores: {len(stores):>6}  store builds recorded")
+    print(f"  jobs  : {len(jobs):>6}  units of work")
     if len(jobs):
         counts = jobs.group_by("stage", "status").len().sort("stage")
         for row in counts.iter_rows(named=True):

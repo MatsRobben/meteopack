@@ -17,6 +17,8 @@
 #   rg  is a mean RATE in mm/h over the interval, not an interval total
 
 source: knmi_insitu
+description: >-
+  KNMI Dutch automatic weather stations, 10-minute observations.
 product: obs_10min
 version: 1
 

@@ -1,5 +1,7 @@
 # Dense (time, station) matrices from the DWD canonical points store.
 name: dwd_station_matrix
+description: >-
+  Dense time x station matrix of DWD observations: one row per timestep, one column per station, ready to load as a tensor.
 version: 1
 inputs: ["dwd/stations_10min/v1"]
 grid_id: knmi_1km_stereo

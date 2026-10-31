@@ -928,6 +928,21 @@ class EumetsatSeviri:
 
     # --------------------------------------------------------------------- scan
 
+    def span_of(self, path: Path | str) -> tuple[datetime, datetime] | None:
+        """The slot one scene file covers, read off its own filename.
+
+        Lets `pack --window` skip scenes it cannot need: packing a single day
+        used to decompress and reproject every scene on disk. The stamp is the
+        end of the repeat cycle rather than the slot, so the span is widened by
+        one cycle on each side instead of trusting it to the second - the point
+        is to skip the other 99%, not to be exact at the boundary.
+        """
+        when = scene_time(Path(path).name)
+        if when is None:
+            return None
+        pad = timedelta(minutes=15)
+        return (when - pad, when + pad)
+
     def scan(self, raw_files: Sequence[RawFile]) -> dict:
         """Report every distinct product layout across `raw_files`.
 

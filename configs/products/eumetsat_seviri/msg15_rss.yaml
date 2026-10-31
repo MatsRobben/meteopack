@@ -12,6 +12,8 @@
 # archive of plausible numbers two orders of magnitude out.
 
 source: eumetsat_seviri
+description: >-
+  MSG SEVIRI rapid-scan imagery, reprojected onto the radar grid; one frame per 5-minute repeat cycle.
 product: msg15_rss
 version: 1
 

@@ -17,6 +17,8 @@
 # are in the canonical units below (i.e. post-scale).
 
 source: esoh
+description: >-
+  Pan-European real-time station observations via MeteoGate/E-SOH; ~24h rolling window upstream, so this store is only as deep as it has been harvested.
 product: observations
 version: 1
 

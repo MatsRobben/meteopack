@@ -143,14 +143,20 @@ def _naive_utc(value: datetime | None) -> datetime | None:
 
 
 def default_writer_id() -> str:
-    """Identify this writer's shard: host, pid, Slurm array task, and a nonce.
+    """Identify this writer's shard: when, host, pid, Slurm array task, nonce.
 
     The nonce matters: two :class:`Catalog` objects in one process (threads, or
     a re-run after a crash) must not share a shard path, or they would clobber
     each other's rewrites.
+
+    The timestamp leads so that a plain `ls` of the table directory is in
+    chronological order. These names are otherwise unreadable, and a directory
+    of a few hundred opaque names is the first thing that makes the catalog
+    look like something has gone wrong.
     """
     task = os.environ.get("SLURM_ARRAY_TASK_ID") or os.environ.get("SLURM_PROCID") or "0"
-    return f"{socket.gethostname()}-{os.getpid()}-{task}-{uuid.uuid4().hex[:8]}"
+    when = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    return f"{when}-{socket.gethostname()}-{os.getpid()}-t{task}-{uuid.uuid4().hex[:6]}"
 
 
 def job_key(stage: str, unit_key: str) -> str:

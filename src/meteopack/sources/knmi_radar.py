@@ -545,6 +545,25 @@ class KnmiRadar:
         logger.info("knmi_radar: %d daily tar(s) overlap %s..%s", len(out), start, end)
         return out
 
+    def span_of(self, path: Path | str) -> tuple[datetime, datetime] | None:
+        """The time range one tar covers, read off its own filename.
+
+        Lets `pack --window` skip tars it cannot need instead of untarring the
+        whole archive for one day. `None` means "cannot tell", and the caller
+        packs the file rather than risk dropping it.
+        """
+        m = ARCHIVE_RE.match(Path(path).name)
+        if not m:
+            return None
+        first = _yyyymmdd(m.group("from_date"))
+        offset = _time_of_day(m.group("from_time"), Path(path).name)
+        if offset is not None:
+            first += offset
+        end_offset = _time_of_day(m.group("to_time"), Path(path).name)
+        last = _yyyymmdd(m.group("to_date"))
+        last += end_offset if end_offset is not None else timedelta(days=1)
+        return (first, max(last, first))
+
     def _unit_for(
         self, m: re.Match[str], path: Path, cfg: ProductConfig, day_start: timedelta
     ) -> Unit:
