@@ -40,6 +40,7 @@ from __future__ import annotations
 import os
 import shutil
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -251,19 +252,47 @@ def initialise(
     return path
 
 
+@dataclass(frozen=True, slots=True)
+class WriteResult:
+    """What a write actually did, as opposed to what it was handed.
+
+    `written` used to be assumed equal to the number of frames passed in, and
+    the two diverge in the one case that matters: a store's time axis is fixed
+    when it is created, so packing a later window into an existing store drops
+    every frame past the end of the axis. Packing four days one day at a time
+    reported "wrote 576 frames" three times and kept 288 - two thirds of the
+    data gone, with nothing in the output to say so. Callers must look at
+    `outside` rather than counting their input.
+    """
+
+    path: Path
+    written: int = 0
+    outside: int = 0
+    off_cadence: int = 0
+
+    def __fspath__(self) -> str:
+        return str(self.path)
+
+
 def write(
     ds: xr.Dataset,
     cfg: ProductConfig,
     root: str | os.PathLike[str],
     *,
     layer: Layer = DEFAULT_LAYER,
-) -> Path:
+) -> WriteResult:
     """Scatter ``ds`` onto the store's time axis. Idempotent and order-independent.
 
-    Frames land at ``Timeline.index_of(ds.time)``; off-cadence and out-of-range
-    frames are dropped, a repeated timestamp resolves last-wins, and only the
-    rows actually touched are written. The concurrency rule is in the module
-    docstring: disjoint shard-aligned regions, or a single writer.
+    Frames land at ``Timeline.index_of(ds.time)``; a repeated timestamp
+    resolves last-wins, and only the rows actually touched are written. The
+    concurrency rule is in the module docstring: disjoint shard-aligned
+    regions, or a single writer.
+
+    Frames that do not fall on the axis are *counted and returned*, not raised
+    on: one worker holding a stray frame should not fail a whole pack, and the
+    caller is the only one that knows whether it is a stray or a window that
+    the store was never sized for. `meteopack pack` fails on a non-zero
+    `outside`.
     """
     group = _open(cfg.store_id, root, layer, "r+")
     path = store_path(root, cfg.store_id, layer=layer)
@@ -276,10 +305,12 @@ def write(
     if unknown:
         raise ValueError(f"{cfg.store_id} has no array for {unknown}; present: {sorted(present)}")
 
-    rows = timeline.index_of(ds[TIME_NAME].values)
+    stamps = ds[TIME_NAME].values
+    rows = timeline.index_of(stamps)
     keep = rows >= 0
+    n_outside, n_off = _classify_misses(stamps, rows, timeline)
     if not keep.any():
-        return path
+        return WriteResult(path, 0, n_outside, n_off)
 
     # Sorting makes the kept rows contiguous however the input was ordered, so a
     # day of frames is one region write rather than 288. Stable, so a timestamp
@@ -299,7 +330,97 @@ def write(
         block = block[keep]
         for run, picks in zip(np.split(hit, breaks), np.split(order, breaks), strict=True):
             array[int(run[0]) : int(run[-1]) + 1] = block[picks]
-    return path
+    return WriteResult(path, int(np.unique(hit).size), n_outside, n_off)
+
+
+def _classify_misses(
+    stamps: np.ndarray, rows: np.ndarray, timeline: Timeline
+) -> tuple[int, int]:
+    """Split the rejected frames into "past the end of the axis" and "off grid".
+
+    They are different problems with different fixes - one needs a bigger
+    store, the other means the data is not on the cadence it claims - and a
+    single "dropped" count would send you looking in the wrong place.
+    """
+    missed = rows < 0
+    if not missed.any():
+        return 0, 0
+    when = np.asarray(stamps, dtype="datetime64[ns]").astype("int64")[missed]
+    start = timeline.start_ns
+    end = start + timeline.step_ns * len(timeline)
+    outside = int(((when < start) | (when >= end)).sum())
+    return outside, int(missed.sum()) - outside
+
+
+def extend(
+    cfg: ProductConfig,
+    root: str | os.PathLike[str],
+    timeline: Timeline,
+    *,
+    layer: Layer = DEFAULT_LAYER,
+) -> int:
+    """Grow an existing store's time axis forward to cover `timeline`.
+
+    A gridded store is created with its whole axis so that every write is a
+    region write into space that already exists. That is right for a backfill
+    planned in one go and wrong for the operational case, where tomorrow does
+    not exist yet: without this, packing day N+1 into a store sized for day N
+    silently discarded the frames.
+
+    Only forward growth is supported, and only on the cadence the store already
+    has. Zarr appends on the first dimension, so existing data keeps its index
+    and nothing already written moves. Extending by whole shards is not
+    required for correctness here - the new region is untouched until something
+    writes it - but it is what keeps a half-written shard from being shared by
+    two jobs, so the growth is rounded up to a shard boundary.
+
+    Returns the number of time steps added (0 if the axis already covered it).
+    """
+    group = _open(cfg.store_id, root, layer, "r+")
+    current = _timeline_of(group)
+    if int(timeline.cadence.total_seconds()) != int(current.cadence.total_seconds()):
+        raise ValueError(
+            f"{cfg.store_id} has cadence {current.cadence}, asked to extend at {timeline.cadence}"
+        )
+    if timeline.start_ns < current.start_ns:
+        raise ValueError(
+            f"{cfg.store_id} starts at {current.start}; extending backwards to "
+            f"{timeline.start} would move every frame already written. Rebuild instead."
+        )
+    if (timeline.start_ns - current.start_ns) % current.step_ns:
+        raise ValueError(
+            f"{timeline.start} is not on {cfg.store_id}'s {current.cadence} grid"
+        )
+
+    have = len(current)
+    need = int((timeline.start_ns - current.start_ns) // current.step_ns) + len(timeline)
+    if need <= have:
+        return 0
+
+    arrays = _data_arrays(group)
+    step = 1
+    if arrays:
+        shards = group[arrays[0]].shards
+        if shards:
+            step = int(shards[0])
+    need = -(-need // step) * step  # whole shards
+
+    for name in arrays:
+        array = group[name]
+        array.resize((need, *array.shape[1:]))
+
+    stamps = (
+        current.start_ns + np.arange(need, dtype="int64") * current.step_ns
+    ) // _NS_PER_S
+    time = group[TIME_NAME]
+    time.resize((need,))
+    time[:] = stamps
+    # `time_end` is the half-open end and timezone-aware, exactly as
+    # `initialise` writes it: `_timeline_of` reads it straight back into a
+    # Timeline, which rejects a naive or inclusive value.
+    end = datetime.fromtimestamp(int(stamps[-1]), UTC) + current.cadence
+    group.attrs.update({"n_times": need, "time_end": end.isoformat()})
+    return need - have
 
 
 def _bounds(times: np.ndarray, time_range: tuple[datetime, datetime] | None) -> tuple[int, int]:

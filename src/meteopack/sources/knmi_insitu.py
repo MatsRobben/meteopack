@@ -75,9 +75,15 @@ if TYPE_CHECKING:  # keep polars and xarray off the import path of `meteopack.so
 logger = logging.getLogger(__name__)
 
 #: The local archive of daily tars. A path, not an endpoint: see the docstring.
-ARCHIVE_DIR = (
+#:
+#: The real location is site-specific, so it comes from `$KNMI_INSITU_ARCHIVE`
+#: (the source config sets `base_url` from the same variable). The literal
+#: below is only the fallback for the machine this was developed on - without
+#: it, a checkout here would need the variable set before anything ran at all.
+ARCHIVE_DIR = os.environ.get(
+    "KNMI_INSITU_ARCHIVE",
     "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi/"
-    "10-minute-in-situ-meteorological-observations_tar"
+    "10-minute-in-situ-meteorological-observations_tar",
 )
 
 #: `KMDS__OPER_P___10M_OBS_L2__<from>T000000_<to>T000000_<counter>.tar`.

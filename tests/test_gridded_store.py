@@ -337,3 +337,79 @@ def test_store_path_follows_the_layer_layout(tmp_path: Path):
         tmp_path / "derived/knmi/test/v1"
     )
     assert os.fspath(gridded.store_path(str(tmp_path), "a/b/v2")).endswith("canonical/a/b/v2")
+
+
+# --------------------------------------------------------------- growing axis
+
+
+def test_write_reports_frames_the_store_refused(tmp_path: Path):
+    """A frame past the end of the axis is dropped; saying so is the whole point.
+
+    `write` used to return only a path, so callers counted their input and
+    reported it as written. Packing four days one day at a time printed "wrote
+    576 frames" three times while keeping 288.
+    """
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+
+    inside = gridded.write(day_dataset(timeline, 1), cfg, tmp_path)
+    assert (inside.written, inside.outside, inside.off_cadence) == (FRAMES_PER_DAY, 0, 0)
+
+    beyond = timeline.values()[-1] + np.timedelta64(CADENCE_SECONDS, "s") * np.arange(1, 4)
+    result = gridded.write(dataset(beyond, block(np.arange(3))), cfg, tmp_path)
+    assert (result.written, result.outside) == (0, 3)
+
+    half = timeline.values()[0] + np.timedelta64(CADENCE_SECONDS // 2, "s")
+    ragged = gridded.write(dataset(np.array([half]), block(np.arange(1))), cfg, tmp_path)
+    assert (ragged.written, ragged.outside, ragged.off_cadence) == (0, 0, 1)
+
+
+def test_extending_the_axis_keeps_every_frame_already_written(tmp_path: Path):
+    """Day-by-day packing must equal packing the whole window at once.
+
+    This is the operational case: tomorrow does not exist when today is packed.
+    Before `extend`, the second day and everything after it was written into a
+    store that had no room for it and vanished without a word.
+    """
+    cfg, timeline = make_cfg(), make_timeline()
+    one_day = Timeline(start=timeline.start, end=timeline.start + timedelta(days=1),
+                       cadence=timeline.cadence)
+    gridded.initialise(cfg, tmp_path, one_day)
+
+    for day in range(DAYS):
+        grown = Timeline(start=timeline.start,
+                         end=timeline.start + timedelta(days=day + 1),
+                         cadence=timeline.cadence)
+        gridded.extend(cfg, tmp_path, grown)
+        result = gridded.write(day_dataset(timeline, day), cfg, tmp_path)
+        assert result.outside == 0, f"day {day} did not fit the extended axis"
+        assert result.written == FRAMES_PER_DAY
+
+    whole = tmp_path / "whole"
+    gridded.initialise(cfg, whole, timeline)
+    for day in range(DAYS):
+        gridded.write(day_dataset(timeline, day), cfg, whole)
+
+    grown_arr = gridded._open(cfg.store_id, tmp_path, "canonical", "r")["rain"]
+    whole_arr = gridded._open(cfg.store_id, whole, "canonical", "r")["rain"]
+    n = len(timeline)
+    np.testing.assert_array_equal(grown_arr[:n], whole_arr[:n])
+    assert np.isfinite(np.asarray(grown_arr[:n])).sum() == n * NY * NX
+
+
+def test_extend_refuses_to_move_frames_that_are_already_written(tmp_path: Path):
+    """Growing backwards would reindex every existing frame. Rebuild instead."""
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+
+    earlier = Timeline(start=timeline.start - timedelta(days=1), end=timeline.end,
+                       cadence=timeline.cadence)
+    with pytest.raises(ValueError, match="extending backwards"):
+        gridded.extend(cfg, tmp_path, earlier)
+
+    assert gridded.extend(cfg, tmp_path, timeline) == 0
+
+    off_grid = Timeline(start=timeline.start + timedelta(seconds=CADENCE_SECONDS // 2),
+                        end=timeline.end + timedelta(days=1), cadence=timeline.cadence)
+    with pytest.raises(ValueError, match="not on"):
+        gridded.extend(cfg, tmp_path, off_grid)

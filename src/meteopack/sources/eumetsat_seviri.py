@@ -83,6 +83,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import zipfile
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -1012,11 +1013,36 @@ def _native_path(
     if path.suffix.lower() != _ZIP_SUFFIX:
         yield path
         return
-    directory = Path(extract_dir).expanduser() if extract_dir else None
-    if directory is not None:
-        directory.mkdir(parents=True, exist_ok=True)
+    directory = _scratch_dir(extract_dir)
     with TemporaryDirectory(prefix="seviri-", dir=directory) as temp:
         yield Path(temp) / _extract_native(path, Path(temp))
+
+
+def _scratch_dir(extract_dir: str | os.PathLike[str] | None) -> Path | None:
+    """Where to put the ~98 MB extraction, falling back rather than failing.
+
+    It wants to be node-local and fast: on this cluster `/tmp` is small and
+    shared and `/dev/shm` is the right answer, which is why the config names
+    one. But a configured directory that does not exist on *this* machine is a
+    portability bug, not a reason to abort a backfill, so an unusable choice
+    degrades to whatever `tempfile` would have picked and says so once.
+    """
+    if not extract_dir:
+        return None
+    directory = Path(extract_dir).expanduser()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / f".meteopack-probe-{os.getpid()}"
+        probe.touch()
+        probe.unlink()
+    except OSError as exc:
+        logger.warning(
+            "eumetsat_seviri: extract_dir %s is not usable (%s); falling back to %s. "
+            "Set extract_dir (or $METEOPACK_SCRATCH) to node-local fast storage.",
+            directory, exc, tempfile.gettempdir(),
+        )
+        return None
+    return directory
 
 
 def _extract_native(path: Path, into: Path) -> str:

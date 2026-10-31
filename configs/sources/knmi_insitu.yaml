@@ -11,7 +11,7 @@
 
 name: knmi_insitu
 
-base_url: file:///vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi/10-minute-in-situ-meteorological-observations_tar
+base_url: file://${KNMI_INSITU_ARCHIVE}
 
 rate_limit:
   # Nothing here is rate limited: a unit is a local hardlink, not a request.

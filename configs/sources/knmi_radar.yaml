@@ -10,7 +10,7 @@
 
 name: knmi_radar
 
-base_url: /vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi/nl_rdr_data_rtcor_5m_tar
+base_url: ${KNMI_RADAR_ARCHIVE}
 
 rate_limit:
   # There is no remote host to be polite to. What this still decides is the

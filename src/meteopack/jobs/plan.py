@@ -7,6 +7,9 @@ and lets a preempted job cost at most its in-flight unit.
 """
 from __future__ import annotations
 
+import logging
+import os
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +24,8 @@ from meteopack.sources.base import Source, TimeWindow, Unit
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+logger = logging.getLogger(__name__)
+
 CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs"
 
 
@@ -28,11 +33,57 @@ def config_dir(override: str | Path | None = None) -> Path:
     return Path(override) if override else CONFIG_DIR
 
 
+#: `${NAME}` or `${NAME:-fallback}`, the shell spelling, so a config can give a
+#: default without the reader needing one baked in.
+_VAR_RE = re.compile(r"\$\{(\w+)(:-([^}]*))?\}")
+
+
+def _substitute(m: re.Match[str]) -> str:
+    value = os.environ.get(m.group(1))
+    if value:
+        return value
+    return m.group(3) if m.group(2) is not None else m.group(0)
+
+
+def _expand(value):
+    """Expand `${VAR}`, `${VAR:-default}` and `~` in every string in a config.
+
+    Configs otherwise carry one machine's absolute paths - the archive roots,
+    the scratch directory - and a checkout is useless on any other machine
+    until someone finds and edits them. `${VAR}` keeps the config declarative
+    while letting the site supply the path.
+
+    An undefined variable is left as written rather than expanded to the empty
+    string: `${ARCHIVE}/knmi` silently becoming `/knmi` is how a job ends up
+    reading someone else's directory, or an empty one.
+    """
+    if isinstance(value, str):
+        out = _VAR_RE.sub(_substitute, value)
+        out = os.path.expanduser(out)
+        if "${" in out:
+            missing = sorted(set(_VAR_RE.findall(out)))
+            logger.warning(
+                "config refers to undefined environment variable(s) %s in %r",
+                ", ".join(n for n, _, _ in missing), value,
+            )
+        return out
+    if isinstance(value, dict):
+        return {k: _expand(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand(v) for v in value]
+    return value
+
+
+def load_yaml(path: Path) -> dict:
+    """Read a config file, with environment variables expanded."""
+    return _expand(yaml.safe_load(path.read_text()))
+
+
 def load_source_config(name: str, *, configs: str | Path | None = None) -> SourceConfig:
     path = config_dir(configs) / "sources" / f"{name}.yaml"
     if not path.exists():
         raise FileNotFoundError(f"no source config for {name!r}: {path}")
-    return SourceConfig(**yaml.safe_load(path.read_text()))
+    return SourceConfig(**load_yaml(path))
 
 
 def load_product_config(
@@ -56,7 +107,7 @@ def load_product_config(
             names = ", ".join(p.stem for p in found) or "(none)"
             raise ValueError(f"source {source!r} has products [{names}]; name one explicitly")
         path = found[0]
-    return ProductConfig(**yaml.safe_load(path.read_text()))
+    return ProductConfig(**load_yaml(path))
 
 
 def is_volatile(unit: Unit, cfg: ProductConfig) -> bool:

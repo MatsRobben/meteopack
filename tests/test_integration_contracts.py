@@ -287,3 +287,41 @@ def test_scan_group_key_is_read_under_either_name():
     # A variant with no group key compared nothing at all; that must be loud.
     blind, _ = _compare_schema(cfg, {"variants": [{"fingerprint": "fp1"}]})
     assert blind and "no group key" in blind[0]
+
+
+def test_configs_carry_no_machine_specific_absolute_paths():
+    """A path baked into a config makes the checkout useless elsewhere.
+
+    Every site-specific location goes through `${VAR}` or `${VAR:-default}`,
+    expanded when the config is loaded, so one env file is the only thing a new
+    machine has to supply.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "configs"
+    offenders = []
+    for path in sorted(root.rglob("*.yaml")):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            bare = re.sub(r"\$\{\w+:-[^}]*\}", "", line.split("#", 1)[0])
+            if "/vol/" in bare or "/dev/shm" in bare or "/home/" in bare:
+                offenders.append(f"{path.relative_to(root)}:{n}: {line.strip()}")
+    assert not offenders, "machine-specific paths in configs:\n" + "\n".join(offenders)
+
+
+def test_config_expansion_leaves_undefined_variables_alone():
+    """`${ARCHIVE}/knmi` collapsing to `/knmi` would read the wrong directory."""
+    import os
+
+    from meteopack.jobs.plan import _expand
+
+    os.environ.pop("METEOPACK_NOT_SET", None)
+    assert _expand("${METEOPACK_NOT_SET}/x") == "${METEOPACK_NOT_SET}/x"
+    assert _expand("${METEOPACK_NOT_SET:-/fallback}/x") == "/fallback/x"
+    os.environ["METEOPACK_TEST_VAR"] = "/real"
+    try:
+        assert _expand("${METEOPACK_TEST_VAR:-/fallback}/x") == "/real/x"
+        assert _expand({"a": ["${METEOPACK_TEST_VAR}"]}) == {"a": ["/real"]}
+        assert _expand(7) == 7
+    finally:
+        del os.environ["METEOPACK_TEST_VAR"]

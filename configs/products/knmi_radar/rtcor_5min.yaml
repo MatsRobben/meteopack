@@ -86,7 +86,7 @@ schema_fingerprint: 3f1957ea87723157
 
 extra:
   # Where the daily tars live. Overrides the source config's base_url.
-  archive_root: /vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi/nl_rdr_data_rtcor_5m_tar
+  archive_root: ${KNMI_RADAR_ARCHIVE}
 
   # A KNMI radar day runs 08:05 UTC to 08:00 UTC the next day -- 288 frames,
   # the first five minutes after the nominal 08:00 start. This is the fallback

@@ -122,7 +122,7 @@ schema_fingerprint: d09b927ae2711f38
 extra:
   # Where the scene zips live, one directory per day. Overrides the source
   # config's base_url.
-  archive_root: /vol/knmimo-nobackup/users/mrobben/data/raw/eumetsat_seviri/msg15_rss
+  archive_root: ${METEOPACK_DATA_ROOT}/raw/eumetsat_seviri/msg15_rss
 
   # How that root is organised.
   #   year/month/day - the default: <root>/<YYYY>/<MM>/<DD>/<scene>.zip
@@ -150,7 +150,7 @@ extra:
   # under somebody else's job. It does count against the task's memory cgroup,
   # so 4 workers want ~400 MB of headroom on top of the parse itself. Remove
   # this line on a node without /dev/shm and the system temp directory is used.
-  extract_dir: /dev/shm
+  extract_dir: ${METEOPACK_SCRATCH:-/dev/shm}
 
   # satpy's flip to the conventional north-up, east-right orientation. The area
   # definition is flipped with the data, so the resample is correct either way.

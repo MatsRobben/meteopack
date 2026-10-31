@@ -416,10 +416,28 @@ def stage_pack(ctx: Context) -> int:
             gridded.initialise(ctx.cfg, ctx.root, timeline)
             print(f"initialised {len(timeline)} time steps "
                   f"{timeline.start:%Y-%m-%dT%H:%M}..{timeline.end:%Y-%m-%dT%H:%M}")
+        else:
+            # The axis is fixed at creation, so an operational run that packs
+            # one day at a time would otherwise write every day after the first
+            # into nothing at all.
+            added = gridded.extend(ctx.cfg, ctx.root, timeline)
+            if added:
+                print(f"extended the time axis by {added} steps "
+                      f"to cover {timeline.end:%Y-%m-%dT%H:%M}")
         results = packing.run(_pack_tasks(ctx, files), packing.write_gridded, workers=workers)
         frames = sum(r.get("frames", 0) for r in results)
+        outside = sum(r.get("outside", 0) for r in results)
+        off_cadence = sum(r.get("off_cadence", 0) for r in results)
         errors = [r for r in results if r.get("error")]
         print(f"wrote {frames} frames from {len(results) - len(errors)} file(s)")
+        if off_cadence:
+            print(f"  {off_cadence} frame(s) were not on the "
+                  f"{ctx.cfg.cadence_seconds}s cadence and were dropped")
+        if outside:
+            print(f"  ERROR {outside} frame(s) fall outside the store's time axis "
+                  f"and were NOT written. The store covers "
+                  f"{timeline.start:%Y-%m-%dT%H:%M}..{timeline.end:%Y-%m-%dT%H:%M}.")
+            errors.append({"path": str(store), "error": f"{outside} frames outside the axis"})
         n_records = frames
     else:
         import io

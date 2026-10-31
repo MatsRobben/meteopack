@@ -70,17 +70,22 @@ def parse_points(task: PackTask) -> dict[str, Any]:
 
 
 def write_gridded(task: PackTask) -> dict[str, Any]:
-    """Parse one raw file and write it straight into the store."""
+    """Parse one raw file and write it straight into the store.
+
+    Reports what the store took, not what the file held. Those differ whenever
+    a frame falls outside the store's fixed time axis, and counting the input
+    turned a two-thirds data loss into a cheerful "wrote 576 frames".
+    """
     from meteopack.core.store import gridded
 
     src, cfg = _load(task)
     ds = src.parse(_raw_file(task.raw_path), cfg)
     if ds is None or not ds.sizes.get("time"):
         return {"path": task.raw_path, "frames": 0}
-    gridded.write(ds, cfg, Path(task.root))
-    n = int(ds.sizes["time"])
+    result = gridded.write(ds, cfg, Path(task.root))
     del ds
-    return {"path": task.raw_path, "frames": n}
+    return {"path": task.raw_path, "frames": result.written,
+            "outside": result.outside, "off_cadence": result.off_cadence}
 
 
 def run(tasks: list[PackTask], fn, *, workers: int | None = None,

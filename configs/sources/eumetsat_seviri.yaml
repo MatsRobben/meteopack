@@ -10,7 +10,7 @@
 
 name: eumetsat_seviri
 
-base_url: /vol/knmimo-nobackup/users/mrobben/data/raw/eumetsat_seviri/msg15_rss
+base_url: ${METEOPACK_DATA_ROOT}/raw/eumetsat_seviri/msg15_rss
 
 rate_limit:
   # There is no remote host to be polite to. What this still decides is the
