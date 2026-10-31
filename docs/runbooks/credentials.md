@@ -56,6 +56,22 @@ rather than a parse error.
 
 You may hold at most **2 active tokens** created this way.
 
+### Forgotten which account it was
+
+A CEDA token is a JWT, so the *expired* one still in `~/.ceda_token` says who
+it belonged to. Decoding it needs no password and no network:
+
+```bash
+python3 -c 'import base64,json,sys
+seg = open(sys.argv[1]).read().strip().split(".")[1]
+d = json.loads(base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)))
+print(d["preferred_username"], d["email"])' ~/.ceda_token
+```
+
+That prints the username the script asks for and the address to reset the
+password with. (The payload of a JWT is base64, not encryption — which is also
+why a token file is a secret worth `chmod 600`, expired or not.)
+
 ### Scripted, for Slurm
 
 The API endpoint is `https://services.ceda.ac.uk/api/token/create/` (POST, HTTP
