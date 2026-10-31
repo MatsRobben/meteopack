@@ -18,3 +18,16 @@ knmi_1km_stereo:
 # msg_rss_nl_crop:
 # harmonie_p1:
 # opera_2km_europe:
+
+# A tiny grid for tests and examples. Real, loadable, and cheap: 8x6 cells over
+# the North Sea. Exists so initialise/write can be exercised through the real
+# registry instead of a monkeypatched one.
+example_tiny:
+  description: 8x6 example grid, same projection as the KNMI product
+  proj4: "+proj=stere +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378140 +b=6356750 +x_0=0 +y_0=0 +units=km +no_defs"
+  shape: [8, 6]
+  product_corners_lonlat:
+    - [3.0, 52.0]
+    - [3.0, 53.0]
+    - [5.0, 53.0]
+    - [5.0, 52.0]

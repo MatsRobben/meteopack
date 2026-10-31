@@ -1,0 +1,339 @@
+"""Gridded fields: one frame per chunk, days written in parallel, nothing shifted."""
+from __future__ import annotations
+
+import multiprocessing as mp
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from pathlib import Path
+
+import numpy as np
+import pytest
+import xarray as xr
+
+from meteopack.core import grids
+from meteopack.core.config import ProductConfig, StoreConfig, Variable
+from meteopack.core.grids import Grid
+from meteopack.core.store import gridded
+from meteopack.core.timeline import Timeline, utc
+
+NY, NX = 8, 6
+CADENCE_SECONDS = 3600
+FRAMES_PER_DAY = 86_400 // CADENCE_SECONDS
+DAYS = 4
+
+#: The real registry holds one 765x700 radar grid; tests want frames you can eyeball.
+TINY = Grid(id="tiny_test", proj4="+proj=stere +lat_0=90 +lon_0=0 +units=km", shape=(NY, NX))
+
+
+@pytest.fixture(autouse=True)
+def _tiny_grid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(grids, "get", lambda grid_id, path=None: TINY)
+
+
+def make_cfg(
+    chunks: dict[str, int] | None = None,
+    shard: dict[str, int] | None = None,
+    variables: list[str] | None = None,
+) -> ProductConfig:
+    return ProductConfig(
+        source="knmi",
+        product="test",
+        cadence_seconds=CADENCE_SECONDS,
+        grid_id=TINY.id,
+        variables=[
+            Variable(name=name, source_key=name, units="mm", long_name=f"{name} field")
+            for name in (variables or ["rain"])
+        ],
+        store=StoreConfig(kind="gridded", chunks=chunks, shard=shard, compression_level=1),
+    )
+
+
+def make_timeline() -> Timeline:
+    return Timeline(
+        start=utc(2012, 1, 1),
+        end=utc(2012, 1, 1 + DAYS),
+        cadence=timedelta(seconds=CADENCE_SECONDS),
+    )
+
+
+def block(rows: np.ndarray, offset: float = 0.0) -> np.ndarray:
+    """Frames whose every cell is unique, so a torn or shifted write cannot hide.
+
+    All values are integers below 2**24, hence exact in float32 — equality
+    assertions mean what they say.
+    """
+    cells = np.arange(NY * NX, dtype="float32").reshape(NY, NX)
+    return np.asarray(rows, dtype="float32")[:, None, None] * 1000.0 + cells + offset
+
+
+def dataset(times: np.ndarray, values: np.ndarray, name: str = "rain") -> xr.Dataset:
+    return xr.Dataset({name: (gridded.DIMS, values)}, coords={"time": times})
+
+
+def day_dataset(timeline: Timeline, day: int, offset: float = 0.0) -> xr.Dataset:
+    rows = np.arange(day * FRAMES_PER_DAY, (day + 1) * FRAMES_PER_DAY)
+    return dataset(timeline.values()[rows], block(rows, offset))
+
+
+def write_day(root: str, day: int, barrier=None, passes: int = 3) -> int:
+    """One worker's job. Top-level so a spawned process can unpickle it.
+
+    The barrier releases every worker at once and the repeated passes keep them
+    inside `write` together, so the concurrency tests overlap for real rather
+    than finishing one after another.
+    """
+    cfg, timeline = make_cfg(), make_timeline()
+    if barrier is not None:
+        barrier.wait(timeout=60)
+    for _ in range(passes):
+        gridded.write(day_dataset(timeline, day), cfg, root)
+    return day
+
+
+def test_initialise_builds_the_geometry_the_config_asked_for(tmp_path: Path):
+    cfg = make_cfg(chunks={"time": 1, "y": NY, "x": NX}, shard={"time": 12, "y": NY, "x": NX})
+    path = gridded.initialise(cfg, tmp_path, make_timeline())
+
+    assert path == tmp_path / "canonical/knmi/test/v1"
+    import zarr
+
+    array = zarr.open_group(path, mode="r")["rain"]
+    assert array.shape == (DAYS * FRAMES_PER_DAY, NY, NX)
+    assert array.chunks == (1, NY, NX)
+    assert array.shards == (12, NY, NX)
+    assert array.dtype == np.dtype("float32")
+    assert array.attrs["units"] == "mm"
+    assert array.attrs["long_name"] == "rain field"
+
+
+def test_defaults_put_one_frame_per_chunk_and_one_day_per_shard(tmp_path: Path):
+    path = gridded.initialise(make_cfg(), tmp_path, make_timeline())
+    reported = gridded.info("knmi/test/v1", tmp_path)
+    assert reported["chunks"] == (1, NY, NX)
+    assert reported["shards"] == (FRAMES_PER_DAY, NY, NX)
+
+    # One file per shard, not one per frame: a day of frames is a single file.
+    gridded.write(day_dataset(make_timeline(), 1), make_cfg(), tmp_path)
+    assert [p.name for p in sorted((path / "rain" / "c").rglob("*")) if p.is_file()] == ["0"]
+
+
+def test_shard_must_be_a_multiple_of_the_chunk(tmp_path: Path):
+    cfg = make_cfg(chunks={"time": 5, "y": NY, "x": NX}, shard={"time": 12, "y": NY, "x": NX})
+    with pytest.raises(ValueError, match="not a multiple"):
+        gridded.initialise(cfg, tmp_path, make_timeline())
+
+
+def test_round_trip_is_exact_and_untouched_frames_are_nan(tmp_path: Path):
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    gridded.write(day_dataset(timeline, 1), cfg, tmp_path)
+
+    out = gridded.read("knmi/test/v1", tmp_path)
+    assert out["rain"].dims == gridded.DIMS
+    assert out.sizes["time"] == DAYS * FRAMES_PER_DAY
+    np.testing.assert_array_equal(out["time"].values, timeline.values())
+
+    values = out["rain"].values
+    written = slice(FRAMES_PER_DAY, 2 * FRAMES_PER_DAY)
+    np.testing.assert_array_equal(values[written], block(np.arange(*written.indices(10**6))))
+    assert np.isnan(values[:FRAMES_PER_DAY]).all()
+    assert np.isnan(values[2 * FRAMES_PER_DAY :]).all()
+    assert out.attrs["grid_id"] == TINY.id
+    assert out.attrs["proj4"] == TINY.proj4
+    assert out.attrs["cadence_seconds"] == CADENCE_SECONDS
+
+
+def test_out_of_order_day_writes_land_at_their_own_indices(tmp_path: Path):
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    for day in (3, 0, 2, 1):
+        gridded.write(day_dataset(timeline, day), cfg, tmp_path)
+
+    values = gridded.read("knmi/test/v1", tmp_path)["rain"].values
+    np.testing.assert_array_equal(values, block(np.arange(DAYS * FRAMES_PER_DAY)))
+
+
+def test_shuffled_frames_inside_one_dataset_are_scattered_not_appended(tmp_path: Path):
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    rows = np.array([30, 2, 17, 3, 71, 0])
+    gridded.write(dataset(timeline.values()[rows], block(rows)), cfg, tmp_path)
+
+    values = gridded.read("knmi/test/v1", tmp_path)["rain"].values
+    np.testing.assert_array_equal(values[rows], block(rows))
+    rest = np.setdiff1d(np.arange(DAYS * FRAMES_PER_DAY), rows)
+    assert np.isnan(values[rest]).all()
+
+
+def test_rewriting_a_day_overwrites_it_and_leaves_the_rest_alone(tmp_path: Path):
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    gridded.write(day_dataset(timeline, 1), cfg, tmp_path)
+    gridded.write(day_dataset(timeline, 2), cfg, tmp_path)
+    gridded.write(day_dataset(timeline, 1, offset=500_000.0), cfg, tmp_path)
+
+    out = gridded.read("knmi/test/v1", tmp_path)
+    assert out.sizes["time"] == DAYS * FRAMES_PER_DAY  # no growth, no duplication
+    values = out["rain"].values
+    day1 = np.arange(FRAMES_PER_DAY, 2 * FRAMES_PER_DAY)
+    day2 = np.arange(2 * FRAMES_PER_DAY, 3 * FRAMES_PER_DAY)
+    np.testing.assert_array_equal(values[day1], block(day1, offset=500_000.0))
+    np.testing.assert_array_equal(values[day2], block(day2))
+    assert np.isnan(values[:FRAMES_PER_DAY]).all()
+
+
+def test_off_cadence_and_out_of_range_frames_are_dropped_not_snapped(tmp_path: Path):
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    on_axis = timeline.values()[5]
+    times = np.array(
+        [
+            on_axis,
+            on_axis + np.timedelta64(7, "m"),  # off cadence
+            timeline.values()[0] - np.timedelta64(1, "h"),  # before the axis
+            np.datetime64("2012-01-05T00:00:00", "ns"),  # past the axis
+        ]
+    )
+    gridded.write(dataset(times, block(np.array([5.0, 999.0, 998.0, 997.0]))), cfg, tmp_path)
+
+    values = gridded.read("knmi/test/v1", tmp_path)["rain"].values
+    np.testing.assert_array_equal(values[5], block(np.array([5]))[0])
+    assert np.isnan(values[np.arange(DAYS * FRAMES_PER_DAY) != 5]).all()
+
+
+def test_two_writes_into_one_shard_merge_when_serialised(tmp_path: Path):
+    """The read-modify-write path works — it is only concurrency it cannot survive."""
+    cfg = make_cfg(shard={"time": 2 * FRAMES_PER_DAY, "y": NY, "x": NX})
+    timeline = make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    gridded.write(day_dataset(timeline, 1), cfg, tmp_path)
+    gridded.write(day_dataset(timeline, 0), cfg, tmp_path)
+
+    values = gridded.read("knmi/test/v1", tmp_path)["rain"].values
+    shared = np.arange(2 * FRAMES_PER_DAY)
+    np.testing.assert_array_equal(values[shared], block(shared))
+
+
+def test_threads_write_disjoint_days_without_losing_any(tmp_path: Path):
+    gridded.initialise(make_cfg(), tmp_path, make_timeline())
+    barrier = threading.Barrier(DAYS)
+    with ThreadPoolExecutor(max_workers=DAYS) as pool:
+        done = list(pool.map(lambda d: write_day(str(tmp_path), d, barrier), range(DAYS)))
+
+    assert sorted(done) == list(range(DAYS))
+    values = gridded.read("knmi/test/v1", tmp_path)["rain"].values
+    np.testing.assert_array_equal(values, block(np.arange(DAYS * FRAMES_PER_DAY)))
+
+
+def test_spawned_processes_write_disjoint_days_without_tearing(tmp_path: Path):
+    gridded.initialise(make_cfg(), tmp_path, make_timeline())
+    ctx = mp.get_context("spawn")
+    barrier = ctx.Barrier(DAYS)
+    workers = [
+        ctx.Process(target=write_day, args=(str(tmp_path), day, barrier)) for day in range(DAYS)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=120)
+    assert [w.exitcode for w in workers] == [0] * DAYS
+
+    values = gridded.read("knmi/test/v1", tmp_path)["rain"].values
+    np.testing.assert_array_equal(values, block(np.arange(DAYS * FRAMES_PER_DAY)))
+
+
+def test_read_honours_the_time_range_and_the_variable_subset(tmp_path: Path):
+    cfg = make_cfg(variables=["rain", "snow"])
+    timeline = make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    rows = np.arange(DAYS * FRAMES_PER_DAY)
+    times = timeline.values()
+    gridded.write(
+        xr.Dataset(
+            {"rain": (gridded.DIMS, block(rows)), "snow": (gridded.DIMS, block(rows, 1_000_000.0))},
+            coords={"time": times},
+        ),
+        cfg,
+        tmp_path,
+    )
+
+    out = gridded.read(
+        "knmi/test/v1",
+        tmp_path,
+        time_range=(utc(2012, 1, 2), utc(2012, 1, 3)),
+        variables=["snow"],
+    )
+    assert list(out.data_vars) == ["snow"]
+    day1 = np.arange(FRAMES_PER_DAY, 2 * FRAMES_PER_DAY)
+    np.testing.assert_array_equal(out["time"].values, times[day1])
+    np.testing.assert_array_equal(out["snow"].values, block(day1, 1_000_000.0))
+
+    # Half-open, and a window starting mid-cadence does not reach back for 00:00.
+    narrow = gridded.read(
+        "knmi/test/v1", tmp_path, time_range=(utc(2012, 1, 2, 0, 30), utc(2012, 1, 2, 2))
+    )
+    np.testing.assert_array_equal(narrow["time"].values, times[[25]])
+    np.testing.assert_array_equal(narrow["rain"].values, block(np.array([25])))
+
+
+def test_info_reports_shape_chunks_and_time_bounds(tmp_path: Path):
+    cfg = make_cfg(chunks={"time": 1, "y": NY, "x": NX}, shard={"time": 12, "y": NY, "x": NX})
+    gridded.initialise(cfg, tmp_path, make_timeline())
+    reported = gridded.info("knmi/test/v1", tmp_path)
+
+    assert reported["shape"] == (DAYS * FRAMES_PER_DAY, NY, NX)
+    assert reported["chunks"] == (1, NY, NX)
+    assert reported["shards"] == (12, NY, NX)
+    assert reported["dims"] == ("time", "y", "x")
+    assert reported["n_times"] == DAYS * FRAMES_PER_DAY
+    assert reported["time_start"] == "2012-01-01T00:00:00+00:00"
+    assert reported["time_end"] == "2012-01-05T00:00:00+00:00"
+    assert reported["cadence_seconds"] == CADENCE_SECONDS
+    assert reported["grid_id"] == TINY.id
+    assert reported["variables"]["rain"]["units"] == "mm"
+
+
+def test_initialise_refuses_to_clobber_unless_told_to(tmp_path: Path):
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    gridded.write(day_dataset(timeline, 0), cfg, tmp_path)
+    with pytest.raises(FileExistsError):
+        gridded.initialise(cfg, tmp_path, timeline)
+
+    gridded.initialise(cfg, tmp_path, timeline, overwrite=True)
+    assert np.isnan(gridded.read("knmi/test/v1", tmp_path)["rain"].values).all()
+
+
+def test_write_before_initialise_says_so(tmp_path: Path):
+    cfg, timeline = make_cfg(), make_timeline()
+    with pytest.raises(FileNotFoundError, match="initialise"):
+        gridded.write(day_dataset(timeline, 0), cfg, tmp_path)
+
+
+def test_write_rejects_a_variable_the_store_has_no_array_for(tmp_path: Path):
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    ds = day_dataset(timeline, 0).rename({"rain": "hail"})
+    with pytest.raises(ValueError, match="hail"):
+        gridded.write(ds, cfg, tmp_path)
+
+
+def test_write_rejects_frames_of_the_wrong_grid(tmp_path: Path):
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    ds = xr.Dataset(
+        {"rain": (gridded.DIMS, np.zeros((2, NY + 1, NX), "float32"))},
+        coords={"time": timeline.values()[:2]},
+    )
+    with pytest.raises(ValueError, match="store is"):
+        gridded.write(ds, cfg, tmp_path)
+
+
+def test_store_path_follows_the_layer_layout(tmp_path: Path):
+    assert gridded.store_path(tmp_path, "knmi/test/v1") == tmp_path / "canonical/knmi/test/v1"
+    assert gridded.store_path(tmp_path, "knmi/test/v1", layer="derived") == (
+        tmp_path / "derived/knmi/test/v1"
+    )
+    assert os.fspath(gridded.store_path(str(tmp_path), "a/b/v2")).endswith("canonical/a/b/v2")

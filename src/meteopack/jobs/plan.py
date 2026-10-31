@@ -74,16 +74,60 @@ def is_volatile(unit: Unit, cfg: ProductConfig) -> bool:
     return bool(volatile_subdirs) and meta.get("subdir") in volatile_subdirs
 
 
-def shard_units(units: Sequence[Unit], shard: int, shards: int) -> list[Unit]:
-    """Split by stride, not by block.
+def shard_span_seconds(cfg: ProductConfig) -> int:
+    """How much time one zarr shard file covers."""
+    frames = (cfg.store.shard or {}).get("time") or max(1, 86400 // cfg.cadence_seconds)
+    return int(frames) * cfg.cadence_seconds
 
-    Stride keeps the per-task cost even when cost correlates with position —
-    historical archives grow with station index, so contiguous blocks would
-    give one task all the big files.
+
+def shard_bucket(unit: Unit, span_seconds: int) -> int:
+    """Which shard file this unit's frame lands in.
+
+    Gridded units MUST carry `valid_time`: a zarr shard is one file, and two
+    processes writing different frames of the same shard lose whole frames
+    rather than corrupting them (measured: 7-9 of 12 frames lost, every trial).
+    Without a time there is no way to keep a shard to a single writer.
+    """
+    if unit.valid_time is None:
+        raise ValueError(
+            f"unit {unit.key!r} has no valid_time; a gridded source must set it so work "
+            f"can be split on shard boundaries (otherwise concurrent tasks lose frames)"
+        )
+    return int(unit.valid_time.timestamp()) // span_seconds
+
+
+def shard_units(
+    units: Sequence[Unit],
+    shard: int,
+    shards: int,
+    *,
+    mode: str = "stride",
+    span_seconds: int | None = None,
+) -> list[Unit]:
+    """Split the unit list across array tasks.
+
+    `stride` is the default and right for points data: cost correlates with
+    station index, so contiguous blocks would hand one task every large file,
+    and a points partition is written per task anyway.
+
+    `bucket` is required for gridded data. A zarr shard is a single file, so
+    two tasks writing different frames of one shard silently lose frames. This
+    mode keeps every frame of a shard with one task.
     """
     if shards < 1 or not (0 <= shard < shards):
         raise ValueError(f"bad shard {shard}/{shards}")
-    return list(units[shard::shards])
+    if mode == "stride":
+        return list(units[shard::shards])
+    if mode != "bucket":
+        raise ValueError(f"unknown shard mode {mode!r}")
+    if not span_seconds:
+        raise ValueError("bucket mode needs span_seconds")
+
+    groups: dict[int, list[Unit]] = {}
+    for unit in units:
+        groups.setdefault(shard_bucket(unit, span_seconds), []).append(unit)
+    mine = sorted(groups)[shard::shards]
+    return [unit for bucket in mine for unit in groups[bucket]]
 
 
 @dataclass(slots=True)
@@ -132,5 +176,10 @@ def build_plan(
         units = [u for u in units if job_key(stage, u.key) in todo or u.key in volatile]
         plan.skipped_done = plan.listed - len(units)
 
-    plan.units = shard_units(units, shard, shards)
+    # Gridded writes are only safe one-shard-per-task; points can stride.
+    if cfg.store.kind == "gridded" and shards > 1:
+        plan.units = shard_units(units, shard, shards, mode="bucket",
+                                 span_seconds=shard_span_seconds(cfg))
+    else:
+        plan.units = shard_units(units, shard, shards)
     return plan

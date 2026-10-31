@@ -119,3 +119,44 @@ def test_ambiguous_product_must_be_named(tmp_path):
 def test_plan_summary_is_informative():
     p = Plan(stage="fetch", source="dwd", product="p", listed=10, skipped_done=4, volatile=2)
     assert "4 already done" in p.summary() and "2 volatile" in p.summary()
+
+
+def test_gridded_work_is_split_on_shard_boundaries():
+    """Two tasks must never write into the same zarr shard.
+
+    A shard is one file. Concurrent writers to one shard lose whole frames —
+    measured at 7-9 of 12 lost, every trial — so stride splitting, which is
+    right for points, would silently destroy gridded data.
+    """
+    from datetime import timedelta
+
+    from meteopack.jobs.plan import shard_bucket, shard_span_seconds, shard_units
+
+    cfg = ProductConfig(source="s", product="p", cadence_seconds=600, grid_id="g",
+                        store=StoreConfig(kind="gridded", chunks={"time": 1},
+                                          shard={"time": 6}))
+    span = shard_span_seconds(cfg)
+    assert span == 3600, "6 frames x 600 s"
+
+    start = utc(2012, 1, 1)
+    units = [Unit(key=f"f{i}", url="u", valid_time=start + timedelta(minutes=10 * i))
+             for i in range(24)]                      # 4 shards' worth
+
+    shards = 3
+    assignment: dict[int, int] = {}
+    seen: list[str] = []
+    for task in range(shards):
+        got = shard_units(units, task, shards, mode="bucket", span_seconds=span)
+        seen += [u.key for u in got]
+        for u in got:
+            bucket = shard_bucket(u, span)
+            assert assignment.setdefault(bucket, task) == task, "a shard went to two tasks"
+    assert sorted(seen, key=lambda k: int(k[1:])) == [u.key for u in units]
+
+
+def test_gridded_unit_without_a_time_is_refused_not_guessed():
+    from meteopack.jobs.plan import shard_units
+
+    units = [Unit(key="x", url="u")]
+    with pytest.raises(ValueError, match="valid_time"):
+        shard_units(units, 0, 2, mode="bucket", span_seconds=3600)

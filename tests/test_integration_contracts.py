@@ -61,3 +61,45 @@ def test_dwd_fetch_passes_every_required_argument(monkeypatch, tmp_path):
 
 def test_dwd_satisfies_the_source_protocol():
     assert isinstance(dwd.DwdStations(), Source)
+
+
+def test_gridded_round_trip_through_the_real_grid_registry(tmp_path):
+    """Exercise initialise/write/read against configs/grids.yaml, not a double.
+
+    The unit tests monkeypatch the registry to keep frames small, which means
+    nothing otherwise proves a config's `grid_id` actually resolves and the
+    store picks up the grid's shape.
+    """
+    from datetime import timedelta
+
+    import numpy as np
+    import xarray as xr
+
+    from meteopack.core import grids
+    from meteopack.core.config import ProductConfig, StoreConfig, Variable
+    from meteopack.core.store import gridded
+    from meteopack.core.timeline import Timeline, utc
+
+    grid = grids.get("example_tiny")
+    ny, nx = grid.shape
+    cfg = ProductConfig(
+        source="example", product="field", cadence_seconds=600, grid_id="example_tiny",
+        variables=[Variable(name="rain", source_key="r", units="mm")],
+        store=StoreConfig(kind="gridded", chunks={"time": 1, "y": ny, "x": nx},
+                          shard={"time": 6, "y": ny, "x": nx}),
+    )
+    tl = Timeline(utc(2012, 1, 1), utc(2012, 1, 1, 1), timedelta(minutes=10))
+    gridded.initialise(cfg, tmp_path, tl)
+
+    frame = xr.Dataset(
+        {"rain": (("time", "y", "x"), np.full((1, ny, nx), 2.5, dtype="float32"))},
+        coords={"time": np.array([tl.values()[3]])},
+    )
+    gridded.write(frame, cfg, tmp_path)
+
+    ds = gridded.read(cfg.store_id, tmp_path)
+    assert ds.sizes["time"] == len(tl) and ds.sizes["y"] == ny and ds.sizes["x"] == nx
+    assert ds.attrs["grid_id"] == "example_tiny"
+    values = ds["rain"].values
+    assert np.allclose(values[3], 2.5)
+    assert np.isnan(values[0]).all(), "frames nobody wrote read back as NaN"
