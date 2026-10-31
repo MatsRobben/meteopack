@@ -10,8 +10,6 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-import pytest
-
 from meteopack.core import http
 from meteopack.sources import dwd
 from meteopack.sources.base import Source, Unit

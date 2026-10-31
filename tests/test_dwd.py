@@ -303,18 +303,27 @@ def test_unknown_subdir_is_rejected(src, product):
 
 
 def _install_http(monkeypatch, handler):
-    """Stand in for `meteopack.core.http`, which another module owns."""
+    """Stand in for the download in `meteopack.core.http`.
+
+    The stub binds the REAL signature before calling the handler, and raises
+    the REAL NotFoundError, so this test double cannot drift away from the
+    module it stands in for — that drift already shipped a bug once, where
+    fetch_file grew a required `unit_key` that dwd.fetch never passed and every
+    suite stayed green.
+    """
+    import inspect
+
     from meteopack.core import http
 
-    class NotFoundError(Exception):
-        pass
+    real_sig = inspect.signature(http.fetch_file)
 
-    def fetch_file(url, dest, *, session, limiter, retries, backoff, timeout):
-        return handler(url, Path(dest), NotFoundError)
+    def fetch_file(*args, **kwargs):
+        bound = real_sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        return handler(bound.arguments["url"], Path(bound.arguments["dest"]), http.NotFoundError)
 
-    monkeypatch.setattr(http, "NotFoundError", NotFoundError, raising=False)
-    monkeypatch.setattr(http, "fetch_file", fetch_file, raising=False)
-    return NotFoundError
+    monkeypatch.setattr(http, "fetch_file", fetch_file)
+    return http.NotFoundError
 
 
 def test_fetch_delegates_to_core_http_and_lays_files_out_by_group(monkeypatch, src, tmp_path):
@@ -345,7 +354,7 @@ def test_fetch_delegates_to_core_http_and_lays_files_out_by_group(monkeypatch, s
 
 def test_fetch_skips_a_missing_station_period(monkeypatch, src, tmp_path):
     def handler(url, dest, exc):
-        raise exc("404")
+        raise exc(url, "not found", 404)
 
     _install_http(monkeypatch, handler)
     unit = Unit(
