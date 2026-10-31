@@ -41,3 +41,22 @@ job splits the unit list without any coordination between tasks.
 squeue -u $USER
 sacct -j <id> --format=JobID,State,Elapsed,MaxRSS,ExitCode
 ```
+
+## cn79 has no AVX2 — exclude it
+
+Verified 2026-10-31 by importing on every node in `das` and `icis`.
+
+| Node | CPU | AVX2 | duckdb / polars |
+|---|---|---|---|
+| cn79 | Xeon E5-2670 (Sandy Bridge, 2012) | **no** | **both crash: "Illegal instruction"** |
+| cn104, cn105 | Xeon Silver 4214 (Cascade Lake) | yes | OK |
+| cn114, cn115 | EPYC 7642 (Zen 2) | yes | OK |
+| cn117 | EPYC 7452 (Zen 2) | yes | OK |
+
+The wheels for `duckdb` and `polars` are built with an AVX2 baseline, so they
+fault on import on cn79 — a hard crash at import, long before any of our code
+runs, and it looks like a mysterious job failure rather than a CPU mismatch.
+Every `slurm/*.slurm` wrapper therefore carries `#SBATCH --exclude=cn79`.
+
+If cn79 is ever needed, the alternative is `polars-lts-cpu` plus a non-AVX2
+duckdb build, which is more trouble than losing one of four `das` nodes.

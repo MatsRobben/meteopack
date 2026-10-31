@@ -3,6 +3,7 @@
 #SBATCH --account=das
 #SBATCH --partition=das
 #SBATCH --qos=das-preempt
+#SBATCH --exclude=cn79          # Sandy Bridge, no AVX2: duckdb and polars segfault there
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=4G
 #SBATCH --time=00:05:00
