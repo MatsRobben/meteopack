@@ -167,7 +167,7 @@ def read_token(path: Path) -> str:
     except FileNotFoundError:
         raise CedaAuthError(
             f"no CEDA token at {path}. MIDAS Open is the one source here that needs a "
-            f"credential: get a token from https://services.ceda.ac.uk/cedasite/myceda/user/ "
+            f"credential: get a token from https://services.ceda.ac.uk/account/token/ "
             f"and write it to {path} (chmod 600). Tokens expire after about three days, so "
             f"this file needs refreshing, not committing. Set ${TOKEN_ENV} to use another path."
         ) from None
@@ -196,7 +196,7 @@ def auth_error(where: str, detail: str, path: Path) -> CedaAuthError:
     return CedaAuthError(
         f"{where}: {detail}. The CEDA token in {path} is expired or rejected — they last "
         f"about three days. Refresh it from "
-        f"https://services.ceda.ac.uk/cedasite/myceda/user/ and write it to that file "
+        f"https://services.ceda.ac.uk/account/token/ and write it to that file "
         f"(chmod 600), or point ${TOKEN_ENV} at another one."
     )
 

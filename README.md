@@ -220,5 +220,8 @@ file size correlates with station index.
 
 ## Documentation
 
+- [docs/runbooks/credentials.md](docs/runbooks/credentials.md) — which sources need a
+  key, where to get it, and what to request next. Nine of the ten are keyless;
+  `meteopack credentials` checks this machine.
 - [docs/runbooks/cluster.md](docs/runbooks/cluster.md) — Slurm, partitions, cn79
 - `docs/history/` — the design documents behind these choices

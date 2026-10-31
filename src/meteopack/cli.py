@@ -20,7 +20,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("meteopack")
 
-STAGES = ("scan", "list", "fetch", "parse", "pack", "derive", "validate", "catalog")
+STAGES = ("scan", "list", "fetch", "parse", "pack", "derive", "validate", "catalog",
+          "credentials")
 
 
 # --------------------------------------------------------------------- args
@@ -29,8 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="meteopack", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("stage", choices=STAGES)
-    p.add_argument("target", help="source name (scan/list/fetch/parse/pack/validate/catalog) "
-                                  "or dataset name (derive)")
+    p.add_argument("target", nargs="?", help="source name (scan/list/fetch/parse/pack/"
+                                             "validate/catalog) or dataset name (derive); "
+                                             "optional for `credentials`")
     p.add_argument("--product", help="product within the source; required if it has several")
     p.add_argument("--window", help="ISO interval START/END, e.g. 2012-01-01/2013-01-01 "
                                     "(default: the last 24 hours)")
@@ -793,6 +795,92 @@ def stage_derive(ctx_args: argparse.Namespace) -> int:
     return 0
 
 
+def stage_credentials(ctx_args: argparse.Namespace) -> int:
+    """Report, per source, what credential it needs and whether it is usable.
+
+    Written as a command rather than only a document because the document goes
+    stale and this cannot: it reads `credentials_env` from the source configs
+    and then actually looks at what is on this machine. "Which key do I need
+    again" and "is it still valid" are the same question in practice, since the
+    one credential here expires every three days.
+    """
+    import os
+
+    from meteopack.jobs.plan import config_dir, load_source_config
+    from meteopack.sources import registry
+
+    names = [p.stem for p in sorted((config_dir(ctx_args.configs) / "sources").glob("*.yaml"))]
+    if getattr(ctx_args, "target", None):
+        names = [n for n in names if n == ctx_args.target] or names
+
+    needs, open_sources, problems = [], [], 0
+    for name in names:
+        try:
+            cfg = load_source_config(name, configs=ctx_args.configs)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"  {name:18s} config unreadable: {exc}")
+            continue
+        if not cfg.credentials_env:
+            open_sources.append(name)
+            continue
+        needs.append((name, cfg.credentials_env))
+
+    if open_sources:
+        print(f"Keyless, nothing to set up ({len(open_sources)}):")
+        print(f"  {', '.join(open_sources)}")
+
+    if not needs:
+        print("\nNo source in this configuration needs a credential.")
+        return 0
+
+    print("\nNeeds a credential:")
+    for name, variables in needs:
+        print(f"  {name}")
+        for variable in variables:
+            value = os.environ.get(variable)
+            print(f"    ${variable:20s} {'set to ' + value if value else 'not set (a default is used)'}")
+        state, detail = _credential_state(name, registry)
+        problems += state != "ok"
+        print(f"    {'OK  ' if state == 'ok' else 'MISS'} {detail}")
+
+    print("\nHow to obtain each one: docs/runbooks/credentials.md")
+    return 1 if problems else 0
+
+
+def _credential_state(name: str, registry) -> tuple[str, str]:
+    """Whether `name`'s credential is present, without spending a request on it.
+
+    Deliberately checks only what is cheap and local. Whether CEDA will still
+    accept the token cannot be answered without asking CEDA, and a command that
+    reports status should not start downloading.
+    """
+    if name != "midas":
+        return "ok", "no local check for this source"
+    try:
+        from meteopack.sources import midas
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        return "miss", f"cannot import the midas source: {exc}"
+    path = midas.token_file()
+    try:
+        token = midas.read_token(path)
+    except midas.CedaAuthError as exc:
+        return "miss", str(exc).replace("\n", " ")
+    age = ""
+    try:
+        import time
+
+        hours = (time.time() - path.stat().st_mtime) / 3600
+        age = f", written {hours:.0f}h ago"
+        if hours > 72:
+            return "miss", (
+                f"the token in {path} is {hours:.0f}h old and CEDA tokens last about 72h; "
+                f"run scripts/refresh-ceda-token.sh"
+            )
+    except OSError:
+        pass
+    return "ok", f"a token is present in {path} ({len(token)} chars{age})"
+
+
 # --------------------------------------------------------------------- main
 
 _STAGE_FUNCS = {
@@ -807,8 +895,13 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    if args.stage == "credentials":
+        return stage_credentials(args)
     if args.stage == "derive":
         return stage_derive(args)
+    if not args.target:
+        print(f"error: `meteopack {args.stage}` needs a source name", file=sys.stderr)
+        return 2
     try:
         ctx = Context(args)
     except (FileNotFoundError, ValueError, KeyError) as exc:

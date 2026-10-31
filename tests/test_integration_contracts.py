@@ -372,3 +372,32 @@ def test_manifest_reads_back_without_fields_added_later():
         assert read is not None
         assert read.description is None
         assert read.store_id == "x/y/v1"
+
+
+def test_every_credentialed_source_is_in_the_runbook():
+    """A source that needs a key and is not written down is a key nobody finds.
+
+    `meteopack credentials` reads `credentials_env` from the source configs;
+    this binds that list to the runbook, so adding a credentialed source
+    without documenting where to get the credential fails here.
+    """
+    import yaml
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    runbook = (repo / "docs" / "runbooks" / "credentials.md").read_text()
+    for path in sorted((repo / "configs" / "sources").glob("*.yaml")):
+        variables = yaml.safe_load(path.read_text()).get("credentials_env") or []
+        for variable in variables:
+            assert variable in runbook, (
+                f"{path.name} needs ${variable}, which docs/runbooks/credentials.md "
+                f"does not mention"
+            )
+            assert path.stem in runbook, f"{path.stem} needs a credential and is undocumented"
+
+
+def test_credentials_command_runs_without_a_target():
+    """`meteopack credentials` must work before anything is configured."""
+    from meteopack.cli import build_parser
+
+    args = build_parser().parse_args(["credentials"])
+    assert args.target is None
