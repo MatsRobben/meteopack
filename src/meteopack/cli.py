@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures as cf
 import logging
+import os
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -241,37 +242,213 @@ def _write_station_metadata(ctx: Context) -> int:
     return len(table)
 
 
+def _pack_tasks(ctx: Context, files: list[Path]) -> list:
+    from meteopack.jobs.packing import PackTask
+
+    return [PackTask(source=ctx.cfg.source, product=ctx.cfg.product, raw_path=str(p),
+                     root=str(ctx.root), configs=ctx.args.configs) for p in files]
+
+
+def _timeline_for(ctx: Context):
+    """The store's time axis: the window if given, else what the catalog holds.
+
+    A gridded store is created whole and then written by region, so the axis has
+    to be known before the first frame lands. Guessing it from the first file
+    would silently truncate a backfill, so an unknowable axis is an error.
+    """
+    from meteopack.core.timeline import Timeline
+    from meteopack.jobs.plan import timeline_origin
+
+    origin, step = timeline_origin(ctx.cfg), ctx.cfg.cadence
+    start, end = ctx.window.start, ctx.window.end
+    if not ctx.args.window:
+        files = ctx.catalog.files()
+        rows = files.filter(files["product"] == ctx.cfg.product) if len(files) else files
+        times = [t for t in rows["valid_time"].to_list() if t is not None] if len(rows) else []
+        if not times:
+            raise SystemExit(
+                f"error: cannot size the time axis for {ctx.cfg.store_id}. Pass --window, or "
+                f"fetch first so the catalog records valid times."
+            )
+        start, end = min(times), max(times) + step
+        start = start.replace(tzinfo=UTC) if start.tzinfo is None else start
+        end = end.replace(tzinfo=UTC) if end.tzinfo is None else end
+
+    # Snap outwards onto the SHARD grid, not the cadence grid. A zarr shard is
+    # one file, so an axis that starts mid-shard makes every archive unit
+    # straddle two shards; two workers then share one and lose whole frames.
+    # Measured on three radar tars: serial wrote 268.2M finite pixels, three
+    # workers wrote 222.7M - 17% gone, with no error anywhere.
+    from meteopack.jobs.plan import shard_span_seconds
+
+    span = float(shard_span_seconds(ctx.cfg)) if ctx.cfg.store.kind == "gridded" \
+        else step.total_seconds()
+    offset = (start - origin).total_seconds()
+    start = origin + timedelta(seconds=offset - (offset % span))
+    offset_end = (end - origin).total_seconds()
+    if offset_end % span:
+        end = origin + timedelta(seconds=offset_end + (span - offset_end % span))
+    return Timeline(start, end, step)
+
+
+def _coalesce_observations(df):
+    """Merge rows that describe the same (time, station) into one.
+
+    Sources differ in what a unit contains. DWD ships a station-year of every
+    variable in its group; DMI ships one PARAMETER per station-window, so six
+    files for three stations arrive as six rows per timestamp, each carrying a
+    different column. Concatenating those stacks them instead of merging, and
+    the store then holds a row per parameter rather than a row per observation
+    — 711,570 duplicate (time, station) pairs on the first real DMI pack.
+
+    Only pays for itself when duplicates exist, so the common case is a cheap
+    check. Where two files genuinely disagree on a value the first non-null
+    wins, which is arbitrary but deterministic; the count is logged so a source
+    producing real conflicts is visible rather than silently reconciled.
+    """
+    import polars as pl
+
+    keys = [c for c in ("time", "station_id") if c in df.columns]
+    if len(keys) < 2 or df.is_empty():
+        return df
+    n_dup = int(df.select(keys).is_duplicated().sum())
+    if not n_dup:
+        return df
+
+    values = [c for c in df.columns if c not in keys]
+    merged = (
+        df.group_by(keys)
+        .agg([pl.col(c).drop_nulls().first().alias(c) for c in values])
+        .sort(keys)
+    )
+    logger.info(
+        "coalesced %d duplicate (time, station) rows into %d; %d remain",
+        n_dup, merged.height, df.height - merged.height,
+    )
+    return merged
+
+
 def stage_pack(ctx: Context) -> int:
-    from meteopack.core.store import manifest, points
+    from meteopack.core.store import manifest
+    from meteopack.jobs import packing
 
     files = ctx.raw_files()
     if not files:
         print(f"no raw files under {ctx.raw_root}; run `meteopack fetch {ctx.cfg.source}` first")
         return 1
-    df = _parse_all(ctx, files)
-    if df is None:
-        print("nothing parsed")
-        return 1
+    workers = ctx.args.workers or min(len(files), len(os.sched_getaffinity(0)))
+    print(f"packing {len(files)} raw file(s) with {workers} worker(s)")
     if ctx.args.dry_run:
-        print(f"would pack {df.height} rows into {ctx.cfg.store_id}")
         return 0
 
-    if ctx.cfg.store.kind != "points":
-        print(f"pack for store kind {ctx.cfg.store.kind!r} is not wired yet")
-        return 2
-    paths = points.write(df, ctx.cfg, ctx.root)
-    store = points.store_path(ctx.root, ctx.cfg.store_id)
+    store = None
+    if ctx.cfg.store.kind == "gridded":
+        from meteopack.core.store import gridded
+
+        timeline = _timeline_for(ctx)
+        store = gridded.store_path(ctx.root, ctx.cfg.store_id)
+        if not store.exists():
+            gridded.initialise(ctx.cfg, ctx.root, timeline)
+            print(f"initialised {len(timeline)} time steps "
+                  f"{timeline.start:%Y-%m-%dT%H:%M}..{timeline.end:%Y-%m-%dT%H:%M}")
+        results = packing.run(_pack_tasks(ctx, files), packing.write_gridded, workers=workers)
+        frames = sum(r.get("frames", 0) for r in results)
+        errors = [r for r in results if r.get("error")]
+        print(f"wrote {frames} frames from {len(results) - len(errors)} file(s)")
+        n_records = frames
+    else:
+        import io
+
+        import polars as pl
+
+        from meteopack.core.store import points
+
+        results = packing.run(_pack_tasks(ctx, files), packing.parse_points, workers=workers)
+        errors = [r for r in results if r.get("error")]
+        frames = [pl.read_ipc(io.BytesIO(r["ipc"])) for r in results if r.get("ipc")]
+        if not frames:
+            print("nothing parsed")
+            return 1
+        df = pl.concat(frames, how="diagonal_relaxed")
+        df = _coalesce_observations(df)
+        paths = points.write(df, ctx.cfg, ctx.root)
+        store = points.store_path(ctx.root, ctx.cfg.store_id)
+        n_records = df.height
+        print(f"packed {df.height} rows into {len(paths)} partition file(s) at {store}")
+
     manifest.write(store, manifest.Manifest.new(
-        ctx.cfg.store_id, "canonical", "points", ctx.cfg, n_records=df.height))
-    ctx.catalog.record_store(store_id=ctx.cfg.store_id, layer="canonical", kind="points",
-                             path=str(store), version=ctx.cfg.version, n_records=df.height,
-                             config_hash=manifest.config_hash(ctx.cfg))
+        ctx.cfg.store_id, "canonical", ctx.cfg.store.kind, ctx.cfg, n_records=n_records))
+    ctx.catalog.record_store(store_id=ctx.cfg.store_id, layer="canonical",
+                             kind=ctx.cfg.store.kind, path=str(store), version=ctx.cfg.version,
+                             n_records=n_records, config_hash=manifest.config_hash(ctx.cfg))
     ctx.catalog.flush()
     n_stations = _write_station_metadata(ctx)
-    print(f"packed {df.height} rows into {len(paths)} partition file(s) at {store}")
     if n_stations:
         print(f"wrote metadata for {n_stations} stations")
-    return 0
+    for err in errors[:5]:
+        print(f"  ERROR {Path(err['path']).name}: {err['error']}")
+    return 1 if errors else 0
+
+
+def _compare_schema(cfg, report: dict) -> tuple[list[str], str]:
+    """Compare a scan report against whatever the product pins.
+
+    Sources pin different things, and comparing the wrong two raises an alarm
+    that is not drift — which is worse than no alarm, because it teaches you to
+    ignore the real one. Four pins are understood, tried in order:
+
+      extra.schema_fingerprints  {group: fp}   per-group  (dwd, per variable group)
+      extra.known_layouts        [fp, ...]     allow-list (knmi_radar, generations)
+      extra.known_<thing>        names         catalogue  (esoh, knmi_insitu)
+      schema_fingerprint         fp            whole file (belgium)
+
+    A catalogue or allow-list passes on a SUBSET: a station reporting fewer
+    measurements, or a scan covering one generation, is normal. Drift is only
+    something observed that is not pinned.
+    """
+    extra = cfg.extra or {}
+    variants = report.get("variants") or []
+
+    groups = extra.get("schema_fingerprints")
+    if isinstance(groups, dict) and groups:
+        drifted, scanned = [], set()
+        for variant in variants:
+            group = variant.get("group")
+            if group is None:
+                continue
+            scanned.add(group)
+            want, got = groups.get(group), variant.get("fingerprint")
+            if want and want != got:
+                drifted.append(f"{group}: {got} != pinned {want}")
+        missing = sorted(set(groups) - scanned)
+        note = f"{len(scanned)} of {len(groups)} pinned group schemas match"
+        if missing:
+            note += f" (not seen here: {', '.join(missing)})"
+        return drifted, note
+
+    layouts = extra.get("known_layouts")
+    if isinstance(layouts, (list, tuple)) and layouts:
+        allowed = set(layouts)
+        seen = {v.get("fingerprint") for v in variants if v.get("fingerprint")}
+        unknown = sorted(seen - allowed)
+        return ([f"layout not in the pinned list: {fp}" for fp in unknown],
+                f"{len(seen)} observed layout(s) all within the {len(allowed)} pinned")
+
+    for key, pinned in extra.items():
+        if not key.startswith("known_") or not isinstance(pinned, (dict, list, tuple, set)):
+            continue
+        seen_names = report.get(key)
+        if not isinstance(seen_names, (dict, list, tuple, set)):
+            continue
+        unknown = sorted(set(seen_names) - set(pinned))
+        return ([f"{key[6:]} not in the pinned catalogue: {n}" for n in unknown],
+                f"{len(set(seen_names))} observed against a {len(pinned)}-entry {key[6:]} catalogue")
+
+    pin, got = cfg.schema_fingerprint, report.get("fingerprint")
+    if pin and got:
+        return ([] if pin == got else [f"file schema: {got} != pinned {pin}"],
+                "the pinned file schema matches")
+    return [], f"nothing pinned to compare against; observed {got}"
 
 
 def stage_scan(ctx: Context) -> int:
@@ -287,46 +464,18 @@ def stage_scan(ctx: Context) -> int:
     print(f"scanned {report.get('n_files', len(files))} files, "
           f"{report.get('n_variants', '?')} schema variant(s)")
     for variant in report.get("variants", []):
-        print(f"  {variant.get('group', '-'):18s} fp={variant.get('fingerprint')} "
-              f"n={variant.get('count')}  cols={len(variant.get('columns', []))}")
-    # Compare per group first. The product-level fingerprint covers every
-    # configured group, so comparing it against a scan of a subset reports a
-    # difference that is not drift — a false alarm teaches you to ignore the
-    # real one.
-    per_group = ctx.cfg.extra.get("schema_fingerprints") or {}
-    drifted: list[str] = []
-    scanned_groups = set()
-    for variant in report.get("variants", []):
-        group = variant.get("group")
-        if group is None:
-            continue
-        scanned_groups.add(group)
-        want = per_group.get(group)
-        got = variant.get("fingerprint")
-        if want and want != got:
-            drifted.append(f"{group}: {got} != pinned {want}")
-
+        cols = variant.get("columns")
+        n_cols = len(cols) if isinstance(cols, (list, tuple, dict, set)) else cols
+        print(f"  {variant.get('group', '-')!s:18s} fp={variant.get('fingerprint')} "
+              f"n={variant.get('count')}  cols={n_cols if n_cols is not None else '-'}")
+    drifted, checked = _compare_schema(ctx.cfg, report)
     if drifted:
         print("SCHEMA DRIFT:")
         for line in drifted:
             print(f"  {line}")
         print("  inspect the variants above, then re-pin in the product config")
         return 3
-
-    if per_group and scanned_groups:
-        covered = scanned_groups >= set(per_group)
-        if covered:
-            print(f"all {len(per_group)} pinned group schemas match")
-        else:
-            missing = ", ".join(sorted(set(per_group) - scanned_groups)) or "-"
-            print(f"{len(scanned_groups)} of {len(per_group)} groups scanned and matching "
-                  f"(not seen here: {missing})")
-    elif ctx.cfg.schema_fingerprint:
-        seen = report.get("fingerprint")
-        if seen != ctx.cfg.schema_fingerprint:
-            print(f"SCHEMA DRIFT: {seen} != pinned {ctx.cfg.schema_fingerprint}")
-            return 3
-        print("fingerprint matches the pin")
+    print(checked)
 
     for err in report.get("errors", [])[:5]:
         print(f"  error: {err}")

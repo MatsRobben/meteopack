@@ -9,9 +9,13 @@ dependency-heavy source cannot stop the CLI from starting.
 from __future__ import annotations
 
 import importlib
+import inspect
+import logging
 from importlib.metadata import entry_points
 
 from meteopack.sources.base import Source
+
+logger = logging.getLogger(__name__)
 
 _GROUP = "meteopack.sources"
 
@@ -50,9 +54,30 @@ def get(name: str) -> type[Source]:
 
 
 def build(name: str, *args, **kwargs) -> Source:
-    """Instantiate a source. Keeps the import failure attached to the name."""
+    """Instantiate a source, passing only the keywords it accepts.
+
+    The `Source` protocol constrains the three methods, not the constructor,
+    and sources legitimately differ: one that reads a local archive has no use
+    for an HTTP session or a rate limiter. Filtering here keeps the caller from
+    having to know which is which — without it, every local-archive source
+    raises TypeError the moment the CLI builds it, which no unit test catches
+    because tests construct their source directly.
+    """
     try:
         cls = get(name)
     except ImportError as exc:
         raise ImportError(f"source {name!r} could not be imported: {exc}") from exc
-    return cls(*args, **kwargs)
+
+    try:
+        params = inspect.signature(cls).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins and C types
+        return cls(*args, **kwargs)
+
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        accepted = kwargs
+    else:
+        accepted = {k: v for k, v in kwargs.items() if k in params}
+        dropped = set(kwargs) - set(accepted)
+        if dropped:
+            logger.debug("source %s ignores %s", name, ", ".join(sorted(dropped)))
+    return cls(*args, **accepted)

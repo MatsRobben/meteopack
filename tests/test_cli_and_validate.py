@@ -176,3 +176,66 @@ def test_pack_writes_station_metadata_when_the_source_offers_it(tmp_path, monkey
     back = points.read_stations(_cfg().store_id, tmp_path)
     assert back["station_id"].to_list() == ["00044"]
     assert "height" in back.columns, "height_m should be renamed to the store's name"
+
+
+def test_gridded_timeline_snaps_to_the_shard_grid_not_the_cadence(tmp_path, monkeypatch):
+    """An axis starting mid-shard makes every archive unit straddle two shards.
+
+    A zarr shard is one file, so two workers that share one lose whole frames
+    rather than corrupting them. Measured on three real radar tars while this
+    was wrong: serial wrote 268.2M finite pixels, three workers wrote 222.7M —
+    17% gone, silently.
+    """
+    from meteopack.cli import Context, build_parser
+    from meteopack.jobs.plan import shard_span_seconds, timeline_origin
+
+    args = build_parser().parse_args(
+        ["pack", "knmi_radar", "--window", "2024-07-02/2024-07-04",
+         "--data-root", str(tmp_path)])
+    ctx = Context(args)
+    from meteopack.cli import _timeline_for
+
+    tl = _timeline_for(ctx)
+    origin = timeline_origin(ctx.cfg)
+    span = shard_span_seconds(ctx.cfg)
+
+    start_offset = (tl.start - origin).total_seconds()
+    assert start_offset % span == 0, (
+        f"axis starts {start_offset % span:.0f}s into a shard; every unit would straddle"
+    )
+    assert len(tl) % (span // ctx.cfg.cadence_seconds) == 0, "axis is a whole number of shards"
+    assert tl.start.hour == 8 and tl.start.minute == 5, "a radar day starts 08:05"
+
+
+def test_gridded_timeline_can_be_derived_from_the_catalog(tmp_path):
+    """Packing without --window must work, using the times fetch recorded.
+
+    This path had an undefined name for a while: every test passed --window, so
+    nothing executed it. A source whose archive predates today would hit it on
+    the first real run.
+    """
+    from datetime import UTC, datetime
+
+    from meteopack.cli import Context, _timeline_for, build_parser
+    from meteopack.core.catalog import Catalog
+    from meteopack.sources.base import RawFile
+
+    cat = Catalog(tmp_path)
+    for day in (2, 3):
+        cat.record_file(RawFile(tmp_path / f"{day}.tar", "0" * 64, 1, f"u{day}"),
+                        source="knmi_radar", product="rtcor_5min", url="file:///x",
+                        valid_time=datetime(2024, 7, day, 8, 5, tzinfo=UTC))
+    cat.flush()
+
+    args = build_parser().parse_args(["pack", "knmi_radar", "--data-root", str(tmp_path)])
+    tl = _timeline_for(Context(args))
+    assert tl.start <= datetime(2024, 7, 2, 8, 5, tzinfo=UTC)
+    assert tl.end >= datetime(2024, 7, 3, 8, 5, tzinfo=UTC)
+
+
+def test_pack_without_a_window_or_catalog_says_what_to_do(tmp_path):
+    from meteopack.cli import Context, _timeline_for, build_parser
+
+    args = build_parser().parse_args(["pack", "knmi_radar", "--data-root", str(tmp_path)])
+    with pytest.raises(SystemExit, match="Pass --window"):
+        _timeline_for(Context(args))
