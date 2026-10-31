@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import tarfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import ClassVar
 
 import pytest
 import requests
