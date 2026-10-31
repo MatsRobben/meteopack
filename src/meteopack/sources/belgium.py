@@ -63,6 +63,7 @@ from urllib.parse import urlencode
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
+from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
@@ -92,8 +93,8 @@ _CODE_RE = re.compile(r"^\d{1,12}$")
 _XML_PREFIXES = (b"<?xml", b"<ows:", b"<ExceptionReport", b"<html")
 
 
-class SchemaDriftError(RuntimeError):
-    """A CSV export's columns, or its body, are not what this reader expects."""
+#: A CSV export's columns, or its body, are not what this reader expects.
+SchemaDriftError = _SchemaDriftError
 
 
 # -------------------------------------------------------------------- naming

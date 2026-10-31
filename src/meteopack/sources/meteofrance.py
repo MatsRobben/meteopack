@@ -63,6 +63,7 @@ from urllib.parse import urlencode
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
+from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
@@ -103,8 +104,8 @@ _YEAR_RE = re.compile(r"(\d{4})")
 _S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 
 
-class SchemaDriftError(RuntimeError):
-    """A département CSV's columns do not match the fingerprint pinned in config."""
+#: A département CSV's columns do not match the fingerprint pinned in config.
+SchemaDriftError = _SchemaDriftError
 
 
 def station_id(value: str | int) -> str:

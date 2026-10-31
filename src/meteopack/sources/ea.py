@@ -59,6 +59,7 @@ from urllib.parse import urlencode
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
+from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
@@ -107,8 +108,8 @@ _MEASURE_SUFFIX = f"-{PARAMETER}-t-{PERIOD_SECONDS}-mm-qualified"
 _TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 
-class SchemaDriftError(RuntimeError):
-    """A readings CSV's columns do not match the fingerprint pinned in config."""
+#: A readings CSV's columns do not match the fingerprint pinned in config.
+SchemaDriftError = _SchemaDriftError
 
 
 @dataclass(frozen=True, slots=True)

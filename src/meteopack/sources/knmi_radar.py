@@ -93,6 +93,7 @@ import numpy as np
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
+from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 
 if TYPE_CHECKING:  # xarray is a caller-facing type here, not an import-time cost
@@ -144,8 +145,8 @@ _IMAGE_DATA = "image_data"
 _SOURCE_KEY_SEP = "|"
 
 
-class SchemaDriftError(RuntimeError):
-    """An HDF5 frame's image layout is not one the config was pinned against."""
+#: An HDF5 frame's image layout is not one the config was pinned against.
+SchemaDriftError = _SchemaDriftError
 
 
 # ------------------------------------------------------------- HDF5 attribute IO

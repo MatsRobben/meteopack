@@ -93,11 +93,18 @@ class Context:
             from meteopack.core.http import RateLimiter
             from meteopack.sources import registry
 
+            # raw_root matters to sources that can recover state from the
+            # archive on disk. `pack` parses in worker processes, so anything a
+            # source accumulates during parse (meteofrance builds its station
+            # registry that way) is gone by the time the parent writes station
+            # metadata; the disk is the only thing both sides share.
+            # registry.build drops the keyword for sources that do not take it.
             self._src = registry.build(
                 self.args.target,
                 self.source_cfg,
                 session=requests.Session(),
                 limiter=RateLimiter.from_config(self.source_cfg.rate_limit),
+                raw_root=self.raw_root,
             )
         return self._src
 
@@ -390,6 +397,20 @@ def stage_pack(ctx: Context) -> int:
     return 1 if errors else 0
 
 
+def _variant_group(variant: dict) -> str | None:
+    """The key a scan variant is pinned under.
+
+    Sources name it differently — dwd calls it `group` (a variable group),
+    meteofrance `token` (an archive period) — and a mismatch here compares
+    nothing while looking like a clean bill of health.
+    """
+    for key in ("group", "token"):
+        value = variant.get(key)
+        if value is not None:
+            return str(value)
+    return None
+
+
 def _compare_schema(cfg, report: dict) -> tuple[list[str], str]:
     """Compare a scan report against whatever the product pins.
 
@@ -413,7 +434,7 @@ def _compare_schema(cfg, report: dict) -> tuple[list[str], str]:
     if isinstance(groups, dict) and groups:
         drifted, scanned = [], set()
         for variant in variants:
-            group = variant.get("group")
+            group = _variant_group(variant)
             if group is None:
                 continue
             scanned.add(group)
@@ -424,6 +445,13 @@ def _compare_schema(cfg, report: dict) -> tuple[list[str], str]:
         note = f"{len(scanned)} of {len(groups)} pinned group schemas match"
         if missing:
             note += f" (not seen here: {', '.join(missing)})"
+        if variants and not scanned:
+            # Nothing was compared, which reads like "no drift" and is the one
+            # outcome a drift check must never report quietly.
+            drifted.append(
+                f"{len(variants)} variant(s) carry no group key, so none of the "
+                f"{len(groups)} pinned group schemas were checked"
+            )
         return drifted, note
 
     layouts = extra.get("known_layouts")
@@ -466,7 +494,7 @@ def stage_scan(ctx: Context) -> int:
     for variant in report.get("variants", []):
         cols = variant.get("columns")
         n_cols = len(cols) if isinstance(cols, (list, tuple, dict, set)) else cols
-        print(f"  {variant.get('group', '-')!s:18s} fp={variant.get('fingerprint')} "
+        print(f"  {_variant_group(variant) or '-'!s:18s} fp={variant.get('fingerprint')} "
               f"n={variant.get('count')}  cols={n_cols if n_cols is not None else '-'}")
     drifted, checked = _compare_schema(ctx.cfg, report)
     if drifted:

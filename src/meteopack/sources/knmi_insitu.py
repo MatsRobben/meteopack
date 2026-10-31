@@ -66,6 +66,7 @@ from urllib.parse import unquote, urlparse
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
+from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 
 if TYPE_CHECKING:  # keep polars and xarray off the import path of `meteopack.sources`
@@ -103,8 +104,8 @@ STRUCTURAL: frozenset[str] = frozenset(
 DEFAULT_STATION_SCAN_DAYS = 8
 
 
-class SchemaDriftError(RuntimeError):
-    """A member's variables are not what the catalogue pinned in config says."""
+#: A member's variables are not what the catalogue pinned in config says.
+SchemaDriftError = _SchemaDriftError
 
 
 # ------------------------------------------------------------------- naming

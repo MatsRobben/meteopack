@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
+from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
@@ -75,8 +76,8 @@ _QN_COL = "QN"
 _UTC_FROM = datetime(2000, 1, 1, tzinfo=UTC)
 
 
-class SchemaDriftError(RuntimeError):
-    """A produkt file's columns do not match the fingerprint pinned in config."""
+#: A produkt file's columns do not match the fingerprint pinned in config.
+SchemaDriftError = _SchemaDriftError
 
 
 @dataclass(frozen=True, slots=True)

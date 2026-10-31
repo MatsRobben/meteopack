@@ -57,6 +57,7 @@ from urllib.parse import urlencode
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
+from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
@@ -93,8 +94,8 @@ _PARAMETER = "parameterId"
 _STATION = "stationId"
 
 
-class SchemaDriftError(RuntimeError):
-    """A metObs document does not have the shape this reader expects."""
+#: A metObs document does not have the shape this reader expects.
+SchemaDriftError = _SchemaDriftError
 
 
 class PageOverflowError(RuntimeError):

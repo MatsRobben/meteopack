@@ -217,3 +217,70 @@ def test_fetch_file_honours_overwrite(tmp_path):
 
     http.fetch_file("https://example.invalid/a.bin", dest, unit_key="k", session=s, overwrite=True)
     assert dest.read_bytes() == b"new" and s.calls == 1, "overwrite must refetch"
+
+
+def test_schema_drift_is_one_exception_across_every_source():
+    """`except SchemaDriftError` must catch drift from any source.
+
+    Each source originally defined its own class, so catching one caught
+    exactly one and silently missed the other nine — a pipeline handling drift
+    uniformly would have let nine sources write misaligned stores.
+    """
+    import importlib
+
+    from meteopack.sources.common import SchemaDriftError, SourceError
+
+    names = ["dwd", "esoh", "belgium", "dmi", "ea", "knmi_insitu",
+             "knmi_radar", "meteofrance", "midas", "eumetsat_seviri"]
+    for name in names:
+        mod = importlib.import_module(f"meteopack.sources.{name}")
+        err = getattr(mod, "SchemaDriftError", None)
+        assert err is SchemaDriftError, f"{name} defines its own SchemaDriftError"
+    assert issubclass(SchemaDriftError, SourceError)
+
+
+def test_fingerprint_is_order_and_whitespace_independent():
+    from meteopack.sources.common import fingerprint
+
+    assert fingerprint(["b", "a"]) == fingerprint([" a ", "b"])
+    assert fingerprint(["a"]) != fingerprint(["a", "c"])
+    assert fingerprint([]) == fingerprint(["", "  "])
+
+
+def test_cli_gives_the_source_its_raw_root():
+    """`pack` parses in worker processes, so anything the parent source object
+    accumulated during parse is gone before it writes station metadata. The
+    archive on disk is the only state both sides share, so a source that can
+    recover from it must actually be told where it is — meteofrance silently
+    wrote an empty station table until it was.
+    """
+    import inspect
+
+    from meteopack.cli import Context
+
+    assert "raw_root=self.raw_root" in inspect.getsource(Context.src.fget)
+
+
+def test_scan_group_key_is_read_under_either_name():
+    """dwd calls the pin key `group`, meteofrance `token`. Reading only one
+    compared nothing for the other while printing a clean bill of health.
+    """
+    from meteopack.cli import _compare_schema, _variant_group
+
+    assert _variant_group({"group": "wind"}) == "wind"
+    assert _variant_group({"token": "latest-2025-2026"}) == "latest-2025-2026"
+    assert _variant_group({"fingerprint": "abc"}) is None
+
+    class Cfg:
+        extra = {"schema_fingerprints": {"a": "fp1", "b": "fp2"}}
+        schema_fingerprint = None
+
+    ok, _ = _compare_schema(Cfg(), {"variants": [{"token": "a", "fingerprint": "fp1"}]})
+    assert ok == []
+
+    drift, _ = _compare_schema(Cfg(), {"variants": [{"token": "a", "fingerprint": "other"}]})
+    assert drift and "fp1" in drift[0]
+
+    # A variant with no group key compared nothing at all; that must be loud.
+    blind, _ = _compare_schema(Cfg(), {"variants": [{"fingerprint": "fp1"}]})
+    assert blind and "no group key" in blind[0]

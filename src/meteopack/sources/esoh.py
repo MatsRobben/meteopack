@@ -79,6 +79,7 @@ from urllib.parse import quote, urlencode
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
+from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
@@ -115,8 +116,8 @@ _WIGOS_KEY = "metocean:wigosId"
 _LEVEL_TOL = 1e-9
 
 
-class SchemaDriftError(RuntimeError):
-    """A CoverageJSON document does not have the shape this reader expects."""
+#: A CoverageJSON document does not have the shape this reader expects.
+SchemaDriftError = _SchemaDriftError
 
 
 # -------------------------------------------------------------- parameter names

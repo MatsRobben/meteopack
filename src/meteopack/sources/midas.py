@@ -69,6 +69,7 @@ from typing import TYPE_CHECKING, Any
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
+from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
@@ -128,8 +129,8 @@ _VERSION_PREFIX = "dataset-version-"
 _QC_PREFIX = "qc-version-"
 
 
-class SchemaDriftError(RuntimeError):
-    """A BADC-CSV does not have the shape, columns or units this reader expects."""
+#: A BADC-CSV does not have the shape, columns or units this reader expects.
+SchemaDriftError = _SchemaDriftError
 
 
 class CedaAuthError(RuntimeError):
