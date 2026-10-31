@@ -1,9 +1,9 @@
-"""meteopack {list,fetch,parse,pack,derive,validate,catalog} <source|dataset> --window"""
+"""meteopack {scan,list,fetch,parse,pack,derive,validate,catalog} <source|dataset> --window"""
 from __future__ import annotations
 
 import argparse
 
-STAGES = ("list", "fetch", "parse", "pack", "derive", "validate", "catalog")
+STAGES = ("scan", "list", "fetch", "parse", "pack", "derive", "validate", "catalog")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -13,6 +13,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--window", help="ISO interval, e.g. 2012-01-01/2026-01-01")
     p.add_argument("--config", help="path override for the product/derive config")
     p.add_argument("--workers", type=int, default=None, help="default: all available cores")
+    p.add_argument(
+        "--data-root",
+        help="overrides $METEOPACK_DATA_ROOT, which overrides the config default",
+    )
     return p
 
 
