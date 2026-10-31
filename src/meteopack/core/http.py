@@ -18,7 +18,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from urllib.parse import urlparse
 
 import requests
@@ -259,7 +259,7 @@ class TarArchiveWriter:
         self._tar: tarfile.TarFile | None = None
         self._names: set[str] = set()
 
-    def __enter__(self) -> TarArchiveWriter:
+    def __enter__(self) -> Self:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._tar = tarfile.open(self._part, "w")
         try:

@@ -1,0 +1,26 @@
+# DWD Climate Data Center open data (opendata.dwd.de).
+#
+# No key, no quota, plain HTTPS directory tree. The server is generous but
+# unmetered politeness is still rude: the 10-minute tree is ~9000 station ZIPs
+# per group per period, and a full backfill walks all six groups.
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: dwd
+
+base_url: https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes
+
+rate_limit:
+  # Small files (a `now` ZIP is ~1 KB, a decade of `historical` a few hundred);
+  # the cost is per request, not per byte, so cap requests rather than threads.
+  requests_per_second: 8.0
+  max_workers: 8
+  max_retries: 5
+  backoff_seconds: 1.0
+
+# Open data: nothing to authenticate with.
+credentials_env: []
+
+extra:
+  timeout_seconds: 120
+  user_agent: "meteopack/0.1 (+dwd-opendata)"

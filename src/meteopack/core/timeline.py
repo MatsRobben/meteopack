@@ -7,7 +7,7 @@ positions with `index_of` and scatter, which avoids a pandas reindex per block.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 
@@ -83,4 +83,4 @@ class Timeline:
 
 def utc(year: int, month: int = 1, day: int = 1, hour: int = 0, minute: int = 0) -> datetime:
     """Short constructor for tests and configs."""
-    return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+    return datetime(year, month, day, hour, minute, tzinfo=UTC)

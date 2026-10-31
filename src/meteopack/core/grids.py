@@ -73,7 +73,7 @@ class Grid:
 
 
 @functools.lru_cache(maxsize=64)
-def _polygon(grid: "Grid") -> np.ndarray:
+def _polygon(grid: Grid) -> np.ndarray:
     """Densified footprint ring as an (N, 2) array.
 
     Cached here rather than on the instance because Grid is a frozen slots

@@ -1,0 +1,139 @@
+# DWD 10-minute station observations, clipped to the KNMI radar footprint.
+#
+# Loads into meteopack.core.config.ProductConfig. The variable map is the whole
+# of the source-specific knowledge: `source_key` is "<DWD group>:<DWD column>",
+# which is exactly where the file lives on the server and what the column is
+# called inside the produkt file, so adding a parameter is a config change.
+#
+# Scale/offset are applied after the -999 sentinel is nulled, and valid_min /
+# valid_max are expressed in the canonical units below (i.e. post-scale).
+
+source: dwd
+product: stations_10min
+version: 1
+
+cadence_seconds: 600          # the feed's native 10-minute step
+grid_id: knmi_1km_stereo      # stations outside this footprint are dropped
+
+store:
+  kind: points
+  chunks:
+    time: 4032                # 4 weeks of 10-minute steps
+    station: 64
+  compressor: zstd
+  compression_level: 3
+  partition_by: [year]
+
+raw_layout:
+  archive: none               # one ZIP per station-period is already coarse enough
+  granularity: year
+
+retention:
+  raw:
+    keep: true
+    tier: cold                # ~1 KB/day/station/group; cheap to keep, slow to re-pull
+  canonical:
+    keep: true
+  derived:
+    keep: true
+
+variables:
+  - name: air_temperature
+    source_key: air_temperature:TT_10
+    units: degC
+    long_name: Air temperature at 2 m
+    dtype: float32
+    valid_min: -60.0
+    valid_max: 60.0
+
+  - name: dew_point_temperature
+    source_key: air_temperature:TD_10
+    units: degC
+    long_name: Dew point temperature at 2 m
+    dtype: float32
+    valid_min: -60.0
+    valid_max: 50.0
+
+  - name: relative_humidity
+    source_key: air_temperature:RF_10
+    units: "%"
+    long_name: Relative humidity at 2 m
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 100.0
+
+  - name: air_pressure
+    source_key: air_temperature:PP_10
+    units: hPa
+    long_name: Air pressure at station height
+    dtype: float32
+    valid_min: 500.0
+    valid_max: 1100.0
+
+  - name: precipitation_amount
+    source_key: precipitation:RWS_10
+    units: mm
+    long_name: Precipitation sum over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 200.0
+
+  - name: wind_speed
+    source_key: wind:FF_10
+    units: m s-1
+    long_name: Mean wind speed over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 120.0
+
+  - name: wind_from_direction
+    source_key: wind:DD_10
+    units: degree
+    long_name: Mean wind direction over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 360.0
+
+  - name: wind_speed_of_gust
+    source_key: extreme_wind:FX_10
+    units: m s-1
+    long_name: Maximum wind gust over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 150.0
+
+  - name: sunshine_duration
+    source_key: solar:SD_10
+    units: s
+    long_name: Sunshine duration over the preceding 10 minutes
+    dtype: float32
+    scale: 3600.0             # DWD publishes SD_10 in hours
+    valid_min: 0.0
+    valid_max: 600.0
+
+  - name: surface_downwelling_shortwave_flux
+    source_key: solar:GS_10
+    units: W m-2
+    long_name: Global radiation, mean over the preceding 10 minutes
+    dtype: float32
+    scale: 16.666667          # J/cm2 per 600 s -> W/m2 (x 1e4 J/m2, / 600 s)
+    valid_min: 0.0
+    valid_max: 1500.0
+
+# Pinned on 2026-10-31 from the live `now/` files of each group. `scan` reports
+# the fingerprints it sees; re-pin here only after looking at what moved.
+schema_fingerprint: d50d11ac300bef52
+
+extra:
+  schema_fingerprints:
+    air_temperature: "267791e758f02936"
+    precipitation: "146c47e5c3f5d60e"
+    wind: "59720ffc87172d7e"
+    extreme_wind: "83f713308180e554"
+    solar: "cf8690abb391903d"
+  # historical/ timestamps are MEZ (UTC+1) before 2000 and UTC from 2000 on.
+  pre_2000_mez: true
+  # Drop observations that are not on the 600 s grid rather than snapping them.
+  drop_off_cadence: true
+  # recent/ is a rolling window of the last 500 days (DWD dataset description).
+  recent_days: 500

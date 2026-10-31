@@ -181,7 +181,7 @@ def test_midstream_failure_leaves_no_dest_and_no_part(server, session, tmp_path)
 def test_non_http_exception_midstream_cleans_up(tmp_path):
     class Resp:
         status_code = 200
-        headers: dict = {}
+        headers: ClassVar[dict] = {}
 
         def __enter__(self):
             return self
@@ -252,7 +252,7 @@ def test_rate_limiter_spaces_real_threads():
     for t in threads:
         t.join()
     stamps.sort()
-    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    gaps = [b - a for a, b in itertools.pairwise(stamps)]
     assert min(gaps) >= 1 / rps * 0.7
     assert stamps[-1] - stamps[0] >= 7 / rps * 0.9
 
@@ -306,10 +306,9 @@ def test_tar_roundtrip(tmp_path):
 
 def test_tar_failure_leaves_no_tar(tmp_path):
     p = tmp_path / "x.tar"
-    with pytest.raises(RuntimeError):
-        with TarArchiveWriter(p) as w:
-            w.add_bytes("a", b"1")
-            raise RuntimeError("killed")
+    with pytest.raises(RuntimeError), TarArchiveWriter(p) as w:
+        w.add_bytes("a", b"1")
+        raise RuntimeError("killed")
     assert not p.exists()
     assert not list(tmp_path.glob("*.part"))
 
@@ -318,10 +317,9 @@ def test_tar_failure_keeps_previous_tar_intact(tmp_path):
     p = tmp_path / "x.tar"
     with TarArchiveWriter(p) as w:
         w.add_bytes("a", b"1")
-    with pytest.raises(RuntimeError):
-        with TarArchiveWriter(p) as w:
-            w.add_bytes("b", b"2")
-            raise RuntimeError
+    with pytest.raises(RuntimeError), TarArchiveWriter(p) as w:
+        w.add_bytes("b", b"2")
+        raise RuntimeError
     assert h.list_members(p) == ["a"]
 
 

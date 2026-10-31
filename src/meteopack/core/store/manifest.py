@@ -13,7 +13,7 @@ import json
 import os
 import subprocess
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +67,7 @@ class Manifest:
 
     @classmethod
     def new(cls, store_id: str, layer: str, kind: str, cfg: BaseModel | dict, **kw) -> Manifest:
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = datetime.now(UTC).isoformat(timespec="seconds")
         return cls(
             store_id=store_id, layer=layer, kind=kind,
             config_hash=config_hash(cfg), code_version=code_version(),
@@ -80,7 +80,7 @@ def write(store_path: Path, manifest: Manifest) -> Path:
     store_path = Path(store_path)
     store_path.mkdir(parents=True, exist_ok=True)
     dest = store_path / MANIFEST_NAME
-    manifest.updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    manifest.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
     tmp = dest.with_suffix(".json.part")
     tmp.write_text(json.dumps(asdict(manifest), indent=2, sort_keys=True))
     os.replace(tmp, dest)
