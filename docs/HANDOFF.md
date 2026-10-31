@@ -85,3 +85,80 @@ Updated as work lands; newest state at the top of each section.
   elsewhere (hard-coded archive roots in configs, `/dev/shm` assumptions).
 - `derive` is wired for bricks only in the CLI; `dense_stations` and `splits`
   are API-only.
+
+## Session 2026-10-31 (late): what running everything turned up
+
+Everything below was found by running the pipeline, not by reading it. Each one
+is committed with a regression test.
+
+### Silent data loss, now fixed
+
+1. **A gridded store's time axis never grew.** Packing four days of radar one
+   day at a time kept 288 of 864 frames and printed "wrote 576 frames" each
+   run, exit 0. Two faults compounded: the axis is fixed at `initialise` and
+   frames past its end land at index -1, and the count reported was the number
+   of frames handed to the writer rather than the number taken. Fixed with
+   `gridded.extend` (forward only, rounded to a whole shard) and
+   `gridded.WriteResult(written, outside, off_cadence)`; `pack` now fails on a
+   non-zero `outside`. Verified: day-by-day == whole-window, element-wise, both
+   variables, 0 differing cells.
+
+2. **`pack --window` read the whole archive.** The window sized the time axis
+   but never selected files. One day of SEVIRI decompressed and reprojected all
+   576 scenes (25 GB) and timed out. Gridded sources now expose `span_of`;
+   576 -> 291 files for one day. Points are deliberately *not* filtered: a
+   points partition is replaced on write, so packing a subset of its files
+   would drop the rest of the partition.
+
+3. **`meteopack derive` had never run.** Wrong keyword (`shard=` vs `task=`),
+   wrong type (DeriveConfig vs DeriveSpec), and bricks was called for every
+   config so the points path was unreachable. The split index was never written
+   either - a brick store with no train/val/test.
+
+4. **meteofrance wrote an empty station table.** Its station registry is a side
+   effect of `parse`, which now happens in worker processes, so the parent had
+   nothing by the time it wrote metadata. The disk fallback existed but the CLI
+   never passed `raw_root`. 0/29 -> 29/29.
+
+5. **The scan drift check compared nothing for meteofrance.** dwd names the pin
+   key `group`, meteofrance `token`. "0 of 3 pinned group schemas match" with
+   exit 0 reads exactly like a pass. Both names understood; comparing nothing
+   is now itself reported as drift.
+
+### Verified working end to end
+
+| what | evidence |
+|---|---|
+| points incremental download+append | belgium 2 -> 4 stations, 87,526 -> 175,060 rows, existing stations byte-identical, 0 duplicates |
+| gridded incremental append | day-by-day == whole-window, 402,196,288 finite precip pixels either way |
+| re-pack idempotence | re-packing a day changes nothing |
+| dense_stations derive | 134,763 x 58, coordinates and names present, ranges plausible |
+| bricks derive | 648 samples of 12x256x256, 87.7% finite, no empty sample |
+| splits | 216/216/216 on day boundaries, no sample in two splits |
+
+### Portability
+
+Config values expand `${VAR}` and `${VAR:-default}`. The seven machine-specific
+paths in configs and the one in `knmi_insitu.py` are now site settings; see
+`.env.example`. An undefined variable is left as written and warned about,
+never expanded to empty, because `${ARCHIVE}/knmi` becoming `/knmi` reads the
+wrong directory. A test fails if an absolute `/vol`, `/home` or `/dev/shm` path
+reappears in a config.
+
+### The data root explains itself
+
+`raw/`, `canonical/`, `derived/` and `catalog/` each carry a README written on
+every run: what is in it, what wrote it, whether it can be rebuilt. Catalog
+shard filenames lead with a timestamp so `ls` is chronological. Every product
+config has a one-line `description` that reaches the store manifest, and
+`meteopack catalog` lists the stores with it.
+
+### Still open
+
+- midas: the CEDA token is expired (`CedaAuthError`). Needs a new one.
+- eumetsat_seviri: full-day pack (288 scenes) not yet confirmed green.
+- The full runs over the existing `data_raw` archives (dwd 7.3G, dmi 2.4G,
+  meteofrance 2.5G, ea 4.0G, midas 750M, belgium 1.0G, knmi radar, knmi
+  in-situ) - explicitly not satellite.
+- Source de-duplication: `_requests_session` x7, `station_id` x7,
+  `StationRecord` x7, `unit_key` x6 still live in each source.
