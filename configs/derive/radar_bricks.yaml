@@ -1,0 +1,23 @@
+# Training patches cut from the KNMI radar store.
+#
+# The gridded half of `derive`: `inputs` names a gridded canonical store and
+# `tile` cuts it into patches. Drop `tile` and each sample is the whole field -
+# full-field is the degenerate tiling, not a separate code path.
+name: radar_bricks
+description: >-
+  Training-ready radar patches: 256x256 tiles x 12 consecutive 5-minute frames,
+  shuffled once at build time and split into train/val/test by time block.
+version: 1
+inputs: ["knmi_radar/rtcor_5min/v1"]
+grid_id: knmi_1km_stereo
+cadence_seconds: 300
+n_timesteps: 12          # one hour per sample
+tile: [256, 256]
+shard_samples: 16
+
+# Whole-day blocks, so a sample never straddles a split boundary. Times are
+# half-open [start, end).
+splits:
+  train: ["2024-07-01T08:05/2024-07-02T08:05"]
+  val:   ["2024-07-02T08:05/2024-07-03T08:05"]
+  test:  ["2024-07-03T08:05/2024-07-04T08:05"]

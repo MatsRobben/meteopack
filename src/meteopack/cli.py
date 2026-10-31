@@ -639,25 +639,157 @@ def stage_catalog(ctx: Context) -> int:
     return 0
 
 
+def _derive_timeline(cfg, root: Path, window):
+    """The time axis a derived dataset is enumerated over.
+
+    `--window` if given, otherwise what the inputs actually cover: a derived
+    dataset over a window its inputs do not hold is all-missing samples, and a
+    window typed by hand is the easiest way to get one. Snapped inwards to the
+    derive cadence so the axis is on grid.
+    """
+    import json
+    from datetime import timedelta
+
+    from meteopack.core.timeline import Timeline
+
+    cadence = timedelta(seconds=cfg.cadence_seconds)
+    if window is not None:
+        return Timeline(start=window.start, end=window.end, cadence=cadence)
+
+    spans = []
+    for store_id in cfg.inputs:
+        base = root / "canonical" / store_id
+        man = base / "manifest.json"
+        if not man.exists():
+            continue
+        try:
+            kind = json.loads(man.read_text()).get("kind")
+        except (OSError, ValueError):
+            continue
+        if kind == "gridded":
+            import zarr
+
+            attrs = zarr.open_group(base, mode="r").attrs
+            spans.append((datetime.fromisoformat(str(attrs["time_start"])),
+                          datetime.fromisoformat(str(attrs["time_end"]))))
+        elif kind == "points":
+            import duckdb
+
+            glob = str(base / "observations" / "**" / "*.parquet")
+            rows = duckdb.sql(
+                f"select min(time), max(time) from read_parquet('{glob}')"
+            ).fetchall()
+            if rows and rows[0][0] is not None:
+                lo, hi = rows[0]
+                spans.append((lo.replace(tzinfo=UTC), hi.replace(tzinfo=UTC) + cadence))
+
+    if not spans:
+        raise SystemExit(
+            f"cannot size the time axis for {cfg.name}: none of its inputs "
+            f"({', '.join(cfg.inputs)}) is packed. Pack them, or pass --window."
+        )
+    start = max(s for s, _ in spans)
+    end = min(e for _, e in spans)
+    # Snap inwards so both ends sit on the cadence grid.
+    step = int(cadence.total_seconds())
+    start += timedelta(seconds=(-int(start.timestamp())) % step)
+    end -= timedelta(seconds=int(end.timestamp()) % step)
+    if end <= start:
+        raise SystemExit(
+            f"the inputs of {cfg.name} do not overlap in time: "
+            + "; ".join(f"{a:%Y-%m-%d %H:%M}..{b:%Y-%m-%d %H:%M}" for a, b in spans)
+        )
+    return Timeline(start=start, end=end, cadence=cadence)
+
+
+def _derive_kind(cfg, root: Path) -> str:
+    """Which builder a derive config wants: gridded patches, or a station matrix.
+
+    Taken from the manifest of the first input store rather than guessed from
+    the name, so a config cannot quietly ask for the wrong one. `kind:` in the
+    config overrides it.
+    """
+    import json
+
+    if getattr(cfg, "kind", None):
+        return str(cfg.kind)
+    for store_id in cfg.inputs:
+        path = root / "canonical" / store_id / "manifest.json"
+        if not path.exists():
+            continue
+        try:
+            kind = json.loads(path.read_text()).get("kind")
+        except (OSError, ValueError):
+            continue
+        if kind == "points":
+            return "dense_stations"
+        if kind == "gridded":
+            return "bricks"
+    raise SystemExit(
+        f"cannot tell what to build for {cfg.name}: none of its inputs "
+        f"({', '.join(cfg.inputs)}) is a packed store under {root / 'canonical'}. "
+        f"Pack the input first, or set `kind:` in the derive config."
+    )
+
+
 def stage_derive(ctx_args: argparse.Namespace) -> int:
+    from meteopack.core import readme
     from meteopack.core.config import DeriveConfig, data_root
-    from meteopack.jobs.plan import config_dir
+    from meteopack.core.store import manifest as manifest_mod
+    from meteopack.jobs.plan import config_dir, load_yaml
 
     path = config_dir(ctx_args.configs) / "derive" / f"{ctx_args.target}.yaml"
     if not path.exists():
         print(f"no derive config: {path}")
         return 1
-    import yaml
 
-    cfg = DeriveConfig(**yaml.safe_load(path.read_text()))
+    cfg = DeriveConfig(**load_yaml(path))
     root = data_root(ctx_args.data_root, default=str(Path.cwd() / "data"))
+    readme.write(root)
+    kind = _derive_kind(cfg, root)
     try:
-        from meteopack.derive import bricks
+        if kind == "dense_stations":
+            from meteopack.derive import dense_stations as builder
+        else:
+            from meteopack.derive import bricks as builder
     except ImportError as exc:
         print(f"derive is not available: {exc}")
         return 2
-    out = bricks.build(cfg, root, shard=ctx_args.shard, shards=ctx_args.shards)
-    print(f"derived {cfg.name} -> {out}")
+
+    from meteopack.derive.base import DeriveSpec
+
+    timeline = _derive_timeline(cfg, root, parse_window(ctx_args.window)
+                                if ctx_args.window else None)
+    spec = DeriveSpec(cfg, timeline)
+    print(f"building {cfg.name} ({kind}) from {', '.join(cfg.inputs)} over "
+          f"{timeline.start:%Y-%m-%dT%H:%M}..{timeline.end:%Y-%m-%dT%H:%M} "
+          f"({len(timeline)} steps)")
+    if kind == "dense_stations":
+        out = builder.build(spec, root)
+    else:
+        out = builder.build(spec, root, task=ctx_args.shard, n_tasks=ctx_args.shards)
+    # A brick store without a split index is a training set with no train/val/
+    # test. The config declares the splits, nothing was writing them, and the
+    # omission is invisible until a training run reads the store and finds no
+    # such column.
+    from meteopack.derive import splits as splits_mod
+
+    index = splits_mod.write(spec, root)
+    counts = splits_mod.read(spec, root)["split"].value_counts().sort("split")
+    summary = ", ".join(f"{r['split']}={r['count']}" for r in counts.iter_rows(named=True))
+    print(f"split index -> {index} ({summary})")
+
+    man = out / manifest_mod.MANIFEST_NAME
+    note = ""
+    if man.exists():
+        import json
+
+        try:
+            data = json.loads(man.read_text())
+            note = f" ({data.get('n_records', 0):,} records)"
+        except (OSError, ValueError):
+            note = ""
+    print(f"derived {cfg.name} -> {out}{note}")
     return 0
 
 

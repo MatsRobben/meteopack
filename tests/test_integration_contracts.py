@@ -8,6 +8,9 @@ incompatible call site fails here instead of on the first live download.
 from __future__ import annotations
 
 import inspect
+import pathlib
+import sys
+import tempfile
 from pathlib import Path
 from typing import ClassVar
 
@@ -325,3 +328,47 @@ def test_config_expansion_leaves_undefined_variables_alone():
         assert _expand(7) == 7
     finally:
         del os.environ["METEOPACK_TEST_VAR"]
+
+
+def test_derive_cli_calls_its_builders_the_way_they_are_declared():
+    """`meteopack derive` passed a DeriveConfig where a DeriveSpec was wanted
+    and `shard=` where the parameter is `task=`. Both raise TypeError on the
+    first real call, and no test caught it because every test called the
+    builders directly.
+    """
+    import inspect
+
+    from meteopack.derive import bricks, dense_stations
+
+    bricks_params = inspect.signature(bricks.build).parameters
+    assert "task" in bricks_params and "n_tasks" in bricks_params
+    assert "shard" not in bricks_params
+
+    src = inspect.getsource(sys.modules["meteopack.cli"].stage_derive)
+    assert "builder.build(spec, root, task=" in src, "bricks must get task=/n_tasks="
+    assert "DeriveSpec(cfg, timeline)" in src, "builders take a DeriveSpec, not a DeriveConfig"
+    assert "splits_mod.write(spec, root)" in src, "a brick store needs its split index"
+
+    dense_params = inspect.signature(dense_stations.build).parameters
+    assert "spec" in dense_params
+
+
+def test_manifest_reads_back_without_fields_added_later():
+    """A store written before `description` existed must still open."""
+    import json
+
+    from meteopack.core.store import manifest as m
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp)
+        (path / m.MANIFEST_NAME).write_text(json.dumps({
+            "store_id": "x/y/v1", "layer": "canonical", "kind": "points",
+            "config_hash": "abc", "code_version": "v0",
+            "created_at": "2020-01-01T00:00:00+00:00",
+            "updated_at": "2020-01-01T00:00:00+00:00",
+            "a_field_from_the_future": 1,
+        }))
+        read = m.read(path)
+        assert read is not None
+        assert read.description is None
+        assert read.store_id == "x/y/v1"

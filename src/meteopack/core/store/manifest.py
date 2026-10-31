@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import subprocess
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -55,11 +55,13 @@ class Manifest:
     store_id: str
     layer: str
     kind: str
-    description: str | None
     config_hash: str
     code_version: str
     created_at: str
     updated_at: str
+    #: One line about what the store holds, from the config. Optional and
+    #: defaulted: manifests written before this field existed must still read.
+    description: str | None = None
     n_records: int = 0
     time_min: str | None = None
     time_max: str | None = None
@@ -94,7 +96,11 @@ def read(store_path: Path) -> Manifest | None:
     dest = Path(store_path) / MANIFEST_NAME
     if not dest.exists():
         return None
-    return Manifest(**json.loads(dest.read_text()))
+    payload = json.loads(dest.read_text())
+    # A manifest written by a newer version may carry fields this one does not
+    # know. Dropping them beats refusing to open the store.
+    known = {f.name for f in fields(Manifest)}
+    return Manifest(**{k: v for k, v in payload.items() if k in known})
 
 
 def is_stale(store_path: Path, cfg: BaseModel | dict) -> bool:

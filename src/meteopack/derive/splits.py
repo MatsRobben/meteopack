@@ -133,25 +133,41 @@ def blocks(
     return out
 
 
-def _warn_if_a_split_is_empty(spec: DeriveSpec, block: timedelta, cycle: Sequence[str]) -> None:
-    """Say so when the window is too short to reach every split.
+def _warn_if_a_split_is_empty(
+    spec: DeriveSpec, layout: Sequence[Block], block: timedelta, cycle: Sequence[str]
+) -> None:
+    """Say so when a split ends up with no blocks at all.
 
-    The default cycle deals one block at a time over ten blocks, so a window
-    shorter than `len(cycle) * block` never reaches `val` or `test`. Training
-    on that silently gives no validation data at all, which is the kind of
+    Training on that silently gives no validation data, which is the kind of
     mistake you find out about at the end of a run rather than the start.
+
+    The warning is computed from the layout that was actually built, not from
+    the cycle arithmetic. When `cfg.splits` names the intervals, the cycle is
+    not used at all, and reasoning about it produced a warning that named the
+    wrong splits and advised setting `cfg.splits` - which was already set. A
+    warning that is wrong about the thing it is warning about is worse than
+    silence, because it teaches you to skip the one that is right.
     """
-    span = spec.timeline.end - spec.timeline.start
-    needed = len(cycle) * block
-    if span >= needed:
+    present = {b.split for b in layout}
+    if spec.cfg.splits:
+        missing = sorted(set(spec.cfg.splits) - present)
+        if missing:
+            window = f"{spec.timeline.start:%Y-%m-%dT%H:%M}..{spec.timeline.end:%Y-%m-%dT%H:%M}"
+            logger.warning(
+                "%s: cfg.splits names %s, but no interval for %s overlaps the window %s, "
+                "so %s will be EMPTY. Check the dates in cfg.splits against the input store.",
+                spec.store_id, ", ".join(sorted(spec.cfg.splits)),
+                ", ".join(missing), window, ", ".join(missing),
+            )
         return
-    reachable = {name for name in cycle[: max(1, int(span / block))]}
-    missing = sorted(set(cycle) - reachable)
+
+    missing = sorted(set(cycle) - present)
     if missing:
+        span = spec.timeline.end - spec.timeline.start
         logger.warning(
             "%s: the window is %s but the %s block cycle needs %s to reach every split; "
-            "%s will be EMPTY. Widen the window, shorten `block`, or set cfg.splits explicitly.",
-            spec.store_id, span, block, needed, ", ".join(missing),
+            "%s will be EMPTY. Widen the window, shorten `block`, or set cfg.splits.",
+            spec.store_id, span, block, len(cycle) * block, ", ".join(missing),
         )
 
 
@@ -163,8 +179,8 @@ def assign(
 ) -> pl.DataFrame:
     """The split index: one row per sample, in write-slot order."""
     table = sample_table(spec)
-    _warn_if_a_split_is_empty(spec, block, cycle)
     layout = blocks(spec, block=block, cycle=cycle)
+    _warn_if_a_split_is_empty(spec, layout, block, cycle)
     if not layout:
         raise ValueError(f"{spec.store_id}: no split block overlaps {spec.timeline.start}..")
     edges = np.array(
