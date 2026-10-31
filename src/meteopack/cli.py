@@ -17,6 +17,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-root",
         help="overrides $METEOPACK_DATA_ROOT, which overrides the config default",
     )
+    p.add_argument("--shard", type=int, default=0, help="this task's index in a Slurm array")
+    p.add_argument("--shards", type=int, default=1, help="total tasks in the Slurm array")
     return p
 
 
