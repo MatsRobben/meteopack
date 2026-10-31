@@ -1,0 +1,36 @@
+# KNMI radar composites, read from the local archive copy.
+#
+# Nothing is downloaded: the daily tars are already on disk, so `fetch` only
+# publishes them into the raw layer. `base_url` is therefore a filesystem path
+# rather than a URL, and is the last fallback for the archive root (the product
+# config's extra.archive_root wins, and an explicit archive_root= wins over
+# that).
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: knmi_radar
+
+base_url: /vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi/nl_rdr_data_rtcor_5m_tar
+
+rate_limit:
+  # There is no remote host to be polite to. What this still decides is the
+  # parse fan-out: one worker per daily tar, each holding ~600 MB of float32
+  # frames for a 288 x 765 x 700 day, so the useful bound is memory, not
+  # bandwidth. Four workers is ~2.5 GB resident.
+  requests_per_second: 1000.0
+  max_workers: 4
+  max_retries: 0
+  backoff_seconds: 0.0
+
+# A local archive: nothing to authenticate with.
+credentials_env: []
+
+extra:
+  # How `fetch` publishes a tar into the raw layer.
+  #   hardlink - the default: same inode, zero bytes, zero seconds. Correct as
+  #              long as the archive is never rewritten in place, because the
+  #              raw copy would follow the rewrite and the recorded sha256 would
+  #              go stale.
+  #   symlink  - same, but breaks if the archive is unmounted or moved.
+  #   copy     - a real second copy (~35 GB for the whole archive).
+  link_mode: hardlink

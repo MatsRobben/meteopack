@@ -191,3 +191,56 @@ def test_splits_warn_when_the_window_cannot_reach_every_split(caplog):
         wide = splits.assign(long)
     assert set(splits.summary(wide)) >= {"train", "val", "test"}
     assert "will be EMPTY" not in caplog.text
+
+
+def test_shard_buckets_follow_the_configured_timeline_origin():
+    """One archive unit must map to exactly one zarr shard.
+
+    A KNMI radar day runs 08:05 to 08:00. Bucketed from the Unix epoch, a tar
+    straddles two shards and two adjacent tars share the middle one — and a
+    shard is a single file, so the two tasks holding them lose whole frames
+    rather than corrupting them.
+    """
+    from datetime import timedelta
+
+    from meteopack.jobs.plan import shard_bucket, shard_span_seconds, timeline_origin
+
+    def buckets(origin_extra):
+        cfg = ProductConfig(
+            source="knmi_radar", product="rtcor_5min", cadence_seconds=300,
+            grid_id="knmi_1km_stereo",
+            store=StoreConfig(kind="gridded", chunks={"time": 1}, shard={"time": 288}),
+            extra=origin_extra,
+        )
+        span, origin = shard_span_seconds(cfg), timeline_origin(cfg)
+        first = utc(2024, 7, 2, 8, 5)
+        return {
+            shard_bucket(Unit(key="u", url="u", valid_time=first + timedelta(minutes=5 * i)),
+                         span, origin)
+            for i in range(288)
+        }
+
+    assert len(buckets({})) == 2, "epoch origin should straddle - that is the bug"
+    assert len(buckets({"timeline_origin": "2018-12-19T08:05:00Z"})) == 1
+
+
+def test_the_real_radar_config_is_shard_aligned():
+    """Guard the shipped config, not just the mechanism."""
+    from datetime import timedelta
+
+    from meteopack.jobs.plan import (
+        load_product_config,
+        shard_bucket,
+        shard_span_seconds,
+        timeline_origin,
+    )
+
+    cfg = load_product_config("knmi_radar", "rtcor_5min")
+    span, origin = shard_span_seconds(cfg), timeline_origin(cfg)
+    first = utc(2024, 7, 2, 8, 5)
+    seen = {
+        shard_bucket(Unit(key="u", url="u", valid_time=first + timedelta(seconds=cfg.cadence_seconds * i)),
+                     span, origin)
+        for i in range(span // cfg.cadence_seconds)
+    }
+    assert len(seen) == 1, f"a day of frames spans {len(seen)} shards; the origin is misaligned"

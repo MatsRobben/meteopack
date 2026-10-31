@@ -8,6 +8,7 @@ and lets a preempted job cost at most its in-flight unit.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -80,7 +81,24 @@ def shard_span_seconds(cfg: ProductConfig) -> int:
     return int(frames) * cfg.cadence_seconds
 
 
-def shard_bucket(unit: Unit, span_seconds: int) -> int:
+def timeline_origin(cfg: ProductConfig) -> datetime:
+    """Where the store's time axis starts, and therefore where shards begin.
+
+    Defaults to the Unix epoch, which is right whenever the archive's natural
+    unit aligns with midnight. It does not for KNMI radar: a daily tar runs
+    08:05 to 08:00, so on an epoch-origin axis every tar straddles two shards,
+    two adjacent tars share the middle one, and the two tasks holding them lose
+    whole frames. Setting the origin to an 08:05 instant makes one tar exactly
+    one shard.
+    """
+    raw = cfg.extra.get("timeline_origin")
+    if not raw:
+        return datetime(1970, 1, 1, tzinfo=UTC)
+    value = datetime.fromisoformat(str(raw))
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def shard_bucket(unit: Unit, span_seconds: int, origin: datetime | None = None) -> int:
     """Which shard file this unit's frame lands in.
 
     Gridded units MUST carry `valid_time`: a zarr shard is one file, and two
@@ -93,7 +111,8 @@ def shard_bucket(unit: Unit, span_seconds: int) -> int:
             f"unit {unit.key!r} has no valid_time; a gridded source must set it so work "
             f"can be split on shard boundaries (otherwise concurrent tasks lose frames)"
         )
-    return int(unit.valid_time.timestamp()) // span_seconds
+    base = origin or datetime(1970, 1, 1, tzinfo=UTC)
+    return int((unit.valid_time - base).total_seconds()) // span_seconds
 
 
 def shard_units(
@@ -103,6 +122,7 @@ def shard_units(
     *,
     mode: str = "stride",
     span_seconds: int | None = None,
+    origin: datetime | None = None,
 ) -> list[Unit]:
     """Split the unit list across array tasks.
 
@@ -125,7 +145,7 @@ def shard_units(
 
     groups: dict[int, list[Unit]] = {}
     for unit in units:
-        groups.setdefault(shard_bucket(unit, span_seconds), []).append(unit)
+        groups.setdefault(shard_bucket(unit, span_seconds, origin), []).append(unit)
     mine = sorted(groups)[shard::shards]
     return [unit for bucket in mine for unit in groups[bucket]]
 
@@ -179,7 +199,8 @@ def build_plan(
     # Gridded writes are only safe one-shard-per-task; points can stride.
     if cfg.store.kind == "gridded" and shards > 1:
         plan.units = shard_units(units, shard, shards, mode="bucket",
-                                 span_seconds=shard_span_seconds(cfg))
+                                 span_seconds=shard_span_seconds(cfg),
+                                 origin=timeline_origin(cfg))
     else:
         plan.units = shard_units(units, shard, shards)
     return plan

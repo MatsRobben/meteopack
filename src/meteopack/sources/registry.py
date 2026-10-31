@@ -19,6 +19,7 @@ _GROUP = "meteopack.sources"
 BUILTIN: dict[str, str] = {
     "dwd": "meteopack.sources.dwd:DwdStations",
     "esoh": "meteopack.sources.esoh:EsohObservations",
+    "knmi_radar": "meteopack.sources.knmi_radar:KnmiRadar",
 }
 
 
