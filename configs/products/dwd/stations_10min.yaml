@@ -137,3 +137,6 @@ extra:
   drop_off_cadence: true
   # recent/ is a rolling window of the last 500 days (DWD dataset description).
   recent_days: 500
+  # recent/ and now/ are rewritten upstream while their filenames stay the same,
+  # so the ledger must never skip them on key alone or the live tail freezes.
+  volatile_subdirs: [recent, now]
