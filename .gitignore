@@ -1,0 +1,37 @@
+# data never lives in the repo
+data/
+*.zarr/
+*.nc
+*.h5
+*.hdf5
+*.grib
+*.grb
+*.bufr
+*.parquet
+*.zip
+*.tar
+*.tar.gz
+
+# environments / build
+.venv/
+uv.lock.local
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# runtime
+logs/
+slurm-*.out
+*.part
+.ipython/
+.jupyter/
+.env
+
+# secrets: tokens live outside the tree (see docs/runbooks)
+*.token
+.ceda_token

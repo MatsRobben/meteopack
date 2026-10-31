@@ -1,0 +1,20 @@
+# Named grids. Every canonical store records a grid_id from this file.
+
+knmi_1km_stereo:
+  description: KNMI radar composite product grid (verified from geo_product_corners)
+  proj4: "+proj=stere +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378140 +b=6356750 +x_0=0 +y_0=0 +units=km +no_defs"
+  # KNMI writes the ellipsoid axes in km in the HDF5 attribute, which PROJ rejects
+  # as a non-Earth body. The axes above are the metre equivalent + units=km.
+  shape: [765, 700]          # rows (y), cols (x)
+  pixel_size_km: [1.0000013, -1.0000055]
+  extent_km: {x: [0.0, 700.0], y: [-4415.0, -3650.0]}
+  product_corners_lonlat:    # LL, UL, UR, LR
+    - [0.000000, 49.362053]
+    - [0.000000, 55.973602]
+    - [10.856429, 55.388977]
+    - [9.009279, 48.895298]
+
+# Placeholders — fill when the corresponding source lands.
+# msg_rss_nl_crop:
+# harmonie_p1:
+# opera_2km_europe:
