@@ -26,6 +26,7 @@ is reproducible: same config, same window, same file.
 from __future__ import annotations
 
 import itertools
+import logging
 import os
 import uuid
 from collections.abc import Sequence
@@ -94,6 +95,8 @@ def _check_disjoint(intervals: dict[str, list[tuple[datetime, datetime]]]) -> No
             raise ValueError(f"splits {n0!r} and {n1!r} overlap at {max(s0, s1).isoformat()}")
 
 
+logger = logging.getLogger(__name__)
+
 def blocks(
     spec: DeriveSpec,
     *,
@@ -130,6 +133,28 @@ def blocks(
     return out
 
 
+def _warn_if_a_split_is_empty(spec: DeriveSpec, block: timedelta, cycle: Sequence[str]) -> None:
+    """Say so when the window is too short to reach every split.
+
+    The default cycle deals one block at a time over ten blocks, so a window
+    shorter than `len(cycle) * block` never reaches `val` or `test`. Training
+    on that silently gives no validation data at all, which is the kind of
+    mistake you find out about at the end of a run rather than the start.
+    """
+    span = spec.timeline.end - spec.timeline.start
+    needed = len(cycle) * block
+    if span >= needed:
+        return
+    reachable = {name for name in cycle[: max(1, int(span / block))]}
+    missing = sorted(set(cycle) - reachable)
+    if missing:
+        logger.warning(
+            "%s: the window is %s but the %s block cycle needs %s to reach every split; "
+            "%s will be EMPTY. Widen the window, shorten `block`, or set cfg.splits explicitly.",
+            spec.store_id, span, block, needed, ", ".join(missing),
+        )
+
+
 def assign(
     spec: DeriveSpec,
     *,
@@ -138,6 +163,7 @@ def assign(
 ) -> pl.DataFrame:
     """The split index: one row per sample, in write-slot order."""
     table = sample_table(spec)
+    _warn_if_a_split_is_empty(spec, block, cycle)
     layout = blocks(spec, block=block, cycle=cycle)
     if not layout:
         raise ValueError(f"{spec.store_id}: no split block overlaps {spec.timeline.start}..")

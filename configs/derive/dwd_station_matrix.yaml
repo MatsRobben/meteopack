@@ -1,0 +1,8 @@
+# Dense (time, station) matrices from the DWD canonical points store.
+name: dwd_station_matrix
+version: 1
+inputs: ["dwd/stations_10min/v1"]
+grid_id: knmi_1km_stereo
+cadence_seconds: 600
+n_timesteps: 36          # 6 hours per sample
+shard_samples: 8

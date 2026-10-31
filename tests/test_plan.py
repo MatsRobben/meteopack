@@ -8,6 +8,7 @@ import pytest
 from meteopack.core.catalog import Catalog, job_key
 from meteopack.core.config import ProductConfig, StoreConfig
 from meteopack.core.timeline import utc
+from meteopack.jobs.plan import CONFIG_DIR as CONFIGS
 from meteopack.jobs.plan import (
     Plan,
     build_plan,
@@ -160,3 +161,33 @@ def test_gridded_unit_without_a_time_is_refused_not_guessed():
     units = [Unit(key="x", url="u")]
     with pytest.raises(ValueError, match="valid_time"):
         shard_units(units, 0, 2, mode="bucket", span_seconds=3600)
+
+
+def test_splits_warn_when_the_window_cannot_reach_every_split(caplog):
+    """A short window silently yields no val/test; say so loudly.
+
+    Observed for real: a 30-day window with 14-day blocks put all 120 samples
+    in `train` and nothing anywhere else. You find that out at the end of a
+    training run, not the start.
+    """
+    import logging
+
+    import yaml
+
+    from meteopack.core.config import DeriveConfig
+    from meteopack.derive import base, splits
+
+    cfg = DeriveConfig(**yaml.safe_load(
+        (CONFIGS / "derive" / "dwd_station_matrix.yaml").read_text()))
+    short = base.DeriveSpec.from_config(cfg, utc(2026, 10, 1), utc(2026, 10, 31))
+    with caplog.at_level(logging.WARNING):
+        frame = splits.assign(short)
+    assert set(splits.summary(frame)) == {"train"}
+    assert "will be EMPTY" in caplog.text
+
+    caplog.clear()
+    long = base.DeriveSpec.from_config(cfg, utc(2026, 4, 1), utc(2026, 10, 18))
+    with caplog.at_level(logging.WARNING):
+        wide = splits.assign(long)
+    assert set(splits.summary(wide)) >= {"train", "val", "test"}
+    assert "will be EMPTY" not in caplog.text

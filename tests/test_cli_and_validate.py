@@ -34,6 +34,13 @@ def _frame(times, values, station="00044") -> pl.DataFrame:
     }).with_columns(pl.col("time").cast(pl.Datetime("us")))
 
 
+
+
+def _stations() -> pl.DataFrame:
+    return pl.DataFrame({"station_id": ["00044"], "lat": [52.1], "lon": [5.2],
+                         "height": [2.0], "name": ["De Bilt"]})
+
+
 # ------------------------------------------------------------------ windows
 
 def test_window_accepts_bare_years_and_is_half_open():
@@ -78,6 +85,7 @@ def test_validate_passes_on_a_healthy_store(tmp_path):
     times = pl.datetime_range(datetime(2012, 1, 1), datetime(2012, 1, 1, 1),
                               interval="10m", eager=True, closed="left")
     points.write(_frame(times, [5.0] * len(times)), cfg, tmp_path)
+    points.write_stations(_stations(), cfg.store_id, tmp_path)
     manifest.write(points.store_path(tmp_path, cfg.store_id),
                    manifest.Manifest.new(cfg.store_id, "canonical", "points", cfg))
     report = validate(cfg, tmp_path)
@@ -122,3 +130,49 @@ def test_validate_flags_a_store_built_from_different_config(tmp_path):
 def test_validate_reports_a_missing_store_rather_than_raising(tmp_path):
     report = validate(_cfg(), tmp_path)
     assert not report.ok and "store exists" in report.text()
+
+
+def test_validate_catches_observations_without_station_metadata(tmp_path):
+    """Positions missing is a silent failure downstream, so catch it here.
+
+    `pack` once wrote observations but never the station table. Nothing failed:
+    the store validated clean, and a dense station matrix simply came back with
+    every coordinate NaN and a third of the stations gone.
+    """
+    cfg = _cfg()
+    times = [datetime(2012, 1, 1, 0, 0), datetime(2012, 1, 1, 0, 10)]
+    points.write(_frame(times, [5.0, 6.0]), cfg, tmp_path)
+    manifest.write(points.store_path(tmp_path, cfg.store_id),
+                   manifest.Manifest.new(cfg.store_id, "canonical", "points", cfg))
+
+    report = validate(cfg, tmp_path)
+    assert not report.ok
+    check = next(c for c in report.checks if c.name == "stations have metadata")
+    assert not check.ok and "station table is empty" in check.detail
+
+    points.write_stations(
+        pl.DataFrame({"station_id": ["00044"], "lat": [52.1], "lon": [5.2],
+                      "height": [2.0], "name": ["De Bilt"]}),
+        cfg.store_id, tmp_path)
+    assert validate(cfg, tmp_path).ok
+
+
+def test_pack_writes_station_metadata_when_the_source_offers_it(tmp_path, monkeypatch, capsys):
+    """`stations()` is an optional capability, like `scan()` — use it if present."""
+    from meteopack import cli
+
+    class Ctx:
+        cfg = _cfg()
+        root = tmp_path
+
+        class src:
+            @staticmethod
+            def stations(cfg):
+                return pl.DataFrame({"station_id": ["00044"], "lat": [52.1], "lon": [5.2],
+                                     "height_m": [2.0], "name": ["De Bilt"], "state": ["X"]})
+
+    n = cli._write_station_metadata(Ctx())
+    assert n == 1
+    back = points.read_stations(_cfg().store_id, tmp_path)
+    assert back["station_id"].to_list() == ["00044"]
+    assert "height" in back.columns, "height_m should be renamed to the store's name"

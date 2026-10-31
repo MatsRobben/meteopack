@@ -79,6 +79,22 @@ def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "canonical
     n_dup = df.select(["time", "station_id"]).is_duplicated().sum()
     report.add("no duplicate (time, station)", n_dup == 0, f"{n_dup} duplicates")
 
+    # Observations without positions are unusable for anything spatial, and the
+    # failure is silent downstream: a dense matrix just drops those stations.
+    try:
+        meta = points.read_stations(cfg.store_id, root, layer=layer)
+    except Exception:  # noqa: BLE001 - absence is the thing being reported
+        meta = None
+    observed = set(df["station_id"].unique().to_list())
+    known = set(meta["station_id"].to_list()) if meta is not None and len(meta) else set()
+    covered = observed & known
+    report.add(
+        "stations have metadata",
+        bool(observed) and len(covered) == len(observed),
+        f"{len(covered)}/{len(observed)} observed stations have a lat/lon row"
+        + ("" if known else " (station table is empty - did pack write it?)"),
+    )
+
     t0, t1 = df["time"].min(), df["time"].max()
     report.stats["time_min"], report.stats["time_max"] = str(t0), str(t1)
     report.stats["stations"] = df["station_id"].n_unique()

@@ -209,6 +209,38 @@ def stage_parse(ctx: Context) -> int:
     return 0
 
 
+def _write_station_metadata(ctx: Context) -> int:
+    """Persist station positions beside the observations.
+
+    Not part of the Source protocol — a gridded source has no stations — so it
+    is an optional capability, like scan(). Without it the points store has
+    observations but no coordinates, and anything that needs position (a dense
+    station matrix, a map, a radar-gauge comparison) silently drops every
+    station instead of failing.
+    """
+    from meteopack.core.store import points
+
+    stations = getattr(ctx.src, "stations", None)
+    if stations is None:
+        return 0
+    table = stations(ctx.cfg)
+    if table is None or not len(table):
+        logger.warning("source %s returned no station metadata", ctx.cfg.source)
+        return 0
+
+    import polars as pl
+
+    # Sources name the elevation column differently; the store has one name.
+    renames = {"height_m": "height", "altitude": "height", "elevation": "height"}
+    table = table.rename({k: v for k, v in renames.items() if k in table.columns})
+    keep = [c for c in ("station_id", "lat", "lon", "height", "name") if c in table.columns]
+    table = table.select(keep).unique(subset=["station_id"], keep="first")
+    if "height" not in table.columns:
+        table = table.with_columns(pl.lit(None, dtype=pl.Float64).alias("height"))
+    points.write_stations(table, ctx.cfg.store_id, ctx.root)
+    return len(table)
+
+
 def stage_pack(ctx: Context) -> int:
     from meteopack.core.store import manifest, points
 
@@ -235,7 +267,10 @@ def stage_pack(ctx: Context) -> int:
                              path=str(store), version=ctx.cfg.version, n_records=df.height,
                              config_hash=manifest.config_hash(ctx.cfg))
     ctx.catalog.flush()
+    n_stations = _write_station_metadata(ctx)
     print(f"packed {df.height} rows into {len(paths)} partition file(s) at {store}")
+    if n_stations:
+        print(f"wrote metadata for {n_stations} stations")
     return 0
 
 
