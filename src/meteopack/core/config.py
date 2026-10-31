@@ -88,11 +88,34 @@ class Variable(BaseModel):
     source_key: str
     units: str
     long_name: str | None = None
+    #: The CF standard name, when the quantity has one. This is what makes a
+    #: radar field and a gauge field recognisably the same quantity, which is
+    #: the only reason a packed layer spanning several sources is worth having.
+    standard_name: str | None = None
+    #: What an earlier generation of this store called the variable. Carried in
+    #: the array attrs so code written against that store can be ported by
+    #: grep rather than by reading two schemas side by side.
+    legacy_name: str | None = None
     scale: float | None = None
     offset: float | None = None
     dtype: str = "float32"
     valid_min: float | None = None
     valid_max: float | None = None
+    #: Store this variable as integers with a fixed calibration instead of
+    #: float32. See meteopack.core.encoding: halves the store for imagery that
+    #: is already integer on disk, and keeps `missing` and `out_of_image`
+    #: apart, which NaN cannot.
+    encoding: dict | None = None
+
+    @property
+    def cf_attrs(self) -> dict[str, str]:
+        """The CF attributes this variable contributes to its array."""
+        out = {"units": self.units, "long_name": self.long_name or self.name}
+        if self.standard_name:
+            out["standard_name"] = self.standard_name
+        if self.legacy_name:
+            out["legacy_name"] = self.legacy_name
+        return out
 
 
 class StoreConfig(BaseModel):
@@ -124,6 +147,10 @@ class ProductConfig(BaseModel):
     retention: RetentionConfig = RetentionConfig()
     raw_layout: RawLayout = RawLayout()
     schema_fingerprint: str | None = None
+    #: CF discovery metadata written onto the store's root group. Separate from
+    #: `extra` because it is a published part of the dataset rather than a knob:
+    #: title, institution, source, history, references, comment.
+    attrs: dict[str, str] = Field(default_factory=dict)
     extra: dict = Field(default_factory=dict)
 
     @property

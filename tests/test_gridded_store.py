@@ -24,7 +24,14 @@ FRAMES_PER_DAY = 86_400 // CADENCE_SECONDS
 DAYS = 4
 
 #: The real registry holds one 765x700 radar grid; tests want frames you can eyeball.
-TINY = Grid(id="tiny_test", proj4="+proj=stere +lat_0=90 +lon_0=0 +units=km", shape=(NY, NX))
+TINY = Grid(
+    id="tiny_test",
+    proj4="+proj=stere +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378140 +b=6356750 +units=km +no_defs",
+    shape=(NY, NX),
+    # Real corners, so initialise exercises the coordinate and lon/lat paths
+    # rather than the degraded one. A grid with no geometry is a separate test.
+    corners_lonlat=((3.0, 52.0), (3.0, 53.0), (5.0, 53.0), (5.0, 52.0)),
+)
 
 
 @pytest.fixture(autouse=True)
@@ -94,9 +101,10 @@ def write_day(root: str, day: int, barrier=None, passes: int = 3) -> int:
 
 def test_initialise_builds_the_geometry_the_config_asked_for(tmp_path: Path):
     cfg = make_cfg(chunks={"time": 1, "y": NY, "x": NX}, shard={"time": 12, "y": NY, "x": NX})
-    path = gridded.initialise(cfg, tmp_path, make_timeline())
+    gridded.initialise(cfg, tmp_path, make_timeline())
+    path = gridded.zarr_path(tmp_path, cfg.store_id)
 
-    assert path == tmp_path / "canonical/knmi/test/v1"
+    assert path == tmp_path / "canonical/knmi/test/v1" / gridded.ZARR_NAME
     import zarr
 
     array = zarr.open_group(path, mode="r")["rain"]
@@ -109,7 +117,8 @@ def test_initialise_builds_the_geometry_the_config_asked_for(tmp_path: Path):
 
 
 def test_defaults_put_one_frame_per_chunk_and_one_day_per_shard(tmp_path: Path):
-    path = gridded.initialise(make_cfg(), tmp_path, make_timeline())
+    gridded.initialise(make_cfg(), tmp_path, make_timeline())
+    path = gridded.zarr_path(tmp_path, make_cfg().store_id)
     reported = gridded.info("knmi/test/v1", tmp_path)
     assert reported["chunks"] == (1, NY, NX)
     assert reported["shards"] == (FRAMES_PER_DAY, NY, NX)
@@ -413,3 +422,154 @@ def test_extend_refuses_to_move_frames_that_are_already_written(tmp_path: Path):
                         end=timeline.end + timedelta(days=1), cadence=timeline.cadence)
     with pytest.raises(ValueError, match="not on"):
         gridded.extend(cfg, tmp_path, off_grid)
+
+
+# ------------------------------------------------- schema: what a store carries
+
+
+def test_a_store_is_georeferenced_and_self_describing(tmp_path: Path):
+    """The store must say what it is without the repository that wrote it.
+
+    radar_v3 carried the projection, the product corners and CF discovery
+    metadata; the first version of this store carried a grid id and nothing
+    else, so it could not be opened as a georeferenced dataset at all.
+    """
+    import zarr
+
+    cfg = make_cfg()
+    gridded.initialise(cfg, tmp_path, make_timeline())
+    group = zarr.open_group(gridded.zarr_path(tmp_path, cfg.store_id), mode="r")
+
+    attrs = dict(group.attrs)
+    assert attrs["Conventions"].startswith("CF-")
+    assert attrs["grid_id"] == TINY.id
+    crs = attrs[gridded.GRID_MAPPING_NAME]
+    assert crs["proj4_params"] == TINY.proj4
+    assert crs["shape"] == [NY, NX]
+    assert len(crs["corners_lonlat"]) == 4
+
+    names = {name for name, _ in group.arrays()}
+    assert {"y", "x", "lat", "lon"} <= names, "missing coordinates"
+    assert set(gridded.PROVENANCE) <= names, "missing per-frame provenance"
+
+    y, x = np.asarray(group["y"][:]), np.asarray(group["x"][:])
+    assert (y.shape, x.shape) == ((NY,), (NX,))
+    assert np.all(np.diff(y) < 0), "y must descend: row 0 is the northern edge"
+    assert np.all(np.diff(x) > 0)
+    assert group["x"].attrs["standard_name"] == "projection_x_coordinate"
+    assert group["lat"].attrs["units"] == "degrees_north"
+    assert np.asarray(group["lat"][:]).shape == (NY, NX)
+
+    assert group["rain"].attrs["coordinates"] == "lat lon"
+    assert group["rain"].attrs["grid_mapping"] == gridded.GRID_MAPPING_NAME
+
+
+def test_the_time_axis_is_nanoseconds(tmp_path: Path):
+    """datetime64[ns] is what every reader here uses; seconds forced a lossy
+    conversion at both ends and could not hold a sub-second cadence."""
+    import zarr
+
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    group = zarr.open_group(gridded.zarr_path(tmp_path, cfg.store_id), mode="r")
+    assert "nanoseconds" in group["time"].attrs["units"]
+    stored = np.asarray(group["time"][:]).astype("datetime64[ns]")
+    np.testing.assert_array_equal(stored, timeline.values())
+
+
+def test_manifest_lives_beside_the_zarr_group_not_inside_it(tmp_path: Path):
+    """Zarr warns about every foreign object in a hierarchy, and is right to."""
+    cfg = make_cfg()
+    store = gridded.initialise(cfg, tmp_path, make_timeline())
+    assert store.name == "v1"
+    assert (store / gridded.ZARR_NAME / "zarr.json").exists()
+    assert not (store / "zarr.json").exists()
+
+
+def test_an_integer_variable_is_stored_as_codes_with_its_calibration(tmp_path: Path):
+    """float32 doubles a store whose source is already integer, and cannot
+    tell `missing` from `out_of_image`."""
+    import zarr
+
+    from meteopack.core.config import ProductConfig, StoreConfig, Variable
+
+    cfg = ProductConfig(
+        source="knmi", product="test", cadence_seconds=CADENCE_SECONDS, grid_id=TINY.id,
+        variables=[Variable(
+            name="precipitation_amount", source_key="x", units="mm",
+            standard_name="precipitation_amount", legacy_name="accumulation_mm",
+            encoding={"dtype": "uint16", "scale": 0.01, "offset": 0.0},
+        )],
+        store=StoreConfig(kind="gridded", chunks={"time": 1}, compression_level=1),
+    )
+    timeline = make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    group = zarr.open_group(gridded.zarr_path(tmp_path, cfg.store_id), mode="r")
+    array = group["precipitation_amount"]
+    assert array.dtype == np.dtype("uint16")
+    assert array.attrs["calibration_missing_data"] == 65534
+    assert array.attrs["calibration_out_of_image"] == 65535
+    assert array.attrs["standard_name"] == "precipitation_amount"
+    assert array.attrs["legacy_name"] == "accumulation_mm"
+
+    codes = np.array([[[0, 1, 2, 3, 4, 5]] * NY], dtype="uint16")
+    ds = xr.Dataset({"precipitation_amount": (gridded.DIMS, codes)},
+                    coords={"time": timeline.values()[:1]})
+    result = gridded.write(ds, cfg, tmp_path)
+    assert result.written == 1
+
+    back = zarr.open_group(gridded.zarr_path(tmp_path, cfg.store_id), mode="r")
+    np.testing.assert_array_equal(np.asarray(back["precipitation_amount"][0]), codes[0])
+
+
+def test_writing_floats_into_an_integer_store_is_refused(tmp_path: Path):
+    """Casting here would round every value without telling anyone."""
+    from meteopack.core.config import ProductConfig, StoreConfig, Variable
+
+    cfg = ProductConfig(
+        source="knmi", product="test", cadence_seconds=CADENCE_SECONDS, grid_id=TINY.id,
+        variables=[Variable(name="rain", source_key="x", units="mm",
+                            encoding={"dtype": "uint16", "scale": 0.01})],
+        store=StoreConfig(kind="gridded", chunks={"time": 1}, compression_level=1),
+    )
+    timeline = make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    ds = dataset(timeline.values()[:1], block(np.arange(1)))
+    with pytest.raises(ValueError, match="Encode with meteopack.core.encoding"):
+        gridded.write(ds, cfg, tmp_path)
+
+
+def test_per_frame_provenance_is_written_with_the_frames(tmp_path: Path):
+    """Measured on the real rtcor archive: 2,013 of 772,129 slots had no file
+    and 36 had a file that would not read. Both read as missing imagery, so
+    only these arrays can tell them apart."""
+    import zarr
+
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+
+    rows = np.arange(3)
+    ds = dataset(timeline.values()[rows], block(rows))
+    ds["is_missing_frame"] = ("time", np.array([False, True, False]))
+    ds["is_corrupt_frame"] = ("time", np.array([False, False, True]))
+    ds["source_layout_id"] = ("time", np.array([5, 0, 1], dtype="int16"))
+    ds["source_record_id"] = ("time", np.array([10, 11, 12], dtype="int64"))
+    gridded.write(ds, cfg, tmp_path)
+
+    group = zarr.open_group(gridded.zarr_path(tmp_path, cfg.store_id), mode="r")
+    np.testing.assert_array_equal(np.asarray(group["is_missing_frame"][:3]),
+                                  [False, True, False])
+    np.testing.assert_array_equal(np.asarray(group["is_corrupt_frame"][:3]),
+                                  [False, False, True])
+    np.testing.assert_array_equal(np.asarray(group["source_layout_id"][:3]), [5, 0, 1])
+    np.testing.assert_array_equal(np.asarray(group["source_record_id"][:3]), [10, 11, 12])
+    # Untouched slots keep "not recorded", not a real layout.
+    assert int(group["source_layout_id"][10]) == -1
+
+
+def test_provenance_is_optional(tmp_path: Path):
+    """A source that cannot say leaves the arrays at their fill value."""
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    result = gridded.write(day_dataset(timeline, 0), cfg, tmp_path)
+    assert result.written == FRAMES_PER_DAY and result.outside == 0

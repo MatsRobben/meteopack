@@ -37,6 +37,7 @@ single task. Nothing in this module takes a lock.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from collections.abc import Sequence
@@ -51,6 +52,7 @@ from zarr.codecs import BloscCodec, GzipCodec, ZstdCodec
 
 from meteopack.core import grids
 from meteopack.core.config import Layer, ProductConfig, StoreConfig, layer_path
+from meteopack.core.encoding import Encoding
 from meteopack.core.timeline import Timeline
 
 if TYPE_CHECKING:  # xarray is a caller-facing type here, not an import-time cost
@@ -59,12 +61,40 @@ if TYPE_CHECKING:  # xarray is a caller-facing type here, not an import-time cos
 #: Gridded stores are canonical-layer artefacts; training sets are derived from them.
 DEFAULT_LAYER: Layer = "canonical"
 
+logger = logging.getLogger(__name__)
+
 TIME_NAME = "time"
 DIMS: tuple[str, str, str] = ("time", "y", "x")
 
 #: Seconds, not nanoseconds: CF-decodable by any reader, and exact for an integer
 #: cadence. Sub-second axes are rejected in `initialise` rather than rounded.
-TIME_UNITS = "seconds since 1970-01-01T00:00:00"
+#: Nanoseconds, not seconds. numpy's datetime64[ns] is what every reader here
+#: already uses, so storing seconds forces a conversion on the way in and out
+#: and loses sub-second resolution the moment a product has any.
+TIME_UNITS = "nanoseconds since 1970-01-01T00:00:00Z"
+
+#: Cell-centre coordinates in the projection's own units, plus per-cell
+#: geographic coordinates, so the store is georeferenced without a sidecar.
+COORD_NAMES: tuple[str, ...] = ("y", "x", "lat", "lon")
+
+#: Per-frame provenance. Written alongside the fields because the questions it
+#: answers - was this frame absent, was it unreadable, which upstream
+#: generation produced it - are unanswerable from the imagery itself: an absent
+#: frame and an empty one both read as missing.
+PROVENANCE: dict[str, tuple[str, object]] = {
+    "is_missing_frame": ("bool", False),
+    "is_corrupt_frame": ("bool", False),
+    "source_layout_id": ("int16", -1),
+    "source_record_id": ("int64", -1),
+}
+
+#: The zarr group sits in a subdirectory of the store so that `manifest.json`
+#: and `README.md` are beside it rather than inside it. Zarr warns about every
+#: foreign object it finds in a hierarchy, and it is right to.
+ZARR_NAME = "dataset.zarr"
+
+#: The CF grid-mapping variable name, referenced by every field.
+GRID_MAPPING_NAME = "crs"
 
 _NS_PER_S = 1_000_000_000
 _SECONDS_PER_DAY = 86_400
@@ -134,9 +164,19 @@ def _variable_names(cfg: ProductConfig, names: Sequence[str] | None) -> list[str
     return list(names)
 
 
+def zarr_path(root: str | os.PathLike[str], store_id: str, *,
+              layer: Layer = DEFAULT_LAYER) -> Path:
+    """The zarr group inside the store directory."""
+    return store_path(root, store_id, layer=layer) / ZARR_NAME
+
+
 def _open(store_id: str, root: str | os.PathLike[str], layer: Layer, mode: str) -> zarr.Group:
-    path = store_path(root, store_id, layer=layer)
+    path = zarr_path(root, store_id, layer=layer)
     if not (path / "zarr.json").exists():
+        legacy = store_path(root, store_id, layer=layer)
+        if (legacy / "zarr.json").exists():
+            # Stores written before the group moved into a subdirectory.
+            return zarr.open_group(legacy, mode=mode, zarr_format=3)
         raise FileNotFoundError(f"no gridded store at {path}; run initialise first")
     return zarr.open_group(path, mode=mode, zarr_format=3)
 
@@ -155,8 +195,14 @@ def _timeline_of(group: zarr.Group) -> Timeline:
     )
 
 
+#: Everything that is not a field: the time axis, the coordinates and the
+#: per-frame provenance. Kept in one place because several functions mean
+#: "the variables" and none of them mean these.
+_NON_FIELD = frozenset({TIME_NAME, *COORD_NAMES, *PROVENANCE})
+
+
 def _data_arrays(group: zarr.Group) -> list[str]:
-    return [name for name, _ in group.arrays() if name != TIME_NAME]
+    return [name for name, _ in group.arrays() if name not in _NON_FIELD]
 
 
 def initialise(
@@ -191,7 +237,7 @@ def initialise(
     shape = (len(timeline), ny, nx)
     chunks, shards = _geometry(cfg, shape)
 
-    path = store_path(root, cfg.store_id, layer=layer)
+    path = zarr_path(root, cfg.store_id, layer=layer)
     if path.exists():
         if not overwrite:
             raise FileExistsError(f"{path} already exists; pass overwrite=True to rebuild it")
@@ -199,21 +245,7 @@ def initialise(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     group = zarr.open_group(path, mode="w", zarr_format=3)
-    group.attrs.update(
-        {
-            "Conventions": "CF-1.10",
-            "title": str(cfg.extra.get("title") or f"{cfg.source} {cfg.product} v{cfg.version}"),
-            "store_id": cfg.store_id,
-            "source": cfg.source,
-            "product": cfg.product,
-            "grid_id": grid.id,
-            "proj4": grid.proj4,
-            "cadence_seconds": cfg.cadence_seconds,
-            "time_start": timeline.start.isoformat(),
-            "time_end": timeline.end.isoformat(),
-            "n_times": shape[0],
-        }
-    )
+    group.attrs.update(_root_attrs(cfg, grid, timeline, shape[0]))
 
     time = group.create_array(
         TIME_NAME,
@@ -225,31 +257,169 @@ def initialise(
             "units": TIME_UNITS,
             "calendar": "proleptic_gregorian",
             "standard_name": "time",
+            "long_name": "time",
             "axis": "T",
         },
     )
-    time[:] = timeline.values().astype("int64") // _NS_PER_S
+    time[:] = timeline.values().astype("int64")
+
+    _create_coordinates(group, grid)
+    _create_provenance(group, shape[0], shards[0] if shards else chunks[0])
 
     declared = {v.name: v for v in cfg.variables}
     for name in names:
         var = declared[name]
+        encoding = Encoding.from_config(var.encoding, name=name)
+        attributes: dict = {
+            **var.cf_attrs,
+            "grid_mapping": GRID_MAPPING_NAME,
+            "coordinates": "lat lon",
+        }
+        if encoding is None:
+            dtype: object = "float32"
+            fill: object = np.float32("nan")
+        else:
+            dtype = encoding.dtype
+            fill = encoding.missing
+            attributes.update({
+                "scale_factor": encoding.scale,
+                "add_offset": encoding.offset,
+                "calibration_formula": encoding.formula,
+                "calibration_missing_data": encoding.missing,
+                "calibration_out_of_image": encoding.out_of_image,
+                "_FillValue": encoding.missing,
+            })
         group.create_array(
             name,
             shape=shape,
             chunks=chunks,
             shards=shards,
-            dtype="float32",
-            fill_value=np.float32("nan"),
+            dtype=dtype,
+            fill_value=fill,
             compressors=_compressors(cfg.store),
             dimension_names=DIMS,
-            attributes={
-                "units": var.units,
-                "long_name": var.long_name or name,
-                "grid_id": grid.id,
-                "coordinates": TIME_NAME,
-            },
+            attributes=attributes,
         )
-    return path
+    return store_path(root, cfg.store_id, layer=layer)
+
+
+def _root_attrs(cfg: ProductConfig, grid, timeline: Timeline, n_times: int) -> dict:
+    """CF discovery metadata, the grid, and how this store was built.
+
+    A store outlives the checkout that wrote it. It gets copied to another
+    machine and opened by someone who has never seen this repository, so
+    everything needed to know what it is goes here rather than in a config.
+    """
+    declared = {
+        "Conventions": "CF-1.10",
+        "title": str(cfg.attrs.get("title")
+                     or cfg.extra.get("title")
+                     or f"{cfg.source} {cfg.product} v{cfg.version}"),
+        "store_id": cfg.store_id,
+        "source_name": cfg.source,
+        "product": cfg.product,
+        "version": cfg.version,
+        "grid_id": grid.id,
+        "proj4": grid.proj4,
+        "cadence_seconds": cfg.cadence_seconds,
+        "time_start": timeline.start.isoformat(),
+        "time_end": timeline.end.isoformat(),
+        "n_times": n_times,
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+    # Whatever the config publishes - institution, source, history, references,
+    # comment - wins, except the keys this store owns and must stay true.
+    reserved = {"store_id", "grid_id", "proj4", "cadence_seconds",
+                "time_start", "time_end", "n_times"}
+    declared.update({k: v for k, v in (cfg.attrs or {}).items() if k not in reserved})
+    mapping = {
+        "grid_mapping_name": "polar_stereographic",
+        "proj4_params": grid.proj4,
+        "shape": [grid.ny, grid.nx],
+        "corners_lonlat": [list(c) for c in (grid.corners_lonlat or ())],
+    }
+    try:
+        (x0, x1), (y0, y1) = grid.projected_extent()
+    except (ValueError, ImportError) as exc:
+        # A grid may be declared by shape alone. Say so in the metadata rather
+        # than refusing to build the store: the imagery is still the imagery.
+        logger.warning("grid %s has no projected extent (%s)", grid.id, exc)
+        mapping["extent_note"] = f"not recorded: {exc}"
+    else:
+        mapping["extent_x"] = [x0, x1]
+        mapping["extent_y"] = [y0, y1]
+    declared[GRID_MAPPING_NAME] = mapping
+    return declared
+
+
+def _create_coordinates(group: zarr.Group, grid) -> None:
+    """Projected cell centres and per-cell lon/lat.
+
+    radar_v3 stored `x`/`y` as `0..n-1`, which carries nothing the shape does
+    not already carry. Real coordinates make the store open correctly in
+    xarray and rioxarray, and `lat`/`lon` turn co-location with a station into
+    a lookup instead of a projection.
+    """
+    try:
+        y, x = grid.coordinates()
+    except (ValueError, ImportError) as exc:
+        logger.warning("grid %s: no projected coordinates written (%s)", grid.id, exc)
+        return
+    units = "km" if "+units=km" in grid.proj4 else "m"
+    for name, values, axis, std in (
+        ("y", y, "Y", "projection_y_coordinate"),
+        ("x", x, "X", "projection_x_coordinate"),
+    ):
+        array = group.create_array(
+            name, shape=values.shape, chunks=values.shape, dtype="float64",
+            dimension_names=(name,),
+            attributes={"units": units, "standard_name": std, "axis": axis,
+                        "long_name": f"{axis.lower()} coordinate of projection"},
+        )
+        array[:] = values
+
+    try:
+        lon, lat = grid.lonlat()
+    except Exception as exc:  # noqa: BLE001 - a grid may have no corners to project
+        logger.warning("grid %s: no lon/lat coordinates written (%s)", grid.id, exc)
+        return
+    for name, values, std, units in (
+        ("lat", lat, "latitude", "degrees_north"),
+        ("lon", lon, "longitude", "degrees_east"),
+    ):
+        array = group.create_array(
+            name, shape=values.shape, chunks=values.shape, dtype="float32",
+            dimension_names=("y", "x"),
+            attributes={"units": units, "standard_name": std, "long_name": std},
+        )
+        array[:] = values
+
+
+def _create_provenance(group: zarr.Group, n_times: int, chunk: int) -> None:
+    """One array per provenance field, chunked like the shards.
+
+    Tiny - four arrays of n_times - and they answer what the imagery cannot.
+    Measured on the KNMI rtcor archive: 2,013 of 772,129 slots had no file at
+    all and 36 held a file that would not read. Without these, both are
+    indistinguishable from a frame that was present and empty.
+    """
+    descriptions = {
+        "is_missing_frame": "no source file covered this time step",
+        "is_corrupt_frame": "a source file existed but could not be read",
+        "source_layout_id": "which upstream layout produced this frame; see the "
+                            "layouts attribute on the root group",
+        "source_record_id": "row in the provenance table beside the store",
+    }
+    for name, (dtype, fill) in PROVENANCE.items():
+        group.create_array(
+            name,
+            shape=(n_times,),
+            chunks=(max(1, min(n_times, chunk)),),
+            dtype=dtype,
+            fill_value=fill,
+            dimension_names=(TIME_NAME,),
+            attributes={"long_name": descriptions[name]},
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,7 +470,7 @@ def write(
     if TIME_NAME not in ds.coords and TIME_NAME not in ds.variables:
         raise ValueError("gridded dataset needs a time coordinate")
 
-    present = set(_data_arrays(group))
+    present = set(_data_arrays(group)) | set(PROVENANCE)
     unknown = sorted(str(n) for n in ds.data_vars if str(n) not in present)
     if unknown:
         raise ValueError(f"{cfg.store_id} has no array for {unknown}; present: {sorted(present)}")
@@ -321,16 +491,53 @@ def write(
     breaks = (np.flatnonzero(np.diff(hit) != 1) + 1).tolist()
 
     for name in ds.data_vars:
-        array = group[str(name)]
-        block = np.asarray(ds[name].transpose(*DIMS).values, dtype="float32")
+        target = str(name)
+        if target in PROVENANCE:
+            continue
+        array = group[target]
+        # Cast to the array's own dtype rather than to float32: the store may
+        # hold integer codes with their own calibration, and converting those
+        # to float and back would round values the source had exactly.
+        block = np.asarray(ds[name].transpose(*DIMS).values)
         if block.shape[1:] != tuple(array.shape[1:]):
             raise ValueError(
                 f"{name} frames are {block.shape[1:]}, store is {tuple(array.shape[1:])}"
             )
+        if block.dtype != array.dtype:
+            if array.dtype.kind in "ui" and block.dtype.kind == "f":
+                raise ValueError(
+                    f"{cfg.store_id}/{target} stores {array.dtype} codes, but was handed "
+                    f"{block.dtype}. Encode with meteopack.core.encoding before writing; "
+                    f"casting here would silently round every value."
+                )
+            block = block.astype(array.dtype, copy=False)
         block = block[keep]
         for run, picks in zip(np.split(hit, breaks), np.split(order, breaks), strict=True):
             array[int(run[0]) : int(run[-1]) + 1] = block[picks]
+
+    _write_provenance(group, ds, rows, keep, hit, order, breaks)
     return WriteResult(path, int(np.unique(hit).size), n_outside, n_off)
+
+
+def _write_provenance(group, ds, rows, keep, hit, order, breaks) -> None:
+    """Scatter whatever provenance the dataset carries onto the same rows.
+
+    Optional per field: a source that cannot say which layout a frame came from
+    simply leaves `source_layout_id` at -1, which is what the array was
+    created with and reads as "not recorded" rather than as a real layout.
+    """
+    for name in PROVENANCE:
+        if name not in ds.variables:
+            continue
+        array = group[name]
+        values = np.asarray(ds[name].values).reshape(-1)
+        if values.shape[0] != rows.shape[0]:
+            raise ValueError(
+                f"{name} has {values.shape[0]} entries for {rows.shape[0]} frames"
+            )
+        values = values.astype(array.dtype, copy=False)[keep]
+        for run, picks in zip(np.split(hit, breaks), np.split(order, breaks), strict=True):
+            array[int(run[0]) : int(run[-1]) + 1] = values[picks]
 
 
 def _classify_misses(
