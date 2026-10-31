@@ -186,6 +186,19 @@ const kcContext = {
 # ----------------------------------------------------------------- test doubles
 
 
+class FakeSession:
+    """A stand-in for `requests.Session` that is a session in the ways that matter.
+
+    It used to be a bare `object()`. That passed only because the source
+    returned an injected session untouched — the very bug that let `midas` run
+    without its bearer token. A double looser than the real thing hides exactly
+    the defect it is standing in for, so this one carries `headers`.
+    """
+
+    def __init__(self) -> None:
+        self.headers: dict[str, str] = {}
+
+
 class FakeMidas(MidasOpen):
     """MidasOpen with its two remote reads replaced by literal payloads."""
 
@@ -383,7 +396,7 @@ def test_fetch_translates_a_401_from_fetch_file(monkeypatch, tmp_path):
         meta={"station_id": "16596", "filename": "2023.csv"},
     )
     with pytest.raises(CedaAuthError, match="expired or rejected"):
-        FakeMidas(session=object()).fetch(unit, tmp_path)
+        FakeMidas(session=FakeSession()).fetch(unit, tmp_path)
 
 
 def test_a_payload_that_is_neither_badc_nor_a_login_page_is_schema_drift(tmp_path):
@@ -405,7 +418,7 @@ def test_fetch_refuses_and_deletes_a_login_page(monkeypatch, tmp_path):
         return RawFile(dest, "0" * 64, len(LOGIN_PAGE), kwargs["unit_key"])
 
     monkeypatch.setattr(http, "fetch_file", write_login_page)
-    src = FakeMidas(session=object())
+    src = FakeMidas(session=FakeSession())
     unit = Unit(
         key="midas/hourly_weather/dv-202607/16596/2023",
         url="https://dap.ceda.ac.uk/x.csv",
@@ -861,7 +874,7 @@ def test_fetch_skips_a_404_rather_than_failing_the_job(monkeypatch, tmp_path):
         url="https://dap.ceda.ac.uk/x.csv",
         meta={"station_id": "16596", "filename": "1801.csv"},
     )
-    assert FakeMidas(session=object()).fetch(unit, tmp_path) is None
+    assert FakeMidas(session=FakeSession()).fetch(unit, tmp_path) is None
 
 
 def test_fetch_survives_a_unit_with_no_meta(monkeypatch, tmp_path):
@@ -876,7 +889,7 @@ def test_fetch_survives_a_unit_with_no_meta(monkeypatch, tmp_path):
 
     monkeypatch.setattr(http, "fetch_file", capture)
     unit = Unit(key="midas/hourly_weather/dv-202607/00347/2023", url="https://example.invalid/x")
-    FakeMidas(session=object()).fetch(unit, tmp_path)
+    FakeMidas(session=FakeSession()).fetch(unit, tmp_path)
     assert captured["dest"] == tmp_path / "00347" / "2023.csv"
 
 

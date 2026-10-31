@@ -290,18 +290,16 @@ class RmiAws:
         return self._now or datetime.now(UTC)
 
     def _requests_session(self):
-        """The session, built on first use.
+        """The session, fitted out with this source's headers.
 
-        A source constructed without one must still work: passing `self._session`
-        straight through when it is None raises deep inside `fetch_file`, which
-        has happened here before.
+        A source built without one must still work, and one the caller supplied
+        must still come back wearing the source's User-Agent: the CLI hands
+        every source a bare `requests.Session()`, and returning it untouched is
+        how `midas` lost its bearer token on every CLI run.
         """
-        if self._session is None:
-            import requests
+        from meteopack.sources.common import http_session
 
-            self._session = requests.Session()
-            agent = self.source.extra.get("user_agent", "meteopack/0.1 (+rmi-opendata)")
-            self._session.headers["User-Agent"] = str(agent)
+        self._session = http_session(self.source, self._session)
         return self._session
 
     # ------------------------------------------------------------- remote reads

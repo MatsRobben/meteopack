@@ -47,18 +47,31 @@ def fingerprint(names: Iterable[str], *, width: int = 16) -> str:
 
 
 def http_session(source: SourceConfig | None, existing: Any = None) -> requests.Session:
-    """Return `existing`, or build a session carrying the source's user agent.
+    """Build a session, or fit out one the caller supplied, with this source's headers.
 
     Sources must work when constructed with no session — scripts and notebooks
     do that, and passing `None` straight through to the HTTP layer used to
     raise `AttributeError` deep inside a download.
+
+    They must also work when the caller *does* supply one, which is the case
+    this got wrong: the CLI builds every source with a bare
+    `requests.Session()`, and returning it untouched silently dropped whatever
+    the source had meant to put on it. For six sources that cost them their
+    User-Agent. For `midas` it dropped the bearer token, so every CLI run
+    authenticated as nobody — and because CEDA answers a rejected token with
+    HTTP 200 and an HTML login page, that looked like an expired credential for
+    as long as anyone cared to look.
+
+    So the headers are applied to whichever session is in hand. A header the
+    caller set deliberately is left alone; `requests`' own default User-Agent
+    is not treated as deliberate.
     """
-    if existing is not None:
-        return existing
     import requests
 
-    session = requests.Session()
+    session = existing if existing is not None else requests.Session()
     extra = getattr(source, "extra", None) or {}
     agent = extra.get("user_agent") or "meteopack/0.1"
-    session.headers["User-Agent"] = str(agent)
+    current = str(session.headers.get("User-Agent", ""))
+    if not current or current.startswith("python-requests/"):
+        session.headers["User-Agent"] = str(agent)
     return session

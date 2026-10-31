@@ -401,3 +401,70 @@ def test_credentials_command_runs_without_a_target():
 
     args = build_parser().parse_args(["credentials"])
     assert args.target is None
+
+
+def test_a_source_fits_out_the_session_the_cli_hands_it():
+    """The CLI builds every source with a bare `requests.Session()`.
+
+    Sources used to apply their headers only when they created the session
+    themselves, so an injected one arrived naked. Six lost their User-Agent;
+    midas lost its bearer token and every CLI run authenticated as nobody. That
+    was invisible because CEDA answers a rejected token with HTTP 200 and an
+    HTML login page, so it read as an expired credential for months.
+    """
+    import os
+
+    import requests
+
+    from meteopack.jobs.plan import load_source_config
+    from meteopack.sources import registry
+
+    for name in ("dwd", "belgium", "dmi", "ea", "esoh", "meteofrance"):
+        cfg = load_source_config(name)
+        src = registry.build(name, cfg, session=requests.Session())
+        session = src._requests_session()
+        agent = str(session.headers.get("User-Agent", ""))
+        assert agent and not agent.startswith("python-requests/"), (
+            f"{name} left the injected session with requests' default User-Agent"
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        token = pathlib.Path(tmp) / "token"
+        token.write_text("a-test-token\n")
+        token.chmod(0o600)
+        previous = os.environ.get("CEDA_TOKEN_FILE")
+        os.environ["CEDA_TOKEN_FILE"] = str(token)
+        try:
+            cfg = load_source_config("midas")
+            src = registry.build("midas", cfg, session=requests.Session())
+            session = src._requests_session()
+            assert session.headers.get("Authorization") == "Bearer a-test-token", (
+                "midas did not attach its token to the session the CLI gave it"
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("CEDA_TOKEN_FILE", None)
+            else:
+                os.environ["CEDA_TOKEN_FILE"] = previous
+
+
+def test_http_session_keeps_a_user_agent_the_caller_meant():
+    """Fitting out an injected session must not overwrite a deliberate header."""
+    import requests
+
+    from meteopack.core.config import SourceConfig
+    from meteopack.sources.common import http_session
+
+    cfg = SourceConfig(name="x", base_url="https://example.invalid",
+                       extra={"user_agent": "from-config"})
+
+    fresh = http_session(cfg)
+    assert fresh.headers["User-Agent"] == "from-config"
+
+    bare = requests.Session()
+    assert http_session(cfg, bare).headers["User-Agent"] == "from-config"
+    assert http_session(cfg, bare) is bare
+
+    deliberate = requests.Session()
+    deliberate.headers["User-Agent"] = "set-by-the-caller"
+    assert http_session(cfg, deliberate).headers["User-Agent"] == "set-by-the-caller"

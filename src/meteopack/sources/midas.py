@@ -461,19 +461,20 @@ class MidasOpen:
         return self._now or datetime.now(UTC)
 
     def _requests_session(self):
-        """A session carrying the bearer token, created on first use.
+        """A session carrying the bearer token, whoever created the session.
 
         Lazy because listing the catalogue needs no credential at all: a source
         built with no session must still work, and must not demand a token
         before anything has actually asked for data.
         """
-        if self._session is None:
-            import requests
+        from meteopack.sources.common import http_session
 
-            self._session = requests.Session()
-            agent = self.source.extra.get("user_agent", "meteopack/0.1 (+midas-ceda)")
-            self._session.headers["User-Agent"] = str(agent)
-            # The token is read here and nowhere else, and never logged.
+        self._session = http_session(self.source, self._session)
+        if "Authorization" not in self._session.headers:
+            # The token is read here and nowhere else, and never logged. This
+            # runs for an injected session too: the CLI supplies one, and
+            # attaching the token only when we built the session ourselves is
+            # what made every CLI run authenticate as nobody.
             self._session.headers["Authorization"] = f"Bearer {read_token(self.token_file)}"
         return self._session
 

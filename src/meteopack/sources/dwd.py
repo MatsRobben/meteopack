@@ -288,12 +288,16 @@ class DwdStations:
         return self._now or datetime.now(UTC)
 
     def _requests_session(self):
-        if self._session is None:
-            import requests
+        """The session, fitted out with this source's headers.
 
-            self._session = requests.Session()
-            agent = self.source.extra.get("user_agent", "meteopack/0.1 (+dwd-opendata)")
-            self._session.headers["User-Agent"] = str(agent)
+        A source built without one must still work, and one the caller supplied
+        must still come back wearing the source's User-Agent: the CLI hands
+        every source a bare `requests.Session()`, and returning it untouched is
+        how `midas` lost its bearer token on every CLI run.
+        """
+        from meteopack.sources.common import http_session
+
+        self._session = http_session(self.source, self._session)
         return self._session
 
     # ------------------------------------------------------------- remote reads
