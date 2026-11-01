@@ -878,7 +878,8 @@ class KnmiRadar:
         if not wanted:
             raise ValueError(f"{cfg.store_id} declares no variables")
 
-        stamped = _members(path, self._member_prefix(cfg))
+        damage: list[str] = []
+        stamped = _members(path, self._member_prefix(cfg), damage=damage)
         if not stamped:
             logger.warning("knmi_radar: no radar members in %s", path.name)
             return xr.Dataset(coords={"time": np.array([], dtype="datetime64[ns]")})
@@ -1032,6 +1033,7 @@ class KnmiRadar:
                 "raw_sha256": raw.sha256,
                 "schema_drift": sorted(drifted),
                 "layouts_seen": list(layouts.values()),
+                "damaged": damage,
             },
         )
 
@@ -1309,17 +1311,33 @@ def _encode_image(
 
 
 def _members(
-    path: Path, prefix: str | None = DEFAULT_MEMBER_PREFIX
+    path: Path, prefix: str | None = DEFAULT_MEMBER_PREFIX, *, damage: list | None = None,
 ) -> list[tuple[datetime, tarfile.TarInfo]]:
-    """Radar members of one tar, in timestamp order. Anything else is ignored."""
-    with tarfile.open(path, "r") as tar:
-        stamped = []
-        for member in tar:
-            if not member.isfile():
-                continue
-            when = member_time(member.name, prefix)
-            if when is not None:
-                stamped.append((when, member))
+    """Radar members of one tar, in timestamp order. Anything else is ignored.
+
+    A truncated tar yields the members before the break, and the break is
+    appended to `damage`. One reflectivity tar in the archive is exactly 1 MiB
+    against ~18.6 MB for its neighbours - a download cut off at a round number
+    - and the whole day used to be thrown away for it, though its first eight
+    frames are intact.
+    """
+    stamped = []
+    try:
+        with tarfile.open(path, "r") as tar:
+            for member in tar:
+                if not member.isfile():
+                    continue
+                when = member_time(member.name, prefix)
+                if when is not None:
+                    stamped.append((when, member))
+    except tarfile.ReadError as exc:
+        if not stamped:
+            raise
+        logger.warning("knmi_radar: %s is truncated after %d member(s): %s",
+                       path.name, len(stamped), exc)
+        if damage is not None:
+            damage.append(f"{path.name}: truncated after {len(stamped)} member(s) ({exc}); "
+                          f"re-fetch it")
     return sorted(stamped, key=lambda item: item[0])
 
 

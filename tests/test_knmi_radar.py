@@ -1107,3 +1107,22 @@ def test_a_frame_with_a_calibration_listed_as_corrupt_is_withheld(tmp_path):
     assert np.isnan(ds["precipitation_amount"].values[1]).all()      # withheld, not "no echo"
     assert ds["precipitation_amount"].values[0, 1, 1] == pytest.approx(0.07)
     assert not ds.attrs.get("schema_drift"), "a layout listed as corrupt is not drift"
+
+
+def test_a_truncated_tar_gives_the_frames_before_the_break(tmp_path):
+    """One reflectivity tar is exactly 1 MiB against ~18.6 MB for its neighbours.
+
+    The whole day was thrown away for it, though its first frames are intact.
+    """
+    counts = np.full((NY, NX), 7, dtype="uint16")
+    blob = frame_bytes(precip_frame(counts, legacy=True))
+    names = [f"RAD_NL25_RAC_RT_20190601{t}.h5" for t in ("0805", "0810", "0815")]
+    path = write_tar(tmp_path / tar_name("20190601"), dict.fromkeys(names, blob))
+    whole = path.read_bytes()
+    path.write_bytes(whole[: len(whole) - len(blob) // 2 - 2048])   # cut inside frame 3
+
+    ds = KnmiRadar().parse(raw_of(path), make_cfg())
+    values = ds["precipitation_amount"].values
+    assert values[0, 1, 1] == pytest.approx(0.07) and values[1, 1, 1] == pytest.approx(0.07)
+    assert len(values) < 3 or np.isnan(values[2]).all()
+    assert any("truncated" in d for d in ds.attrs["damaged"]), ds.attrs.get("damaged")

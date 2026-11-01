@@ -917,6 +917,11 @@ def stage_pack(ctx: Context) -> int:
         for e in file_errors:
             print(f"  ERROR {Path(e['path']).name}: {e['error']}")
         errors += file_errors
+        # A damaged raw file still gave what it held, and the pack still fails:
+        # its frames are in, but the day is incomplete until it is re-fetched.
+        for note in (d for r in results for d in (r.get("damaged") or ())):
+            print(f"  ERROR damaged raw file, readable frames packed: {note}")
+            errors.append({"path": note.split(":", 1)[0], "error": note})
         print(f"wrote {frames} frames from {packed_files} file(s)")
         if off_cadence:
             print(f"  {off_cadence} frame(s) were not on the "

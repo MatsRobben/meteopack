@@ -218,6 +218,7 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
     # single unreadable tar used to abort the rest unreported.
     file_errors: list[dict[str, str]] = []
     records: list[dict[str, Any]] = []
+    damaged: list[str] = []
     for raw_path in task.paths:
         t = time.perf_counter()
         try:
@@ -236,6 +237,7 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
         rid = gridded.record_id(Path(raw_path).name)
         ds["source_record_id"] = (("time",), np.full(ds.sizes["time"], rid, dtype="int64"))
         drift.update(ds.attrs.get("schema_drift") or ())
+        damaged.extend(ds.attrs.get("damaged") or ())
         for entry in ds.attrs.get("layouts_seen") or ():
             fp = str(entry.get("fingerprint"))
             seen = layouts.get(fp)
@@ -274,6 +276,7 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
             "layouts": list(layouts.values()),
             "file_errors": file_errors,
             "records": records,
+            "damaged": damaged,
             # Wall-clock, so tasks from different workers line up: where a
             # pack's time goes between start-up, work and waiting.
             "timing": {"pid": os.getpid(), "start": started, "end": time.time(),
