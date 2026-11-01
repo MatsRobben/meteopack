@@ -480,3 +480,40 @@ def test_pack_recovers_stations_the_live_catalogue_has_forgotten(tmp_path):
     closed = back.filter(pl.col("station_id") == "00099")
     assert closed["lat"][0] == 51.0 and closed["lon"][0] == 4.0
     assert closed["name"][0] == "Closed Long Ago"
+
+
+def test_pack_refuses_shards_rather_than_running_n_racing_copies(capsys, tmp_path):
+    """--shard/--shards were accepted and ignored: an array of N tasks ran N full packs."""
+    code = main(["pack", "dwd", "--shards", "4", "--shard", "1", "--data-root", str(tmp_path)])
+    assert code == 2
+    assert "does not support --shard" in capsys.readouterr().out
+
+
+def test_a_failed_file_leaves_points_partitions_untouched(tmp_path, monkeypatch, capsys):
+    """One unreadable file must not silently delete its rows from the store.
+
+    Partitions are rewritten whole from the files that parsed. In review, one
+    truncated DWD zip took a store from 1,287,539 rows to 1,208,339 under a
+    manifest and README that said nothing was wrong.
+    """
+    from meteopack.core.store import points
+    from meteopack.jobs import packing
+
+    raw = tmp_path / "raw" / "dwd" / "stations_10min"
+    raw.mkdir(parents=True)
+    for name in ("good.zip", "truncated.zip"):
+        (raw / name).write_bytes(b"x")
+    calls = []
+
+    def fake_run(tasks, fn, **kw):
+        calls.append(fn.__name__)
+        return [{"path": str(raw / "good.zip"), "parts": {"2012": "/nonexistent"}},
+                {"path": str(raw / "truncated.zip"), "error": "BadZipFile: truncated"}]
+
+    monkeypatch.setattr(packing, "run", fake_run)
+    code = main(["pack", "dwd", "--data-root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "store is unchanged" in out and "truncated.zip" in out
+    assert calls == ["parse_points"], "no partition write may be attempted"
+    assert not points.store_path(tmp_path, "dwd/stations_10min/v1").exists()

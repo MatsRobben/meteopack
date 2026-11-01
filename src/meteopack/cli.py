@@ -45,8 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data-root", help="overrides $METEOPACK_DATA_ROOT, which overrides the config")
     p.add_argument("--configs", help="config directory (default: <repo>/configs)")
     p.add_argument("--workers", type=int, default=None, help="default: all available cores")
-    p.add_argument("--shard", type=int, default=0, help="this task's index in a Slurm array")
-    p.add_argument("--shards", type=int, default=1, help="total tasks in the Slurm array")
+    p.add_argument("--shard", type=int, default=0,
+                   help="this task's index in a Slurm array (fetch/list/derive; not pack)")
+    p.add_argument("--shards", type=int, default=1,
+                   help="total tasks in the Slurm array (fetch/list/derive; not pack)")
+    p.add_argument("--allow-partial", action="store_true",
+                   help="pack: rewrite points partitions even if some raw files failed to "
+                        "parse, dropping their rows (default: refuse and change nothing)")
     p.add_argument("--refresh", action="store_true", help="ignore the ledger and redo everything")
     p.add_argument("--limit", type=int, default=None, help="stop after N units (for smoke runs)")
     p.add_argument("--dry-run", action="store_true", help="plan only; touch nothing")
@@ -819,6 +824,16 @@ def stage_pack(ctx: Context) -> int:
     from meteopack.core.store import manifest
     from meteopack.jobs import packing
 
+    if ctx.args.shards > 1:
+        # These were silently ignored, so an array of N tasks ran N identical
+        # full packs racing on the same files - for a gridded store, exactly
+        # the two-writers-one-shard race that loses whole frames. Splitting a
+        # pack safely needs the store created once before the array starts;
+        # until that exists, refuse rather than pretend.
+        print("error: pack does not support --shard/--shards. Run one pack per product, "
+              "with --workers for the cores in the allocation.")
+        return 2
+
     found = ctx.raw_files()
     if not found:
         print(f"no raw files under {ctx.raw_root}; run `meteopack fetch {ctx.cfg.source}` first")
@@ -864,10 +879,19 @@ def stage_pack(ctx: Context) -> int:
         outside = sum(r.get("outside", 0) for r in results)
         off_cadence = sum(r.get("off_cadence", 0) for r in results)
         errors = [r for r in results if r.get("error")]
+        file_errors = [e for r in results for e in (r.get("file_errors") or ())]
         # Count files, not tasks: a task can hold several files now that
         # everything sharing a shard goes to one worker, and "from 1 file(s)"
-        # for three tars is the kind of number you stop trusting.
-        packed_files = sum(1 + len(t.also) for t in tasks) - len(errors)
+        # for three tars is the kind of number you stop trusting. A task that
+        # failed outright lost all of its files.
+        # Results come back in completion order; a failed task reports its
+        # first file, which identifies it.
+        files_of = {t.raw_path: len(t.paths) for t in tasks}
+        lost_files = sum(files_of.get(r.get("path"), 1) for r in errors)
+        packed_files = sum(len(t.paths) for t in tasks) - lost_files - len(file_errors)
+        for e in file_errors:
+            print(f"  ERROR {Path(e['path']).name}: {e['error']}")
+        errors += file_errors
         print(f"wrote {frames} frames from {packed_files} file(s)")
         if off_cadence:
             print(f"  {off_cadence} frame(s) were not on the "
@@ -914,6 +938,21 @@ def stage_pack(ctx: Context) -> int:
             results = packing.run(tasks, packing.parse_points, workers=workers,
                                   max_tasks_per_child=512)
             errors = [r for r in results if r.get("error")]
+            if errors and not ctx.args.allow_partial:
+                # A partition is rewritten whole from the files that parsed, so
+                # one unreadable file would silently delete its rows from the
+                # store - 1,287,539 rows became 1,208,339 in a test with one
+                # truncated DWD zip, under a manifest and README that said all
+                # was well. Change nothing instead.
+                print(f"error: {len(errors)} raw file(s) failed to parse; no partition was "
+                      f"rewritten and the store is unchanged:")
+                for e in errors[:20]:
+                    print(f"  {Path(str(e.get('path'))).name}: {e['error']}")
+                if len(errors) > 20:
+                    print(f"  ... and {len(errors) - 20} more")
+                print("Fix or remove them and re-run, or pass --allow-partial to rewrite the "
+                      "partitions without their rows.")
+                return 1
 
             by_partition: dict[str, list[str]] = {}
             for result in results:

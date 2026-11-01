@@ -210,10 +210,21 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
     # the real archive. `pack` fails at the end on anything collected here.
     drift: set[str] = set()
     layouts: dict[str, dict] = {}
+    # One bad file fails itself, not the files after it in the same task. A
+    # task can hold several files - everything that shares a shard - and a
+    # single unreadable tar used to abort the rest unreported.
+    file_errors: list[dict[str, str]] = []
     for raw_path in task.paths:
         t = time.perf_counter()
-        ds = src.parse(_raw_file(raw_path), cfg)
-        t_parse += time.perf_counter() - t
+        try:
+            ds = src.parse(_raw_file(raw_path), cfg)
+        except Exception as exc:  # noqa: BLE001 - reported per file, never silent
+            # A config that disagrees with itself fails here too - for every
+            # file, before any frame is written, and every one is reported.
+            file_errors.append({"path": raw_path, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        finally:
+            t_parse += time.perf_counter() - t
         if ds is None or not ds.sizes.get("time"):
             continue
         drift.update(ds.attrs.get("schema_drift") or ())
@@ -225,9 +236,14 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
             else:
                 seen["count"] += int(entry.get("count", 0))
         t = time.perf_counter()
-        result = gridded.write(ds, cfg, Path(task.root))
-        t_write += time.perf_counter() - t
-        del ds
+        try:
+            result = gridded.write(ds, cfg, Path(task.root))
+        except Exception as exc:  # noqa: BLE001 - reported per file, never silent
+            file_errors.append({"path": raw_path, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        finally:
+            t_write += time.perf_counter() - t
+            del ds
         frames += result.written
         outside += result.outside
         off_cadence += result.off_cadence
@@ -236,6 +252,7 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
             "off_cadence": off_cadence, "drift": sorted(drift),
             "outside_span": [min(lost), max(lost)] if lost else None,
             "layouts": list(layouts.values()),
+            "file_errors": file_errors,
             # Wall-clock, so tasks from different workers line up: where a
             # pack's time goes between start-up, work and waiting.
             "timing": {"pid": os.getpid(), "start": started, "end": time.time(),
