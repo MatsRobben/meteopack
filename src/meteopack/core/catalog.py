@@ -55,7 +55,11 @@ from meteopack.sources.base import RawFile
 
 Status = Literal["pending", "done", "failed"]
 
-CATALOG_DIRNAME = "catalog"
+CATALOG_DIRNAME = "_bookkeeping"
+
+#: The pre-rename name. Read from it when it is the only one present, so an
+#: existing data root does not lose its ledger and start redoing finished work.
+LEGACY_CATALOG_DIRNAME = "catalog"
 
 #: Table name -> column schema. Written explicitly on every shard so that a
 #: shard whose column happens to be all-null does not drift to a different type
@@ -259,7 +263,7 @@ class Catalog:
         writer_id: str | None = None,
         autoflush: bool = True,
     ) -> None:
-        self.root = Path(root) / CATALOG_DIRNAME
+        self.root = catalog_path(root)
         self.writer_id = writer_id or default_writer_id()
         self.autoflush = autoflush
         self._rows: dict[str, list[dict]] = {name: [] for name in SCHEMAS}
@@ -489,8 +493,13 @@ class Catalog:
 
 
 def catalog_path(root: str | os.PathLike[str]) -> Path:
-    """Where the catalog lives under a data root."""
-    return Path(root) / CATALOG_DIRNAME
+    """The bookkeeping directory, honouring a pre-rename one if that is what exists."""
+    base = Path(root)
+    current = base / CATALOG_DIRNAME
+    legacy = base / LEGACY_CATALOG_DIRNAME
+    if not current.is_dir() and legacy.is_dir():
+        return legacy
+    return current
 
 
 __all__ = [

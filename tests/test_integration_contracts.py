@@ -362,7 +362,7 @@ def test_manifest_reads_back_without_fields_added_later():
     with tempfile.TemporaryDirectory() as tmp:
         path = pathlib.Path(tmp)
         (path / m.MANIFEST_NAME).write_text(json.dumps({
-            "store_id": "x/y/v1", "layer": "canonical", "kind": "points",
+            "store_id": "x/y/v1", "layer": "packed", "kind": "points",
             "config_hash": "abc", "code_version": "v0",
             "created_at": "2020-01-01T00:00:00+00:00",
             "updated_at": "2020-01-01T00:00:00+00:00",

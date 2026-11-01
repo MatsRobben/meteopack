@@ -225,12 +225,12 @@ def assign(
 
 
 def store_path(spec: DeriveSpec, root: str | os.PathLike[str], *,
-               layer: Layer = "derived") -> Path:
+               layer: Layer = "training") -> Path:
     return layer_path(Path(root), layer, *spec.store_id.split("/"))
 
 
 def path_for(spec: DeriveSpec, root: str | os.PathLike[str], *,
-             layer: Layer = "derived") -> Path:
+             layer: Layer = "training") -> Path:
     return store_path(spec, root, layer=layer) / SPLITS_NAME
 
 
@@ -240,7 +240,7 @@ def write(
     *,
     block: timedelta = DEFAULT_BLOCK,
     cycle: Sequence[str] = DEFAULT_CYCLE,
-    layer: Layer = "derived",
+    layer: Layer = "training",
 ) -> Path:
     """Write the index beside the store. Overwrites — it is a pure function."""
     frame = assign(spec, block=block, cycle=cycle)
@@ -253,7 +253,7 @@ def write(
 
 
 def read(spec: DeriveSpec, root: str | os.PathLike[str], *,
-         layer: Layer = "derived") -> pl.DataFrame:
+         layer: Layer = "training") -> pl.DataFrame:
     target = path_for(spec, root, layer=layer)
     if not target.exists():
         raise FileNotFoundError(f"no split index at {target}")

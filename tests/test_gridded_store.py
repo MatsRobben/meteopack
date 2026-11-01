@@ -104,7 +104,7 @@ def test_initialise_builds_the_geometry_the_config_asked_for(tmp_path: Path):
     gridded.initialise(cfg, tmp_path, make_timeline())
     path = gridded.zarr_path(tmp_path, cfg.store_id)
 
-    assert path == tmp_path / "canonical/knmi/test/v1" / gridded.ZARR_NAME
+    assert path == tmp_path / "packed/knmi/test/v1" / gridded.ZARR_NAME
     import zarr
 
     array = zarr.open_group(path, mode="r")["rain"]
@@ -341,11 +341,11 @@ def test_write_rejects_frames_of_the_wrong_grid(tmp_path: Path):
 
 
 def test_store_path_follows_the_layer_layout(tmp_path: Path):
-    assert gridded.store_path(tmp_path, "knmi/test/v1") == tmp_path / "canonical/knmi/test/v1"
-    assert gridded.store_path(tmp_path, "knmi/test/v1", layer="derived") == (
-        tmp_path / "derived/knmi/test/v1"
+    assert gridded.store_path(tmp_path, "knmi/test/v1") == tmp_path / "packed/knmi/test/v1"
+    assert gridded.store_path(tmp_path, "knmi/test/v1", layer="training") == (
+        tmp_path / "training/knmi/test/v1"
     )
-    assert os.fspath(gridded.store_path(str(tmp_path), "a/b/v2")).endswith("canonical/a/b/v2")
+    assert os.fspath(gridded.store_path(str(tmp_path), "a/b/v2")).endswith("packed/a/b/v2")
 
 
 # --------------------------------------------------------------- growing axis
@@ -399,8 +399,8 @@ def test_extending_the_axis_keeps_every_frame_already_written(tmp_path: Path):
     for day in range(DAYS):
         gridded.write(day_dataset(timeline, day), cfg, whole)
 
-    grown_arr = gridded._open(cfg.store_id, tmp_path, "canonical", "r")["rain"]
-    whole_arr = gridded._open(cfg.store_id, whole, "canonical", "r")["rain"]
+    grown_arr = gridded._open(cfg.store_id, tmp_path, "packed", "r")["rain"]
+    whole_arr = gridded._open(cfg.store_id, whole, "packed", "r")["rain"]
     n = len(timeline)
     np.testing.assert_array_equal(grown_arr[:n], whole_arr[:n])
     assert np.isfinite(np.asarray(grown_arr[:n])).sum() == n * NY * NX

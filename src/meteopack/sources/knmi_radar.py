@@ -92,6 +92,7 @@ import numpy as np
 
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
+from meteopack.core.encoding import Encoding, encode
 from meteopack.core.timeline import Timeline
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
@@ -281,6 +282,60 @@ def _accepted_parameters(var: Variable) -> list[str]:
             f"image_geo_parameter values, e.g. 'PRECIP_[MM]|ACCUMULATION_[MM]'"
         )
     return names
+
+
+#: Frame layout codes, kept numerically compatible with the radar_v3 stores so
+#: a `source_layout_id` means the same thing in both. 0 and 1 describe the frame
+#: rather than its content and are assigned by `parse`; 2 is the honest answer
+#: for a combination nobody has catalogued.
+LAYOUT_MISSING = 0
+LAYOUT_CORRUPT = 1
+LAYOUT_UNKNOWN = 2
+
+#: `frozenset of image_geo_parameter` -> code. Derived from what the frame
+#: actually holds rather than from which `imageN` groups are present, because
+#: the group index moved between generations while the parameter names did not:
+#: in the 2018-2022 frames `image2` is the gauge adjustment factor and in the
+#: later ones it is the quality index. Classifying positionally is how those
+#: two get swapped; this cannot swap them.
+#: Sampled from the real archive on 2026-11-01, five tars spanning 2018-2026:
+#:   2018-12  image1 PRECIP_[MM] uint16      image2 ADJUSTMENT_FACTOR_[DB] uint16
+#:   2020-10  image1 PRECIP_[MM] uint16      (nothing else)
+#:   2022-08  image1 PRECIP_[MM] uint16      (nothing else)
+#:   2024-06  image1 ACCUMULATION_[MM] uint16, image2 QUALITY_[-] uint8,
+#:            image3 ADJUSTMENT_FACTOR_[DB] uint8
+#: The parameter name is `QUALITY_[-]`, with the dash.
+_PRECIP = ("PRECIP_[MM]", "ACCUMULATION_[MM]")
+_ADJUST = "ADJUSTMENT_FACTOR_[DB]"
+_QUALITY = "QUALITY_[-]"
+
+LAYOUTS: dict[frozenset[str], int] = {
+    **{frozenset({p}): 4 for p in _PRECIP},
+    **{frozenset({p, _ADJUST}): 3 for p in _PRECIP},
+    **{frozenset({p, _QUALITY, _ADJUST}): 5 for p in _PRECIP},
+}
+
+#: What each code means, written onto the store so the integers are readable
+#: without this file.
+LAYOUT_NAMES: dict[int, str] = {
+    LAYOUT_MISSING: "missing",
+    LAYOUT_CORRUPT: "corrupt",
+    LAYOUT_UNKNOWN: "unknown",
+    3: "precipitation and adjustment factor",
+    4: "precipitation only",
+    5: "precipitation, quality and adjustment factor",
+}
+
+
+def layout_id(specs: Mapping[str, ImageSpec]) -> int:
+    """Which catalogued layout this frame's images make up.
+
+    `LAYOUT_UNKNOWN` rather than an exception: an uncatalogued combination is
+    recorded and packed, and shows up as a count in validation. Refusing the
+    frame would lose data over a bookkeeping gap, and the schema check in
+    `_check_layout` is the thing that is allowed to refuse.
+    """
+    return LAYOUTS.get(frozenset(specs), LAYOUT_UNKNOWN)
 
 
 def wanted_variables(cfg: ProductConfig) -> list[tuple[Variable, list[str]]]:
@@ -672,14 +727,30 @@ class KnmiRadar:
             return xr.Dataset(coords={"time": np.array([], dtype="datetime64[ns]")})
 
         ny, nx = grid.shape if grid else _probe_shape(path, stamped[0][1])
-        frames = {var.name: np.full((len(stamped), ny, nx), np.nan, "float32") for var, _ in wanted}
+        encodings = {
+            var.name: enc
+            for var, _ in wanted
+            if (enc := Encoding.from_config(var.encoding, name=var.name)) is not None
+        }
+        frames: dict[str, np.ndarray] = {}
+        for var, _ in wanted:
+            enc = encodings.get(var.name)
+            if enc is None:
+                frames[var.name] = np.full((len(stamped), ny, nx), np.nan, "float32")
+            else:
+                # Unwritten frames read as `missing`, not as zero rain.
+                frames[var.name] = np.full((len(stamped), ny, nx), enc.missing, enc.dtype)
         hits = dict.fromkeys(frames, 0)
         seen_layout: tuple[str, ...] | None = None
+        layout_ids = np.full(len(stamped), LAYOUT_UNKNOWN, dtype="int16")
+        corrupt = np.zeros(len(stamped), dtype=bool)
 
         with tarfile.open(path, "r") as tar:
             for index, (_when, member) in enumerate(stamped):
                 data = _read_member(tar, member, path)
                 if data is None:
+                    corrupt[index] = True
+                    layout_ids[index] = LAYOUT_CORRUPT
                     continue
                 try:
                     with h5py.File(BytesIO(data), "r") as frame:
@@ -690,13 +761,17 @@ class KnmiRadar:
                         if layout != seen_layout:
                             self._check_layout(layout, cfg, member.name)
                             seen_layout = layout
+                        layout_ids[index] = layout_id(specs)
                         matched = _fill_frame(
-                            frame, member.name, specs, wanted, frames, hits, index, policy
+                            frame, member.name, specs, wanted, frames, hits, index, policy,
+                            encodings,
                         )
                 except SchemaDriftError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - one bad frame is not a bad day
                     logger.warning("knmi_radar: unreadable frame %s: %s", member.name, exc)
+                    corrupt[index] = True
+                    layout_ids[index] = LAYOUT_CORRUPT
                     continue
                 if not matched:
                     raise SchemaDriftError(
@@ -715,12 +790,19 @@ class KnmiRadar:
             data_vars[var.name] = (
                 ("time", "y", "x"),
                 frames[var.name],
-                {"units": var.units, "long_name": var.long_name or var.name},
+                {**var.cf_attrs},
             )
         if not data_vars:
             raise SchemaDriftError(
                 f"{path.name}: none of {[v.name for v, _ in wanted]} resolved to an image"
             )
+        # Provenance. A frame that is here but unreadable is corrupt, not
+        # missing: the two are different upstream failures and the store keeps
+        # them apart. `is_missing_frame` is left to the store, where a slot
+        # nobody wrote is missing by construction.
+        data_vars["is_corrupt_frame"] = (("time",), corrupt)
+        data_vars["is_missing_frame"] = (("time",), np.zeros(len(stamped), dtype=bool))
+        data_vars["source_layout_id"] = (("time",), layout_ids)
         times = np.array([np.datetime64(w.replace(tzinfo=None), "ns") for w, _ in stamped])
         return xr.Dataset(
             data_vars,
@@ -899,6 +981,7 @@ def _fill_frame(
     hits: dict[str, int],
     index: int,
     policy: str,
+    encodings: Mapping[str, Encoding],
 ) -> bool:
     """Calibrate every configured image in one open frame. False if none matched.
 
@@ -916,10 +999,53 @@ def _fill_frame(
                 f"{name}: {spec.geo_parameter} is {counts.shape}, "
                 f"the grid is {frames[var.name].shape[1:]}"
             )
-        frames[var.name][index] = _apply_variable(calibrate(counts, spec, policy=policy), var)
+        encoding = encodings.get(var.name)
+        if encoding is None:
+            frames[var.name][index] = _apply_variable(calibrate(counts, spec, policy=policy), var)
+        else:
+            frames[var.name][index] = _encode_image(counts, spec, encoding, policy=policy)
         hits[var.name] += 1
         matched = True
     return matched
+
+
+def _encode_image(
+    counts: np.ndarray, spec: ImageSpec, target: Encoding, *, policy: str
+) -> np.ndarray:
+    """One image, re-encoded from its own calibration onto the canonical one.
+
+    The sentinels come from the file, because which code means what moved
+    between generations. Two rules carried over from the previous pipeline and
+    verified again here:
+
+    * A `calibration_missing_data` of 0 is not a sentinel. The pre-2023
+      accumulation images advertise it while 0 is a genuine dry pixel, so
+      honouring it literally erases the dry radar mask - every no-rain pixel in
+      the country - which is what `policy="no_echo_if_zero"` prevents.
+    * `calibration_out_of_image` is quoted as 65535 even on frames narrowed to
+      uint8, where no pixel can hold it. It is clamped to the dtype maximum,
+      which is what the product means and what the 2024 generation writes
+      explicitly.
+    """
+    dtype = np.asarray(counts).dtype
+    missing: set[int] = set()
+    out_of_image: set[int] = set()
+
+    sentinel = representable_sentinel(spec.out_of_image, dtype)
+    if sentinel is not None:
+        out_of_image.add(int(sentinel))
+    sentinel = representable_sentinel(spec.missing, dtype)
+    if sentinel is not None and not (policy == DEFAULT_MISSING_POLICY and int(sentinel) == 0):
+        missing.add(int(sentinel))
+
+    return encode(
+        counts,
+        target,
+        source_scale=spec.scale,
+        source_offset=spec.offset,
+        source_missing=missing,
+        source_out_of_image=out_of_image,
+    )
 
 
 def _members(path: Path) -> list[tuple[datetime, tarfile.TarInfo]]:

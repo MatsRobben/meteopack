@@ -55,7 +55,7 @@ def _check_manifest(report: Report, path: Path, cfg: ProductConfig) -> None:
         )
 
 
-def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "canonical") -> Report:
+def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") -> Report:
     import polars as pl
 
     from meteopack.core.store import points
@@ -125,7 +125,7 @@ def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "canonical
     return report
 
 
-def validate_gridded(cfg: ProductConfig, root: Path, *, layer: Layer = "canonical") -> Report:
+def validate_gridded(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") -> Report:
     import numpy as np
 
     from meteopack.core.store import gridded
@@ -158,7 +158,7 @@ def validate_gridded(cfg: ProductConfig, root: Path, *, layer: Layer = "canonica
     return report
 
 
-def validate(cfg: ProductConfig, root: Path, *, layer: Layer = "canonical") -> Report:
+def validate(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") -> Report:
     """Dispatch on the store kind the config declares."""
     if cfg.store.kind == "points":
         return validate_points(cfg, root, layer=layer)

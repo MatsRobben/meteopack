@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from meteopack.core import catalog as catalog_mod
 from meteopack.core.catalog import Catalog, job_key
 from meteopack.sources.base import RawFile
 
@@ -84,8 +85,8 @@ def test_record_file_keeps_the_checksum_from_fetch(tmp_path: Path):
 
 def test_record_store_is_what_a_gc_would_read(tmp_path: Path):
     cat = Catalog(tmp_path)
-    cat.record_store(store_id="dwd/10min/v1", layer="canonical", kind="points",
-                     path=str(tmp_path / "canonical"), version=1, n_records=1234,
+    cat.record_store(store_id="dwd/10min/v1", layer="packed", kind="points",
+                     path=str(tmp_path / "packed"), version=1, n_records=1234,
                      time_min=datetime(2012, 1, 1, tzinfo=UTC),
                      time_max=datetime(2013, 1, 1, tzinfo=UTC),
                      config_hash="cafe", code_version="abc1234")
@@ -126,7 +127,7 @@ def test_concurrent_thread_appends_lose_nothing(tmp_path: Path):
     assert set(jobs["job_key"].to_list()) == expected
     assert cat.pending("fetch", sorted(expected)) == []
     # one shard per writer, not one file per row
-    assert len(list((tmp_path / "catalog" / "jobs").glob("*.parquet"))) == workers
+    assert len(list((tmp_path / catalog_mod.CATALOG_DIRNAME / "jobs").glob("*.parquet"))) == workers
 
 
 def _process_writer(root_str: str, worker: int, n: int) -> None:
@@ -171,9 +172,9 @@ def test_a_second_writer_can_overwrite_an_earlier_verdict(tmp_path: Path):
 def test_buffered_writes_are_flushed_before_any_read(tmp_path: Path):
     cat = Catalog(tmp_path, autoflush=False)
     cat.mark("fetch:u0", "done", stage="fetch")
-    assert not list((tmp_path / "catalog" / "jobs").glob("*.parquet"))
+    assert not list((tmp_path / catalog_mod.CATALOG_DIRNAME / "jobs").glob("*.parquet"))
     assert cat.is_done("fetch:u0") is True  # read flushes first
-    assert list((tmp_path / "catalog" / "jobs").glob("*.parquet"))
+    assert list((tmp_path / catalog_mod.CATALOG_DIRNAME / "jobs").glob("*.parquet"))
 
 
 def test_writers_never_share_a_shard(tmp_path: Path):

@@ -87,7 +87,7 @@ def test_validate_passes_on_a_healthy_store(tmp_path):
     points.write(_frame(times, [5.0] * len(times)), cfg, tmp_path)
     points.write_stations(_stations(), cfg.store_id, tmp_path)
     manifest.write(points.store_path(tmp_path, cfg.store_id),
-                   manifest.Manifest.new(cfg.store_id, "canonical", "points", cfg))
+                   manifest.Manifest.new(cfg.store_id, "packed", "points", cfg))
     report = validate(cfg, tmp_path)
     assert report.ok, report.text()
     assert report.stats["rows"] == len(times)
@@ -99,7 +99,7 @@ def test_validate_catches_off_cadence_rows(tmp_path):
     times = [datetime(2012, 1, 1, 0, 0), datetime(2012, 1, 1, 0, 7)]   # 7 min: off the 600 s grid
     points.write(_frame(times, [1.0, 2.0]), cfg, tmp_path)
     manifest.write(points.store_path(tmp_path, cfg.store_id),
-                   manifest.Manifest.new(cfg.store_id, "canonical", "points", cfg))
+                   manifest.Manifest.new(cfg.store_id, "packed", "points", cfg))
     report = validate(cfg, tmp_path)
     assert not report.ok
     assert any("cadence" in c.name and not c.ok for c in report.checks)
@@ -110,7 +110,7 @@ def test_validate_catches_out_of_range_values(tmp_path):
     times = [datetime(2012, 1, 1, 0, 0), datetime(2012, 1, 1, 0, 10)]
     points.write(_frame(times, [5.0, 999.0]), cfg, tmp_path)
     manifest.write(points.store_path(tmp_path, cfg.store_id),
-                   manifest.Manifest.new(cfg.store_id, "canonical", "points", cfg))
+                   manifest.Manifest.new(cfg.store_id, "packed", "points", cfg))
     report = validate(cfg, tmp_path)
     assert not report.ok
     assert any("valid range" in c.name and not c.ok for c in report.checks)
@@ -121,7 +121,7 @@ def test_validate_flags_a_store_built_from_different_config(tmp_path):
     times = [datetime(2012, 1, 1, 0, 0)]
     points.write(_frame(times, [5.0]), cfg, tmp_path)
     manifest.write(points.store_path(tmp_path, cfg.store_id),
-                   manifest.Manifest.new(cfg.store_id, "canonical", "points", cfg))
+                   manifest.Manifest.new(cfg.store_id, "packed", "points", cfg))
     moved = cfg.model_copy(update={"cadence_seconds": 300})
     report = validate(moved, tmp_path)
     assert any("manifest" in c.name and not c.ok for c in report.checks)
@@ -143,7 +143,7 @@ def test_validate_catches_observations_without_station_metadata(tmp_path):
     times = [datetime(2012, 1, 1, 0, 0), datetime(2012, 1, 1, 0, 10)]
     points.write(_frame(times, [5.0, 6.0]), cfg, tmp_path)
     manifest.write(points.store_path(tmp_path, cfg.store_id),
-                   manifest.Manifest.new(cfg.store_id, "canonical", "points", cfg))
+                   manifest.Manifest.new(cfg.store_id, "packed", "points", cfg))
 
     report = validate(cfg, tmp_path)
     assert not report.ok

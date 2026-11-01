@@ -1,6 +1,6 @@
 """Write a short README into the data root and into each layer.
 
-The directory names (`raw`, `canonical`, `derived`, `catalog`) say what the
+The directory names (`raw`, `packed`, `training`, `_bookkeeping`) say what the
 pipeline calls a layer, not what is in it, and someone opening the data root in
 a file browser has no code to read. A store is also the thing most likely to
 outlive the checkout that made it — it gets copied to another machine, handed
@@ -28,9 +28,9 @@ Four directories, in the order data moves through them.
 | directory   | what is in it | written by | safe to delete? |
 |-------------|---------------|------------|-----------------|
 | `raw/`      | Exactly what the upstream server sent — the bytes, unmodified. | `meteopack fetch` | Yes, if you are willing to download again. Nothing else can be rebuilt without it. |
-| `canonical/`| One analysis-ready dataset per product: harmonised names, units and time axis. This is the layer to read. | `meteopack pack` | Yes — rebuildable from `raw/`. |
-| `derived/`  | Datasets built *from* `canonical/` for a particular use, mostly model training. | `meteopack derive` | Yes — rebuildable from `canonical/`. |
-| `catalog/`  | Bookkeeping: what has been downloaded, what has been built, what failed. No observations. | every command | Yes, but then the pipeline no longer knows what it already did and will redo it. |
+| `packed/`   | One analysis-ready dataset per product: harmonised names, units and time axis. This is the layer to read. | `meteopack pack` | Yes — rebuildable from `raw/`. |
+| `training/` | Datasets built *from* `packed/` and shaped for model training. | `meteopack derive` | Yes — rebuildable from `packed/`. |
+| `_bookkeeping/` | Bookkeeping: what has been downloaded, what has been built, what failed. No observations. | every command | Yes, but then the pipeline no longer knows what it already did and will redo it. |
 
 Each directory has its own README with the detail.
 
@@ -52,9 +52,9 @@ This is the only layer that cannot be rebuilt. Everything else is a function of
 it.
 """
 
-_CANONICAL = """# canonical/ — the datasets you read
+_CANONICAL = """# packed/ — the datasets you read
 
-Layout: `canonical/<source>/<product>/v<n>/`, one store per product, versioned
+Layout: `packed/<source>/<product>/v<n>/`, one store per product, versioned
 so a schema change does not overwrite the old one.
 
 Two kinds of store, named by `store.kind` in the product config:
@@ -70,35 +70,46 @@ replaced on write, never appended to, so re-running a job cannot duplicate
 rows. Station coordinates live in `stations/`, not on every observation row;
 join on `station_id`, which is text.
 
-**gridded** — fields on a fixed grid, as Zarr v3:
+**gridded** — fields on a fixed grid, as Zarr v3 under `dataset.zarr/`:
 
-    <variable>/        one array, (time, y, x)
-    time/              the time axis
-    manifest.json
+    <variable>/        one field, (time, y, x), integer codes plus a calibration
+    time/              nanoseconds since 1970-01-01, UTC
+    x/ y/              projected cell centres; lat/ lon/ are per-cell degrees
+    is_missing_frame/  no source file covered this time step
+    is_corrupt_frame/  a file existed but could not be read
+    source_layout_id/  which upstream generation produced this frame
+    source_record_id/  row in the provenance table
+    manifest.json      (beside dataset.zarr, not inside it)
 
-The time axis is regular and fixed when the store is created, and every frame
-is written into the slot its timestamp belongs to. Frames are chunked one per
-chunk inside day-sized shards.
+The time axis is regular and grows forward as later windows are packed; every
+frame is written into the slot its timestamp belongs to. Frames are chunked one
+per chunk inside day-sized shards.
+
+Fields are stored as integers with a fixed calibration, so a reader must decode
+them: `value = scale_factor * stored + add_offset`, with two reserved codes.
+`calibration_missing_data` means the instrument measured nothing there and
+`calibration_out_of_image` means the pixel is outside the product footprint —
+different facts, kept apart. Both are on each array's attributes.
 
 `manifest.json` records the config the store was built from. `meteopack
 validate <source>` checks a store against it.
 """
 
-_DERIVED = """# derived/ — built from canonical/, for a purpose
+_DERIVED = """# training/ — built from packed/, shaped for a model
 
-Layout: `derived/<name>/v<n>/`, one per entry in `configs/derive/`.
+Layout: `training/<name>/v<n>/`, one per entry in `configs/derive/`.
 
-These are not new observations. Each one is a reshaping of `canonical/` for a
+These are not new observations. Each one is a reshaping of `packed/` for a
 specific consumer — a model, a plot, an evaluation — and exists so that work is
 done once rather than in every training run. Examples: a dense
 station × time matrix, spatial patches cut around a target, train/val/test
 splits.
 
 Delete any of these freely; `meteopack derive <name>` rebuilds it. If a derived
-dataset disagrees with `canonical/`, `canonical/` is right.
+dataset disagrees with `packed/`, `packed/` is right.
 """
 
-_CATALOG = """# catalog/ — bookkeeping, no data
+_CATALOG = """# _bookkeeping/ — no data, just what has been done
 
 Three tables, each a *directory* of Parquet files rather than one file:
 
@@ -119,16 +130,16 @@ the newest row per key, so duplicates across files are expected and harmless.
 Do not edit these by hand. To read them:
 
     meteopack catalog <source>          # a summary
-    duckdb -c "select * from read_parquet('catalog/jobs/*.parquet')"
+    duckdb -c "select * from read_parquet('_bookkeeping/jobs/*.parquet')"
 
-Deleting `catalog/` loses no observations. The pipeline simply forgets what it
+Deleting `_bookkeeping/` loses no observations. The pipeline simply forgets what it
 has already done, and will redo it.
 """
 
 _LAYERS: dict[str, str] = {
     "raw": _RAW,
-    "canonical": _CANONICAL,
-    "derived": _DERIVED,
+    "packed": _CANONICAL,
+    "training": _DERIVED,
     "catalog": _CATALOG,
 }
 

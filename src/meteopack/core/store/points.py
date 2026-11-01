@@ -45,7 +45,7 @@ from meteopack.core.timeline import Timeline
 
 #: Points stores are canonical-layer artefacts; derived datasets are built from
 #: them rather than written here.
-DEFAULT_LAYER: Layer = "canonical"
+DEFAULT_LAYER: Layer = "packed"
 
 OBSERVATIONS_DIR = "observations"
 STATIONS_DIR = "stations"

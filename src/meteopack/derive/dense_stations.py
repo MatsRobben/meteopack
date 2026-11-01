@@ -32,8 +32,8 @@ from meteopack.core.store import manifest as manifest_mod
 from meteopack.core.store import points
 from meteopack.derive.base import DeriveSpec
 
-DEFAULT_LAYER: Layer = "derived"
-SOURCE_LAYER: Layer = "canonical"
+DEFAULT_LAYER: Layer = "training"
+SOURCE_LAYER: Layer = "packed"
 
 MATRIX_DIRNAME = "matrix.zarr"
 

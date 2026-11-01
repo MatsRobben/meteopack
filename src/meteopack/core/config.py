@@ -13,7 +13,18 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-Layer = Literal["raw", "canonical", "derived"]
+#: The three layers data moves through, named after the command that fills
+#: them. "canonical" and "derived" said nothing about what was in them, which
+#: is the complaint that prompted the rename; "packed" is what `meteopack pack`
+#: writes and the word the previous pipeline used, and "training" says what the
+#: derived datasets are for.
+Layer = Literal["raw", "packed", "training"]
+
+#: What each layer used to be called on disk. A data root written before the
+#: rename keeps working: `layer_path` falls back to the old directory when it
+#: exists and the new one does not, so nobody has to migrate a 600 GB tree to
+#: read it. New stores are always written under the new names.
+LEGACY_LAYER_DIRS: dict[str, str] = {"packed": "canonical", "training": "derived"}
 
 _ENV_DATA_ROOT = "METEOPACK_DATA_ROOT"
 
@@ -208,4 +219,11 @@ def data_root(override: str | os.PathLike[str] | None = None, default: str | Non
 
 
 def layer_path(root: Path, layer: Layer, *parts: str) -> Path:
-    return root.joinpath(layer, *parts)
+    """`<root>/<layer>/<parts...>`, honouring a pre-rename directory if present."""
+    current = root.joinpath(layer, *parts)
+    legacy_name = LEGACY_LAYER_DIRS.get(str(layer))
+    if legacy_name and not root.joinpath(layer).is_dir():
+        legacy = root.joinpath(legacy_name)
+        if legacy.is_dir():
+            return legacy.joinpath(*parts)
+    return current

@@ -99,7 +99,7 @@ class StrictGridded:
             return
         inspect.signature(real).bind(*args, **kwargs)
 
-    def read(self, store_id, root, *, time_range=None, variables=None, layer="canonical"):
+    def read(self, store_id, root, *, time_range=None, variables=None, layer="packed"):
         self._bind(
             "read", store_id, root, time_range=time_range, variables=variables, layer=layer
         )
@@ -222,7 +222,7 @@ def test_brick_call_sites_bind_against_the_real_gridded_read():
         Path("/tmp/root"),
         time_range=(utc(2024, 1, 1), utc(2024, 1, 2)),
         variables=["rain"],
-        layer="canonical",
+        layer="packed",
     )
 
 

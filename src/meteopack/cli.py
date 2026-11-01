@@ -462,8 +462,8 @@ def stage_pack(ctx: Context) -> int:
         print(f"packed {df.height} rows into {len(paths)} partition file(s) at {store}")
 
     manifest.write(store, manifest.Manifest.new(
-        ctx.cfg.store_id, "canonical", ctx.cfg.store.kind, ctx.cfg, n_records=n_records))
-    ctx.catalog.record_store(store_id=ctx.cfg.store_id, layer="canonical",
+        ctx.cfg.store_id, "packed", ctx.cfg.store.kind, ctx.cfg, n_records=n_records))
+    ctx.catalog.record_store(store_id=ctx.cfg.store_id, layer="packed",
                              kind=ctx.cfg.store.kind, path=str(store), version=ctx.cfg.version,
                              n_records=n_records, config_hash=manifest.config_hash(ctx.cfg))
     ctx.catalog.flush()
@@ -611,8 +611,10 @@ def stage_catalog(ctx: Context) -> int:
 
     print("\nstores")
     rows = []
-    for layer in ("canonical", "derived"):
-        base = ctx.root / layer
+    from meteopack.core.config import layer_path
+
+    for layer in ("packed", "training"):
+        base = layer_path(ctx.root, layer)
         if not base.is_dir():
             continue
         for path in sorted(base.rglob("manifest.json")):
@@ -652,6 +654,7 @@ def _derive_timeline(cfg, root: Path, window):
     import json
     from datetime import timedelta
 
+    from meteopack.core.config import layer_path
     from meteopack.core.timeline import Timeline
 
     cadence = timedelta(seconds=cfg.cadence_seconds)
@@ -660,7 +663,7 @@ def _derive_timeline(cfg, root: Path, window):
 
     spans = []
     for store_id in cfg.inputs:
-        base = root / "canonical" / store_id
+        base = layer_path(root, "packed", store_id)
         man = base / "manifest.json"
         if not man.exists():
             continue
@@ -713,10 +716,12 @@ def _derive_kind(cfg, root: Path) -> str:
     """
     import json
 
+    from meteopack.core.config import layer_path
+
     if getattr(cfg, "kind", None):
         return str(cfg.kind)
     for store_id in cfg.inputs:
-        path = root / "canonical" / store_id / "manifest.json"
+        path = layer_path(root, "packed", store_id) / "manifest.json"
         if not path.exists():
             continue
         try:

@@ -139,3 +139,58 @@ def test_wide_integers_do_not_build_a_four_billion_entry_table():
     values = np.array([0, 100, 12345], dtype="int32")
     out = encode(values, RTCOR, source_scale=0.01, source_offset=0.0)
     np.testing.assert_array_equal(out, np.array([0, 100, 12345], dtype="uint16"))
+
+
+def test_near_tie_values_are_resolved_in_float64_not_float32():
+    """Where this deliberately differs from the radar_v3 pipeline.
+
+    That pipeline did the conversion in float32. Re-encoding the 2018 gauge
+    adjustment factor (source ``GEO=0.001*PV-32.768``, target 0.16/-20.24) puts
+    one input code in every 160 at a value that is a .5 midpoint in exact
+    arithmetic, and whether it rounds up or down is then decided by
+    representation error - 1e-7 in float32 against 1e-14 in float64.
+
+    Checked against the real store: 531 of 535,500 cells in one frame differ by
+    exactly one count, every one at such a near-tie, and both answers sit 0.5
+    counts (0.08 dB) from the true value. Neither is more accurate for those
+    pixels. float64 is used anyway because it reproduces the intended value
+    1e7 times more closely everywhere else, and because the result does not
+    depend on the order the arithmetic happens to be done in.
+    """
+    target = Encoding(dtype=np.dtype("uint8"), scale=0.16, offset=-20.24,
+                      missing=254, out_of_image=255)
+    # code = (0.001*PV - 32.768 + 20.24) / 0.16 = 0.00625*PV - 78.3
+    midpoints = np.array([12608, 12768, 12928, 13088], dtype="uint16")
+    exact = 0.00625 * midpoints.astype("float64") - 78.3
+    assert np.allclose(exact - np.floor(exact), 0.5, atol=1e-9), "fixture is not near the ties"
+
+    out = encode(midpoints, target, source_scale=0.001, source_offset=-32.768)
+
+    # The contract is the two-step route the implementation takes: decode with
+    # the source calibration, re-encode with the target's, round with np.rint.
+    decoded = midpoints.astype("float64") * 0.001 + (-32.768)
+    expected = np.rint((decoded - target.offset) / target.scale).astype("uint8")
+    np.testing.assert_array_equal(out, expected)
+
+    # And here is the point, visible in the fixture itself: collapsing those
+    # two steps algebraically into `0.00625 * PV - 78.3` gives a different
+    # answer for every one of these codes, because neither 78.3 nor 0.16 is
+    # representable and the two routes land on opposite sides of the tie. At a
+    # mathematical tie the result is decided by representation, whichever
+    # precision is used - which is why matching radar_v3 cell for cell here is
+    # not a meaningful goal.
+    shortcut = np.rint(0.00625 * midpoints.astype("float64") - 78.3).astype("uint8")
+    assert not np.array_equal(out, shortcut)
+    assert np.abs(out.astype("float64") - exact).max() <= 0.5 + 1e-9
+    assert np.abs(shortcut.astype("float64") - exact).max() <= 0.5 + 1e-9
+
+
+def test_a_modern_rtcor_frame_re_encodes_to_itself():
+    """The canonical calibration is the product's own, so the 2023+ generation
+    is a no-op. Verified against radar_v3 on real data: 12.85 million cells per
+    variable over 24 frames, zero differing.
+    """
+    codes = np.array([0, 1, 1234, 65533, 65534, 65535], dtype="uint16")
+    out = encode(codes, RTCOR, source_scale=0.01, source_offset=0.0,
+                 source_missing={65534}, source_out_of_image={65535})
+    np.testing.assert_array_equal(out, codes)

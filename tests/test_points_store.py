@@ -45,8 +45,8 @@ def test_write_lays_out_hive_dirs_and_keeps_them_out_of_the_body(tmp_path: Path)
     written = points.write(frame, cfg, tmp_path)
     rel = sorted(str(p.relative_to(tmp_path)) for p in written)
     assert rel == [
-        "canonical/dwd/10min/v1/observations/year=2012/month=01/data.parquet",
-        "canonical/dwd/10min/v1/observations/year=2012/month=02/data.parquet",
+        "packed/dwd/10min/v1/observations/year=2012/month=01/data.parquet",
+        "packed/dwd/10min/v1/observations/year=2012/month=02/data.parquet",
     ]
     out = points.read(cfg.store_id, tmp_path)
     assert out.columns == ["time", "station_id", "t2m"]  # no year/month leaked in
@@ -79,7 +79,7 @@ def test_rewriting_a_partition_replaces_it_and_never_duplicates(tmp_path: Path):
     out = points.read(cfg.store_id, tmp_path)
     assert len(out) == 12
     assert out["t2m"].min() == 100.0
-    assert len(list((tmp_path / "canonical/dwd/10min/v1/observations/year=2012").iterdir())) == 1
+    assert len(list((tmp_path / "packed/dwd/10min/v1/observations/year=2012").iterdir())) == 1
 
 
 def test_part_key_lets_two_tasks_share_a_partition(tmp_path: Path):
@@ -298,8 +298,8 @@ def test_partition_keys_may_be_a_real_column_or_absent(tmp_path: Path):
     by_station = make_cfg(["station_id", "year"])
     written = points.write(frame, by_station, tmp_path)
     assert [p.parent.relative_to(tmp_path).as_posix() for p in written] == [
-        "canonical/dwd/10min/v1/observations/station_id=00044/year=2012",
-        "canonical/dwd/10min/v1/observations/station_id=01048/year=2013",
+        "packed/dwd/10min/v1/observations/station_id=00044/year=2012",
+        "packed/dwd/10min/v1/observations/station_id=01048/year=2013",
     ]
     assert len(points.read(by_station.store_id, tmp_path)) == 2
 
@@ -308,7 +308,7 @@ def test_partition_keys_may_be_a_real_column_or_absent(tmp_path: Path):
         store=StoreConfig(kind="points", partition_by=[]),
     )
     assert points.write(frame, flat, tmp_path) == [
-        tmp_path / "canonical/knmi/10min/v1/observations/data.parquet"
+        tmp_path / "packed/knmi/10min/v1/observations/data.parquet"
     ]
     assert len(points.read(flat.store_id, tmp_path)) == 2
 

@@ -59,7 +59,7 @@ if TYPE_CHECKING:  # xarray is a caller-facing type here, not an import-time cos
     import xarray as xr
 
 #: Gridded stores are canonical-layer artefacts; training sets are derived from them.
-DEFAULT_LAYER: Layer = "canonical"
+DEFAULT_LAYER: Layer = "packed"
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,10 @@ COORD_NAMES: tuple[str, ...] = ("y", "x", "lat", "lon")
 #: generation produced it - are unanswerable from the imagery itself: an absent
 #: frame and an empty one both read as missing.
 PROVENANCE: dict[str, tuple[str, object]] = {
-    "is_missing_frame": ("bool", False),
+    # True by default: a slot nobody has written has no source file behind it,
+    # which is exactly what missing means. `write` clears it for the rows it
+    # touches, so correctness here needs nothing from the source.
+    "is_missing_frame": ("bool", True),
     "is_corrupt_frame": ("bool", False),
     "source_layout_id": ("int16", -1),
     "source_record_id": ("int64", -1),
@@ -527,6 +530,13 @@ def _write_provenance(group, ds, rows, keep, hit, order, breaks) -> None:
     created with and reads as "not recorded" rather than as a real layout.
     """
     for name in PROVENANCE:
+        if name == "is_missing_frame" and name not in ds.variables:
+            # Written unconditionally: these rows now have data behind them.
+            array = group[name]
+            blank = np.zeros(int(keep.sum()), dtype=array.dtype)
+            for run, picks in zip(np.split(hit, breaks), np.split(order, breaks), strict=True):
+                array[int(run[0]) : int(run[-1]) + 1] = blank[picks]
+            continue
         if name not in ds.variables:
             continue
         array = group[name]
