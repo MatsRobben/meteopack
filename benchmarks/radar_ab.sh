@@ -26,7 +26,8 @@ side() {  # "commit@K=V,K2=V2" -> label commit envs
 read -r la ca ea <<< "$(side "$1")"; read -r lb cb eb <<< "$(side "$2")"
 repeats=${3:-2} workers=${4:-12} products=${5:-rtcor_5min echotop_5min refl_5min}
 for c in $ca $cb; do
-  [ -d $bench/trees/$c ] || git -C $repo worktree add --detach $bench/trees/$c $c >/dev/null
+  ( flock 9; [ -d $bench/trees/$c/src ] || git -C $repo worktree add --detach $bench/trees/$c $c >/dev/null
+  ) 9>$bench/trees/.lock
 done
 summary=$bench/runs/ab_${SLURM_JOB_ID:-local}.tsv
 printf "round\tcommit\tproduct\twall_s\tcompare\n" > $summary

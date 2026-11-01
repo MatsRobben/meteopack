@@ -24,10 +24,13 @@ set -euo pipefail
 repo=/vol/knmimo-nobackup/users/mrobben/meteopack
 commit=$(git -C "$repo" rev-parse --short "$1"); shift
 tree=/vol/knmimo-nobackup/users/mrobben/bench_radar/trees/$commit
-if [ ! -d "$tree" ]; then
-  git -C "$repo" worktree add --detach "$tree" "$commit" >/dev/null 2>&1 \
-    || [ -d "$tree" ]            # another job made it first
-fi
+# Serialised: jobs released together (a dependency, an array) all try to make
+# the same worktree in the same second, and git's own lock fails the losers.
+mkdir -p "$(dirname "$tree")"
+(
+  flock 9
+  [ -d "$tree/src" ] || git -C "$repo" worktree add --detach "$tree" "$commit" >/dev/null
+) 9>"$(dirname "$tree")/.lock"
 cd "$tree"
 export PYTHONPATH="$tree/src"
 K=/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi
