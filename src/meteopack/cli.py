@@ -335,16 +335,29 @@ def _write_station_metadata(ctx: Context) -> int:
 
     from meteopack.core.stations import archived_stations
 
-    table = stations(ctx.cfg)
-    if table is None or not len(table):
-        logger.warning("source %s returned no station metadata", ctx.cfg.source)
-        return 0
-
-    # Sources name the elevation column differently; the store has one name.
-    renames = {"height_m": "height", "altitude": "height", "elevation": "height"}
-    table = table.rename({k: v for k, v in renames.items() if k in table.columns})
-    keep = [c for c in ("station_id", "lat", "lon", "height", "name") if c in table.columns]
-    table = table.select(keep).unique(subset=["station_id"], keep="first")
+    # The live catalogue and the archived one are each optional. The archive
+    # used to be consulted only after the live lookup had succeeded, so a live
+    # failure - MIDAS raising CedaAuthError on an expired token - failed the
+    # pack after the store was already written, and an empty live answer never
+    # reached the archive at all.
+    keep = ["station_id", "lat", "lon", "height", "name"]
+    schema = {"station_id": pl.String, "lat": pl.Float64, "lon": pl.Float64,
+              "height": pl.Float64, "name": pl.String}
+    try:
+        table = stations(ctx.cfg)
+    except Exception as exc:  # noqa: BLE001 - the archive below may still cover it
+        logger.warning("%s: live station catalogue unavailable (%s: %s); falling back to "
+                       "the archived one", ctx.cfg.source, type(exc).__name__, exc)
+        table = None
+    if table is not None and len(table):
+        # Sources name the elevation column differently; the store has one name.
+        renames = {"height_m": "height", "altitude": "height", "elevation": "height"}
+        table = table.rename({k: v for k, v in renames.items() if k in table.columns})
+        table = table.with_columns(
+            [pl.lit(None, dtype=t).alias(c) for c, t in schema.items() if c not in table.columns])
+        table = table.select(keep).unique(subset=["station_id"], keep="first")
+    else:
+        table = pl.DataFrame(schema=schema)
     # A provider's catalogue lists the stations reporting *now*, so a backfill
     # gets nothing for the ones that have since closed - half of DWD's 1,030
     # and three quarters of DMI's 110. A catalogue archived beside the data was
@@ -354,10 +367,7 @@ def _write_station_metadata(ctx: Context) -> int:
     # collide.
     archived = archived_stations(ctx.raw_root)
     if archived:
-        extra = pl.DataFrame(archived, schema={
-            "station_id": pl.String, "lat": pl.Float64,
-            "lon": pl.Float64, "height": pl.Float64, "name": pl.String,
-        }).select(keep)
+        extra = pl.DataFrame(archived, schema=schema).select(keep)
         new_rows = extra.filter(
             ~pl.col("station_id").is_in(table["station_id"].to_list())
         )
@@ -368,8 +378,9 @@ def _write_station_metadata(ctx: Context) -> int:
             )
             table = pl.concat([table, new_rows], how="diagonal_relaxed")
 
-    if "height" not in table.columns:
-        table = table.with_columns(pl.lit(None, dtype=pl.Float64).alias("height"))
+    if not len(table):
+        logger.warning("source %s: no station metadata, live or archived", ctx.cfg.source)
+        return 0
     points.write_stations(table, ctx.cfg.store_id, ctx.root)
     return len(table)
 

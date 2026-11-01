@@ -610,3 +610,31 @@ def test_a_failed_fetch_is_recorded_against_its_own_unit(tmp_path):
     assert code == 1
     rows = ctx.catalog.query("SELECT job_key, status, error FROM jobs")
     assert rows.row(0) == ("fetch:station-7", "failed", "ConnectionError: reset by peer")
+
+
+def test_station_metadata_comes_from_the_archive_when_the_live_catalogue_fails(tmp_path):
+    """MIDAS raises CedaAuthError on an expired token, before the archive was tried.
+
+    The pack then failed after its store was already written.
+    """
+    import json
+
+    from meteopack import cli
+
+    raw = tmp_path / "raw" / "midas" / "hourly"
+    raw.mkdir(parents=True)
+    (raw / "station_catalog.json").write_text(json.dumps({
+        "00044": {"station_id": "00044", "lat": 52.1, "lon": 5.2, "height": 2.0, "name": "A"}}))
+
+    class Ctx:
+        cfg = _cfg()
+        root = tmp_path
+        raw_root = raw
+
+        class src:
+            @staticmethod
+            def stations(cfg):
+                raise PermissionError("CEDA token expired")
+
+    assert cli._write_station_metadata(Ctx()) == 1
+    assert points.read_stations(_cfg().store_id, tmp_path)["station_id"].to_list() == ["00044"]

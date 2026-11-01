@@ -684,3 +684,28 @@ def test_fixture_round_trips_through_a_real_zip(tmp_path):
         payload = zf.read(zf.namelist()[0])
     assert payload == PRODUKT_TU
     assert pl.read_csv(io.BytesIO(payload), separator=";", infer_schema=False).height == 4
+
+
+def test_a_backfill_lists_stations_that_have_since_closed(monkeypatch, src, product):
+    """recent/'s catalogue lists only stations still reporting.
+
+    Reading it alone, a backfill never listed a closed station - 23 inside the
+    radar domain. historical/'s catalogue has them.
+    """
+    closed = (b"00099 19900101 20121231             20     52.2000    7.0000 "
+              b"Gronau                                   Nordrhein-Westfalen"
+              b"                      Frei\r\n")
+
+    def fake_get(url: str, *, encoding: str = "utf-8") -> str:
+        if url.endswith("Beschreibung_Stationen.txt"):
+            body = STATION_DESC + (closed if "/historical/" in url else b"")
+            return body.decode(encoding)
+        return ""
+
+    monkeypatch.setattr(src, "_get_text", fake_get)
+    backfill = src.stations(product, window=TimeWindow(datetime(2010, 1, 1, tzinfo=UTC),
+                                                       datetime(2011, 1, 1, tzinfo=UTC)))
+    assert "00099" in backfill["station_id"].to_list()
+    today = src.stations(product, window=TimeWindow(datetime(2026, 10, 30, tzinfo=UTC),
+                                                    datetime(2026, 10, 31, tzinfo=UTC)))
+    assert "00099" not in today["station_id"].to_list()

@@ -363,10 +363,16 @@ class DwdStations:
         grid = grids.get(cfg.grid_id) if cfg.grid_id else None
         wanted = list(groups) if groups is not None else self._groups_for(cfg)
         start, end = self._window_bounds(window) if window else (None, None)
+        # Each subdirectory has its own catalogue, and recent/ lists only
+        # stations still reporting: reading it alone, a backfill never listed a
+        # closed station - 23 inside the domain. Read every catalogue the window
+        # needs; with no window, every station there has ever been.
+        catalogues = self._subdirs(start, end, cfg) if window else ["recent", "historical"]
 
         merged: dict[str, dict] = {}
         for group in wanted:
-            for rec in self.description(group):
+            records = [rec for sub in catalogues for rec in self.description(group, sub)]
+            for rec in records:
                 if grid is not None and not grid.contains(rec.lon, rec.lat):
                     continue
                 if start is not None and not rec.covers(start, end):
