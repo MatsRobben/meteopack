@@ -333,10 +333,14 @@ class EaRainfall:
         """Bulk readings for one measure over one calendar year.
 
         The window is per-year because the endpoint caps a response at 100 000
-        rows and a year of 15-minute data is comfortably under that. `max-date`
-        is inclusive, which is why it reads 12-31 rather than the next 01-01.
+        rows and a year of 15-minute data is comfortably under that.
+
+        `mineq-date`/`maxeq-date` are the inclusive bounds. `min-date` and
+        `max-date` are EXCLUSIVE, and using them dropped 1 January and
+        31 December from every station-year: 386 of 386 complete year files in
+        the archive ran 01-02 to 12-30. (Inherited from the original pipeline.)
         """
-        query = {"min-date": f"{year:04d}-01-01", "max-date": f"{year:04d}-12-31"}
+        query = {"mineq-date": f"{year:04d}-01-01", "maxeq-date": f"{year:04d}-12-31"}
         return f"{self.base_url}{_MEASURE_PATH}{measure_id}/readings.csv?{urlencode(query)}"
 
     def catalogue(self, cfg: ProductConfig | None = None) -> list[StationRecord]:

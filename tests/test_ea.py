@@ -493,11 +493,15 @@ def test_list_honours_station_ids_and_max_stations():
 
 
 def test_the_readings_url_windows_exactly_one_calendar_year():
-    """Per-year windows are what keeps a response under the 100 000 row cap."""
+    """Per-year windows keep a response under the 100 000 row cap - with both ends in.
+
+    This test used to pin `min-date`/`max-date`, which are exclusive: every
+    station-year in the archive ran 01-02 to 12-30, and the test passed.
+    """
     url = FakeEa().readings_url("a3be5ed5-rainfall-t-900-mm-qualified", 2021)
     assert url.endswith(
         "/id/measures/a3be5ed5-rainfall-t-900-mm-qualified/readings.csv"
-        "?min-date=2021-01-01&max-date=2021-12-31"
+        "?mineq-date=2021-01-01&maxeq-date=2021-12-31"
     )
     assert CSV_ROW_CAP == 100_000
 
