@@ -78,6 +78,13 @@ def main() -> None:
     ap.add_argument("--root", type=Path, required=True)
     ap.add_argument("--per-product", type=int, default=24)
     ap.add_argument("--products", default=",".join(ARCHIVES))
+    ap.add_argument("--offset", type=int, default=0,
+                    help="shift the evenly spaced picks; offsets 0,1,2 give disjoint samples, "
+                         "which is what a scaling run needs - the NFS server caches what an "
+                         "earlier run read")
+    ap.add_argument("--no-examples", action="store_true",
+                    help="evenly spaced tars only: no first tar, no layout examples (they "
+                         "would be shared between otherwise disjoint samples)")
     args = ap.parse_args()
 
     chosen: dict[str, list[str]] = {}
@@ -86,8 +93,10 @@ def main() -> None:
         if not tars:
             raise SystemExit(f"no tars for {product} under {archive_of(product)}")
         stride = max(len(tars) // args.per_product, 1)
-        picks = {tars[0], *tars[::stride][: args.per_product]}
-        examples = layout_example_tars(product, tars)
+        picks = set(tars[args.offset::stride][: args.per_product])
+        examples = [] if args.no_examples else layout_example_tars(product, tars)
+        if not args.no_examples:
+            picks.add(tars[0])
         picks.update(examples)
         dest = args.root / "raw" / "knmi_radar" / product
         dest.mkdir(parents=True, exist_ok=True)
