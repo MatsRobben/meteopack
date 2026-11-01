@@ -14,6 +14,9 @@ from pathlib import Path
 ARCHIVE = Path(sys.argv[1])
 LEVELS = [int(x) for x in sys.argv[2].split(",")]
 PER_LEVEL = int(sys.argv[3]) if len(sys.argv) > 3 else 48
+# Different per node, so one node's reads do not leave the next node's
+# tars in the NFS server's cache.
+OFFSET = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 
 def read_whole(path):
     n = 0
@@ -25,7 +28,7 @@ def read_whole(path):
 tars = sorted(ARCHIVE.glob("*.tar"))
 # Spread across the years rather than taking a contiguous run.
 step = max(1, len(tars) // (PER_LEVEL * len(LEVELS) or 1))
-pool = tars[::step]
+pool = tars[OFFSET::step]
 print(f"{socket.gethostname()}: {len(tars)} tars, sampling {len(pool)}", flush=True)
 try:
     speed = Path("/sys/class/net/eno1/speed").read_text().strip() + " Mbit/s"
