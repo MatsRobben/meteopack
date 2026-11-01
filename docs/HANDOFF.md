@@ -219,3 +219,36 @@ old directory exists. Verified against the real 600 GB root.
   re-downloading
 - knmi_insitu (26G), echotop (38G) and refl_composites (104G) have no product
   configs yet; radar_v3 shows they are the same reader family
+
+### What the full-archive runs broke (2026-11-01, later)
+
+Seven things, every one of them invisible on the sample runs.
+
+| | symptom | cause | fix |
+|---|---|---|---|
+| 1 | DWD pack died, 74 GB RSS, SIGABRT | every parsed frame returned to the parent and concatenated | workers spill one file per store partition; parent does one partition at a time |
+| 2 | validate died before reporting | it read the whole store: 772,416 x 765 x 700 x 3 | metadata and provenance in full, imagery sampled, and it says so |
+| 3 | 2019 tars failed entirely | a readable HDF5 with no image groups was raised as schema drift | recorded as a corrupt frame, as radar_v3 did |
+| 4 | DMI: "nothing parsed", all 4,775 files | the archive is `[[time, value], ...]`, not the API's GeoJSON | the compact form is recognised by shape; station and parameter from the path |
+| 5 | every source reported drift on one file | the previous pipeline's `station_catalog.json` sits beside the data | skipped by name |
+| 6 | a SEVIRI pack hung 1 h 53 m | all workers died; the pool waited forever | bounded wait, forceful shutdown, every task accounted for |
+| 7 | two tars could race one shard | grouping keyed on the first frame, not the whole span | files sharing any shard are unioned into one task |
+
+Self-inflicted and worth remembering: **editing source while a job is running
+breaks it.** `packing.py` changed under a live radar pack and its workers hit
+`'PackTask' object has no attribute 'also'`. Finish the edits, then run.
+
+Measured on the real archives:
+
+- radar pack, 8 workers, 1,661 of 2,680 tars before it stopped: 1,659 s,
+  2.1 GB peak RSS, 15 GB written, 477,618 frames
+- belgium, full archive: 9,970,209 rows, 110 s
+- belgium under the streaming pack: same rows, 243 MB peak RSS
+- layout census over the packed portion: {3: 58,813, 4: 361,781, 5: 57,024},
+  matching radar_v3's proportions
+
+### Ordering for the remaining work
+
+The chain left running is: stations (ea, midas, meteofrance) -> dmi retry ->
+retries for anything that failed -> a clean full radar pack. Each stage waits
+on the previous process, so nothing competes and nothing edits code mid-run.
