@@ -11,12 +11,14 @@
 #SBATCH --job-name=mp-radar
 #SBATCH --account=das
 #SBATCH --partition=das
-# das-normal caps a job at 12 CPUs and 46G; das-large has no CPU cap. Not
+# das-normal: at most 12 CPUs / 46G per job, but no group-wide pool, so it
+# schedules when das-large's shared 74-CPU pool is full. For more cores use
+# --account=icis --partition=icis --qos=icis-normal (48 CPUs, 125G). Never
 # preempt: a benchmark that can be killed half-way measures nothing.
-#SBATCH --qos=das-large
+#SBATCH --qos=das-normal
 #SBATCH --exclude=cn79
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=46G
 #SBATCH --time=01:30:00
 #SBATCH --output=/vol/knmimo-nobackup/users/mrobben/meteopack/logs/radar-%j.out
 set -euo pipefail
