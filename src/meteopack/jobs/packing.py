@@ -104,14 +104,37 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
             "outside": outside, "off_cadence": off_cadence}
 
 
+#: How long `run` waits for *any* task to finish before concluding the pool is
+#: wedged. Generous on purpose: the slowest unit measured here is a SEVIRI
+#: scene at ~20 s and a radar tar at ~13 s, so half an hour with nothing at all
+#: completing is not slowness.
+DEFAULT_STALL_TIMEOUT = 1800.0
+
+
 def run(tasks: list[PackTask], fn, *, workers: int | None = None,
-        max_tasks_per_child: int = 32) -> list[dict[str, Any]]:
-    """Map `fn` over `tasks`.
+        max_tasks_per_child: int = 32,
+        stall_timeout: float | None = DEFAULT_STALL_TIMEOUT) -> list[dict[str, Any]]:
+    """Map `fn` over `tasks`, and fail rather than hang when a worker dies.
 
     `max_tasks_per_child` recycles workers. The serial benchmark showed RSS
     climbing 1328 MiB across repeats; whatever holds that memory would
     accumulate in a long-lived worker too, and a 2680-task backfill is exactly
     where it would matter.
+
+    Two things here are about surviving a long run rather than about speed.
+
+    *A dead worker must not wedge the job.* Observed: a SEVIRI pack with six
+    workers lost all six - almost certainly to the OOM killer on a loaded node
+    - and the parent sat in `futex_wait_queue` for 1 h 53 m with no children,
+    0% CPU and no output. A cluster job that hangs silently is worse than one
+    that fails, because nothing notices. `stall_timeout` bounds the wait for
+    the *next* result, not for a task, and a `BrokenProcessPool` ends the run
+    with every unfinished task reported rather than being retried into the same
+    dead pool.
+
+    *Only a bounded number of tasks are in flight.* Submitting 2,680 at once
+    builds the whole queue up front for no gain; a window of a few per worker
+    keeps the queue small and lets a stall be noticed early.
     """
     if not tasks:
         return []
@@ -129,13 +152,86 @@ def run(tasks: list[PackTask], fn, *, workers: int | None = None,
             pass
 
     out: list[dict[str, Any]] = []
-    with cf.ProcessPoolExecutor(**kwargs) as pool:
-        futures = {pool.submit(fn, t): t for t in tasks}
-        for fut in cf.as_completed(futures):
-            task = futures[fut]
-            try:
-                out.append(fut.result())
-            except Exception as exc:  # noqa: BLE001 - reported per file, never silent
-                logger.error("pack failed for %s: %s: %s", task.raw_path, type(exc).__name__, exc)
-                out.append({"path": task.raw_path, "error": f"{type(exc).__name__}: {exc}"})
+    queued = iter(tasks)
+    broken: str | None = None
+
+    # Deliberately not a context manager: `__exit__` calls shutdown(wait=True),
+    # which joins the worker processes - and joining a pool that is already
+    # wedged is the hang this function exists to avoid. Shutdown is explicit
+    # below, and forceful on the broken path.
+    pool = cf.ProcessPoolExecutor(**kwargs)
+    try:
+        pending: dict[cf.Future, PackTask] = {}
+
+        def submit_more() -> None:
+            while len(pending) < workers * 2:
+                task = next(queued, None)
+                if task is None:
+                    return
+                pending[pool.submit(fn, task)] = task
+
+        submit_more()
+        while pending:
+            done, _ = cf.wait(pending, timeout=stall_timeout,
+                              return_when=cf.FIRST_COMPLETED)
+            if not done:
+                broken = (
+                    f"no task finished in {stall_timeout:.0f}s with {len(pending)} in "
+                    f"flight; the worker pool is not making progress"
+                )
+                break
+            for fut in done:
+                task = pending.pop(fut)
+                try:
+                    out.append(fut.result())
+                except cf.process.BrokenProcessPool as exc:
+                    broken = (
+                        f"a worker died ({exc}); on a shared node this is usually the "
+                        f"OOM killer - lower --workers or raise the memory request"
+                    )
+                    # This future is already out of `pending`, so it has to be
+                    # reported here or it vanishes from the accounting. When a
+                    # pool breaks, every in-flight future breaks at once.
+                    out.append({"path": task.raw_path, "error": broken})
+                except Exception as exc:  # noqa: BLE001 - reported per file, never silent
+                    logger.error("pack failed for %s: %s: %s",
+                                 task.raw_path, type(exc).__name__, exc)
+                    out.append({"path": task.raw_path, "error": f"{type(exc).__name__}: {exc}"})
+            if broken:
+                break
+            submit_more()
+
+        if broken:
+            logger.error("%s", broken)
+            for fut, task in pending.items():
+                fut.cancel()
+                out.append({"path": task.raw_path, "error": broken})
+            for task in queued:
+                out.append({"path": task.raw_path, "error": f"not attempted: {broken}"})
+    finally:
+        _shutdown(pool, force=broken is not None)
     return out
+
+
+def _shutdown(pool, *, force: bool) -> None:
+    """Close the pool; on the broken path, do not wait for it.
+
+    A wedged worker will not answer a join, so the forceful path kills the
+    processes outright first. Reaching into `_processes` is reaching into the
+    standard library's internals, justified only because the alternative is the
+    hang this exists to prevent - and guarded, so a future layout change
+    degrades to the ordinary shutdown rather than raising.
+    """
+    if not force:
+        pool.shutdown(wait=True)
+        return
+    try:
+        for proc in list(getattr(pool, "_processes", {}).values()):
+            if proc.is_alive():
+                proc.kill()
+    except Exception as exc:  # noqa: BLE001 - best effort, never fatal
+        logger.debug("could not kill worker processes: %s", exc)
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pool shutdown after a break: %s", exc)
