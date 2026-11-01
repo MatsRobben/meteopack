@@ -22,6 +22,7 @@ import resource
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -198,6 +199,8 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
     a frame falls outside the store's fixed time axis, and counting the input
     turned a two-thirds data loss into a cheerful "wrote 576 frames".
     """
+    import numpy as np
+
     from meteopack.core.store import gridded
 
     started = time.time()
@@ -214,6 +217,7 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
     # task can hold several files - everything that shares a shard - and a
     # single unreadable tar used to abort the rest unreported.
     file_errors: list[dict[str, str]] = []
+    records: list[dict[str, Any]] = []
     for raw_path in task.paths:
         t = time.perf_counter()
         try:
@@ -227,6 +231,10 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
             t_parse += time.perf_counter() - t
         if ds is None or not ds.sizes.get("time"):
             continue
+        # Which raw file every one of these slots came from; the table row
+        # that says what that file was is assembled by `pack` from `records`.
+        rid = gridded.record_id(Path(raw_path).name)
+        ds["source_record_id"] = (("time",), np.full(ds.sizes["time"], rid, dtype="int64"))
         drift.update(ds.attrs.get("schema_drift") or ())
         for entry in ds.attrs.get("layouts_seen") or ():
             fp = str(entry.get("fingerprint"))
@@ -235,6 +243,9 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
                 layouts[fp] = dict(entry)
             else:
                 seen["count"] += int(entry.get("count", 0))
+        stamps = ds["time"].values
+        missing = int(np.asarray(ds["is_missing_frame"].values).sum()) \
+            if "is_missing_frame" in ds else 0
         t = time.perf_counter()
         try:
             result = gridded.write(ds, cfg, Path(task.root))
@@ -245,6 +256,15 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
             t_write += time.perf_counter() - t
             del ds
         frames += result.written
+        stat = Path(raw_path).stat()
+        records.append({
+            "source_record_id": rid, "file": Path(raw_path).name, "bytes": stat.st_size,
+            "mtime": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(timespec="seconds"),
+            "first_time": str(stamps.min()), "last_time": str(stamps.max()),
+            "slots": int(stamps.size), "frames_missing": missing,
+            "slots_written": int(result.written),
+            "packed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        })
         outside += result.outside
         off_cadence += result.off_cadence
         lost += [t for t in (result.outside_first, result.outside_last) if t]
@@ -253,6 +273,7 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
             "outside_span": [min(lost), max(lost)] if lost else None,
             "layouts": list(layouts.values()),
             "file_errors": file_errors,
+            "records": records,
             # Wall-clock, so tasks from different workers line up: where a
             # pack's time goes between start-up, work and waiting.
             "timing": {"pid": os.getpid(), "start": started, "end": time.time(),

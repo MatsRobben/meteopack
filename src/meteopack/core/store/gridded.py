@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -418,7 +418,9 @@ def _create_provenance(group: zarr.Group, n_times: int, chunk: int) -> None:
         "is_corrupt_frame": "a source file existed but could not be read",
         "source_layout_id": "which upstream layout produced this frame; see the "
                             "layouts attribute on the root group",
-        "source_record_id": "row in the provenance table beside the store",
+        "source_record_id": "the raw file this frame was packed from: its row in "
+                            "provenance.parquet beside dataset.zarr (column "
+                            "source_record_id); -1 if never packed",
     }
     for name, (dtype, fill) in PROVENANCE.items():
         group.create_array(
@@ -545,6 +547,48 @@ def _write_fields(group, ds, cfg, keep, hit, order, breaks) -> None:
         block = block[keep]
         for run, picks in zip(np.split(hit, breaks), np.split(order, breaks), strict=True):
             array[int(run[0]) : int(run[-1]) + 1] = block[picks]
+
+
+#: The per-file provenance table, beside dataset.zarr. One row per raw file.
+PROVENANCE_TABLE = "provenance.parquet"
+
+
+def record_id(name: str) -> int:
+    """A stable id for one raw file, from its name: what `source_record_id` holds.
+
+    A hash rather than a counter, so parallel workers and day-by-day packs agree
+    on it without coordinating, and moving the archive does not change it. 63
+    bits: collisions among a few million files are vanishingly unlikely, and it
+    stays a non-negative int64 (-1 means "never packed").
+    """
+    import hashlib
+
+    digest = hashlib.blake2b(name.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") & ((1 << 63) - 1)
+
+
+def write_provenance_table(
+    root: str | os.PathLike[str], store_id: str, records: Sequence[Mapping],
+    *, layer: Layer = DEFAULT_LAYER,
+) -> Path:
+    """Upsert one row per raw file into provenance.parquet beside the store.
+
+    Re-packing a file replaces its row; files packed earlier keep theirs, so a
+    store grown day by day carries the provenance of every day.
+    """
+    import polars as pl
+
+    target = store_path(root, store_id, layer=layer) / PROVENANCE_TABLE
+    new = pl.DataFrame(list(records), schema_overrides={"source_record_id": pl.Int64})
+    if target.exists() and len(new):
+        old = pl.read_parquet(target)
+        old = old.filter(~pl.col("source_record_id").is_in(new["source_record_id"].implode()))
+        new = pl.concat([old, new], how="diagonal_relaxed")
+    new = new.sort("first_time") if "first_time" in new.columns else new
+    tmp = target.with_suffix(".parquet.part")
+    new.write_parquet(tmp)
+    os.replace(tmp, target)
+    return target
 
 
 def _write_provenance(group, ds, rows, keep, hit, order, breaks) -> None:

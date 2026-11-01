@@ -915,6 +915,9 @@ def stage_pack(ctx: Context) -> int:
             print(f"  {off_cadence} frame(s) were not on the "
                   f"{ctx.cfg.cadence_seconds}s cadence and were dropped")
         _write_pack_scan_report(ctx, store, results)
+        records = [rec for r in results for rec in (r.get("records") or ())]
+        if records:
+            gridded.write_provenance_table(ctx.root, ctx.cfg.store_id, records)
         drift = sorted({d for r in results for d in (r.get("drift") or ())})
         if drift:
             print(f"  ERROR {len(drift)} unpinned schema layout(s); the frames were "

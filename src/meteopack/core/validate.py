@@ -299,6 +299,8 @@ def _check_frame_provenance_arrays(report: Report, group, n_times: int) -> None:
     if missing is not None and corrupt is not None:
         both = int((missing & corrupt).sum())
         report.add("no frame is both missing and corrupt", both == 0, f"{both} frames")
+    if "source_record_id" in present and missing is not None:
+        _check_record_ids(report, group, np.asarray(group["source_record_id"][:]), missing)
     if "source_layout_id" in present:
         layouts = np.asarray(group["source_layout_id"][:])
         seen = layouts[~missing] if missing is not None else layouts
@@ -306,6 +308,32 @@ def _check_frame_provenance_arrays(report: Report, group, n_times: int) -> None:
                                                  strict=True)}
         report.stats["frames:layouts"] = counts
     assert gridded.PROVENANCE
+
+
+def _check_record_ids(report: Report, group, ids, missing) -> None:
+    """Every written frame names a raw file, and that file is in the table.
+
+    `source_record_id` was declared, documented as "row in the provenance
+    table", and -1 on every frame of every store, with no table anywhere.
+    """
+    import numpy as np
+    import polars as pl
+
+    from meteopack.core.store import gridded
+
+    written = ids[~missing]
+    report.add("every written frame names its raw file", bool((written >= 0).all()),
+               f"{int((written < 0).sum())} written frame(s) with no source_record_id")
+    table = Path(str(group.store.root)).parent / gridded.PROVENANCE_TABLE
+    if not table.exists():
+        report.add("provenance table present", False, f"no {table.name} beside the store")
+        return
+    known = pl.read_parquet(table, columns=["source_record_id"])["source_record_id"].to_numpy()
+    named = np.unique(written[written >= 0])
+    unknown = np.setdiff1d(named, known)
+    report.add("every source_record_id is in the provenance table", unknown.size == 0,
+               f"{unknown.size} id(s) missing from {table.name}")
+    report.stats["provenance:files"] = int(known.size)
 
 
 def validate(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") -> Report:

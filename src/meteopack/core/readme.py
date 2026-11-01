@@ -78,7 +78,7 @@ join on `station_id`, which is text.
     is_missing_frame/  no source file covered this time step
     is_corrupt_frame/  a file existed but could not be read
     source_layout_id/  which upstream generation produced this frame
-    source_record_id/  row in the provenance table
+    source_record_id/  which raw file: a row in provenance.parquet beside it
     manifest.json      (beside dataset.zarr, not inside it)
 
 The time axis is regular and grows forward as later windows are packed; every
@@ -193,6 +193,9 @@ def store_readme(cfg, store_path: Path | str, info: dict | None = None) -> Path 
             "`is_missing_frame` - no source file covered this time step.",
             "`is_corrupt_frame` - a file existed but could not be read.",
             "`source_layout_id` - which upstream generation produced the frame.",
+            "`source_record_id` - which raw file the frame was packed from; look it up",
+            "in `provenance.parquet` beside `dataset.zarr` (name, size, mtime, the slots",
+            "it covered, how many were missing, when it was packed).",
             "",
             "Both read as missing imagery, so only these arrays tell them apart.",
             "",
