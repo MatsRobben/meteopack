@@ -252,3 +252,76 @@ Measured on the real archives:
 The chain left running is: stations (ea, midas, meteofrance) -> dmi retry ->
 retries for anything that failed -> a clean full radar pack. Each stage waits
 on the previous process, so nothing competes and nothing edits code mid-run.
+
+## Session 2026-11-02: optimisation, the other two radar products, and where to resume
+
+### State on disk
+
+`/vol/knmimo-nobackup/users/mrobben/data_v2` is the clean rebuild. Finished
+and validated clean: **belgium** 9,970,209 rows, **midas** 13,968,516 (185
+stations), **meteofrance** 12,178,547, **dmi** 74,995,688. Every count
+reproduces the earlier run exactly, and dmi's station-metadata failure is
+resolved by the archived-catalogue reader.
+
+`ea` and `dwd` were packing when the session closed and should have finished
+unattended. `knmi_insitu` and all three radar products still need running -
+see below.
+
+The older `data_full` root still holds the previous full run, including a
+complete 37 GB rtcor store, and is what the cross-checks compare against.
+
+### To resume
+
+```bash
+cd /vol/knmimo-nobackup/users/mrobben/meteopack
+export METEOPACK_DATA_ROOT=/vol/knmimo-nobackup/users/mrobben/data_v2
+export KNMI_RADAR_ARCHIVE=.../knmi/nl_rdr_data_rtcor_5m_tar
+export KNMI_INSITU_ARCHIVE=.../knmi/10-minute-in-situ-meteorological-observations_tar
+export KNMI_ECHOTOP_ARCHIVE=.../knmi/radar_tar_echotopheight_5min
+export KNMI_REFL_ARCHIVE=.../knmi/radar_tar_refl_composites
+
+.venv/bin/python -m meteopack.cli pack knmi_insitu --workers 14   # ~9 min now
+.venv/bin/python -m meteopack.cli pack knmi_radar --product rtcor_5min \
+    --window 2018-12-19T08:05/2026-04-23T08:05 --workers 8        # ~57 min
+.venv/bin/python -m meteopack.cli pack knmi_radar --product echotop_5min --workers 8
+.venv/bin/python -m meteopack.cli pack knmi_radar --product refl_5min --workers 8
+.venv/bin/python benchmarks/verify_against_raw.py --frames 60
+```
+
+`--product` is now required for knmi_radar: there are three.
+
+### Performance, measured
+
+Two sources, two **opposite** bottlenecks. Measure before optimising.
+
+* **radar is I/O-bound** - 66 MiB/s at 16 workers against a `dd`-measured NFS
+  ceiling of 76. It is at 87% of the hardware and more workers do nothing.
+  The wins came from removing passes: scan fused into pack, and fetch no
+  longer sha256s hardlinked files (62 min -> 24 s). ~251 min -> ~57 min.
+* **knmi_insitu was CPU-bound** - 3.6 MiB/s, seventeen times *below* the
+  filesystem floor. 65% of the time was h5netcdf's File() walking the whole
+  hierarchy (36,864 group lookups per tar). h5py reads the same bytes:
+  4.4x, and it still scales with workers.
+
+`benchmarks/README_findings.md` has the numbers and the method, including the
+page-cache trap that made the first set of measurements worthless.
+
+### Operational lesson worth keeping
+
+Killing a pack's parent leaves its **spawned workers orphaned**, and they hold
+the stdout pipe open. A shell pipeline downstream (`| grep | tail`) then never
+sees EOF and waits forever - a rebuild script sat in `do_wait` for 91 minutes
+with nothing running. Kill the workers, not just the parent.
+
+### Open for the user
+
+* echotop and refl: radar_v3 maps every stored 0 to 255 and never uses 254, so
+  `missing` and `out_of_image` collapse and the no-echo field is discarded -
+  91% and 83% of the measured area. Not one of those zeros falls outside the
+  radar's own coverage mask, so this store keeps them, which is the same
+  judgement the previous pipeline made for rtcor's accumulation image. One
+  config line per product (`extra.missing_data_policy`) flips it.
+* Variable naming is CF with the radar_v3 names in `legacy_name`; a config
+  edit per variable flips that too.
+* `midas list` takes 28 s walking CEDA's catalogue over HTTP - small, and
+  trivially cacheable if it becomes annoying.
