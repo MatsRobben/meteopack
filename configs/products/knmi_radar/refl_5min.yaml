@@ -54,6 +54,7 @@ variables:
     long_name: Radar equivalent reflectivity factor
     valid_min: -32.0
     valid_max: 95.0
+    no_echo: -32.0   # the bottom of the scale in every generation; code 0 decodes to -31.5 before 2017 and -32.0 after
     encoding:
       dtype: uint8
       scale: 0.5

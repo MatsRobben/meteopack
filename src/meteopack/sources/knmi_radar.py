@@ -412,8 +412,25 @@ def representable_sentinel(sentinel: float | None, dtype: np.dtype) -> float | N
     return float(info.max)
 
 
+def _sentinel_means_no_echo(declared_missing: float | None, policy: str) -> bool:
+    """Whether the file's `calibration_missing_data` code means "no echo".
+
+    Read off the DECLARED sentinel, not the clamped one: whether a frame means
+    "no echo" is a property of the product generation, not of how wide that
+    frame happened to be written. A declared 0 collides with the commonest
+    pixel in the frame - measured on echotop and reflectivity in every
+    generation, PV=0 is 39-77% of the image while PV=1 is never used - so under
+    `no_echo_if_zero` it is no echo; any other sentinel is outside the data
+    range and genuinely missing.
+    """
+    if policy not in MISSING_POLICIES:
+        raise ValueError(f"unknown missing_data_policy {policy!r}; use one of {MISSING_POLICIES}")
+    return policy == "no_echo" or (policy == "no_echo_if_zero" and declared_missing == 0)
+
+
 def calibrate(
-    counts: np.ndarray, spec: ImageSpec, *, policy: str = DEFAULT_MISSING_POLICY
+    counts: np.ndarray, spec: ImageSpec, *, policy: str = DEFAULT_MISSING_POLICY,
+    no_echo: float | None = 0.0,
 ) -> np.ndarray:
     """Pixel counts -> geophysical float32, with the two sentinels resolved.
 
@@ -434,8 +451,7 @@ def calibrate(
     through :func:`representable_sentinel` first, for the uint8 frames whose
     metadata still quotes the uint16 value.
     """
-    if policy not in MISSING_POLICIES:
-        raise ValueError(f"unknown missing_data_policy {policy!r}; use one of {MISSING_POLICIES}")
+    means_no_echo = _sentinel_means_no_echo(spec.missing, policy)
     # float64 first: 0.01 is not exact in binary, and rounding once to float32
     # at the end is closer to the true value than accumulating in float32.
     out = (counts.astype("float64") * spec.scale + spec.offset).astype("float32")
@@ -444,11 +460,12 @@ def calibrate(
     if out_of_image is not None:
         out[counts == out_of_image] = np.float32("nan")
     if missing is not None and missing != out_of_image:
-        # The policy reads the DECLARED sentinel, not the clamped one: whether a
-        # frame means "no echo" is a property of the product generation, not of
-        # how wide that frame happened to be written.
-        no_echo = policy == "no_echo" or (policy == "no_echo_if_zero" and spec.missing == 0)
-        out[counts == missing] = np.float32(0.0) if no_echo else np.float32("nan")
+        # A variable with no no-echo state (no_echo=None) honours the code as
+        # missing even where the policy would call it no echo.
+        if means_no_echo and no_echo is not None:
+            out[counts == missing] = np.float32(no_echo)
+        else:
+            out[counts == missing] = np.float32("nan")
     return out
 
 
@@ -607,6 +624,17 @@ class KnmiRadar:
         if policy not in MISSING_POLICIES:
             raise ValueError(
                 f"extra.missing_data_policy {policy!r} must be one of {MISSING_POLICIES}"
+            )
+        if policy != "missing" and not any(v.no_echo is not None for v in cfg.variables):
+            # A policy that reads code 0 as "no echo" needs to know what value
+            # no echo is. Without one, every such code would be honoured as
+            # missing - the dry radar mask, 40-77% of every frame, gone without
+            # an error. The intensity variable has to say; quality and
+            # adjustment fields rightly do not, which is why this is "any".
+            raise ValueError(
+                f"extra.missing_data_policy is {policy!r}, which reads a zero sentinel as "
+                f"'no echo', but no variable declares `no_echo:` (the value no echo takes, "
+                f"e.g. 0.0 for mm or km, the scale floor for dBZ)"
             )
         return policy
 
@@ -1174,16 +1202,19 @@ def _fill_frame(
             )
         encoding = encodings.get(var.name)
         if encoding is None:
-            frames[var.name][index] = _apply_variable(calibrate(counts, spec, policy=policy), var)
+            frames[var.name][index] = _apply_variable(
+                calibrate(counts, spec, policy=policy, no_echo=var.no_echo), var)
         else:
-            frames[var.name][index] = _encode_image(counts, spec, encoding, policy=policy)
+            frames[var.name][index] = _encode_image(
+                counts, spec, encoding, policy=policy, no_echo=var.no_echo)
         hits[var.name] += 1
         matched = True
     return matched
 
 
 def _encode_image(
-    counts: np.ndarray, spec: ImageSpec, target: Encoding, *, policy: str
+    counts: np.ndarray, spec: ImageSpec, target: Encoding, *, policy: str,
+    no_echo: float | None = None,
 ) -> np.ndarray:
     """One image, re-encoded from its own calibration onto the canonical one.
 
@@ -1194,7 +1225,12 @@ def _encode_image(
     * A `calibration_missing_data` of 0 is not a sentinel. The pre-2023
       accumulation images advertise it while 0 is a genuine dry pixel, so
       honouring it literally erases the dry radar mask - every no-rain pixel in
-      the country - which is what `policy="no_echo_if_zero"` prevents.
+      the country - which is what `policy="no_echo_if_zero"` prevents. The
+      code then takes the variable's `no_echo` value directly. Decoding it with
+      the file's calibration instead gave 0 only where that offset is 0; KNMI
+      moved the offset by one count between generations, which put no-echo
+      echo tops at -0.102 km and no-echo reflectivity at -31.5 dBZ before 2017
+      and -32.0 after.
     * `calibration_out_of_image` is quoted as 65535 even on frames narrowed to
       uint8, where no pixel can hold it. It is clamped to the dtype maximum,
       which is what the product means and what the 2024 generation writes
@@ -1207,9 +1243,13 @@ def _encode_image(
     sentinel = representable_sentinel(spec.out_of_image, dtype)
     if sentinel is not None:
         out_of_image.add(int(sentinel))
+    no_echo_codes: set[int] = set()
     sentinel = representable_sentinel(spec.missing, dtype)
-    if sentinel is not None and not (policy == DEFAULT_MISSING_POLICY and int(sentinel) == 0):
-        missing.add(int(sentinel))
+    if sentinel is not None:
+        if _sentinel_means_no_echo(spec.missing, policy) and no_echo is not None:
+            no_echo_codes.add(int(sentinel))
+        else:
+            missing.add(int(sentinel))
 
     return encode(
         counts,
@@ -1218,6 +1258,8 @@ def _encode_image(
         source_offset=spec.offset,
         source_missing=missing,
         source_out_of_image=out_of_image,
+        source_no_echo=no_echo_codes,
+        no_echo=no_echo,
     )
 
 

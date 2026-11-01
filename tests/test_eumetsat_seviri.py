@@ -27,6 +27,7 @@ Two things these are defending, because getting either wrong is silent:
 from __future__ import annotations
 
 import math
+import os
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -71,7 +72,12 @@ REAL_NAT = Path(
     "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/eumetsat/msg_sample"
     "/MSG4-SEVI-MSG15-0100-NA-20260625120417.690000000Z-NA.nat"
 )
-REAL_ARCHIVE = Path("/vol/knmimo-nobackup/users/mrobben/data/raw/eumetsat_seviri/msg15_rss")
+# A real downloaded day, when one is on this machine; the tests that need it skip
+# otherwise. Overridable so the suite does not assume one user's directory layout.
+REAL_ARCHIVE = Path(os.environ.get(
+    "METEOPACK_SEVIRI_ARCHIVE",
+    "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/eumetsat_seviri/msg15_rss",
+))
 
 #: The real registry's test grid. Real, loadable, and small enough to eyeball.
 GRID_ID = "example_tiny"

@@ -110,15 +110,22 @@ def encode(
     source_offset: float,
     source_missing: frozenset[int] | set[int] = frozenset(),
     source_out_of_image: frozenset[int] | set[int] = frozenset(),
+    source_no_echo: frozenset[int] | set[int] = frozenset(),
+    no_echo: float | None = None,
 ) -> np.ndarray:
     """Re-encode integer pixel counts from one calibration onto `target`.
 
     `source_missing` and `source_out_of_image` are the codes the *file* reserves,
     which differ by generation; whatever they are, they come out as the target's
-    two sentinels. Everything else is decoded with the source calibration and
-    re-encoded with the target's, rounded to nearest, and clipped away from the
-    reserved codes so a real value can never be mistaken for a sentinel.
+    two sentinels. `source_no_echo` are codes that mean "no echo": they take the
+    physical value `no_echo`, NOT whatever the source calibration says the code
+    decodes to, because that differs by generation for the same physical fact.
+    Everything else is decoded with the source calibration and re-encoded with
+    the target's, rounded to nearest, and clipped away from the reserved codes
+    so a real value can never be mistaken for a sentinel.
     """
+    if source_no_echo and no_echo is None:
+        raise ValueError("source_no_echo codes were given without a no_echo value")
     raw = np.asarray(values)
     too_wide = raw.dtype.kind in "ui" and (
         int(np.iinfo(raw.dtype).max) - int(np.iinfo(raw.dtype).min) + 1 > _MAX_LUT
@@ -128,7 +135,8 @@ def encode(
         # directly: the sentinels are matched against the stored codes, and
         # everything else is decoded with the source calibration first.
         return _encode_direct(raw, target, source_scale, source_offset,
-                              source_missing, source_out_of_image)
+                              source_missing, source_out_of_image,
+                              source_no_echo, no_echo)
 
     info = np.iinfo(raw.dtype)
     span = int(info.max) - int(info.min) + 1
@@ -137,11 +145,14 @@ def encode(
     table = np.empty(span, dtype=target.dtype)
 
     out_mask = _code_mask(codes, source_out_of_image)
-    missing_mask = _code_mask(codes, source_missing) & ~out_mask
-    valid = ~(out_mask | missing_mask)
+    echo_mask = _code_mask(codes, source_no_echo) & ~out_mask
+    missing_mask = _code_mask(codes, source_missing) & ~out_mask & ~echo_mask
+    valid = ~(out_mask | missing_mask | echo_mask)
 
     table[out_mask] = target.out_of_image
     table[missing_mask] = target.missing
+    if echo_mask.any():
+        table[echo_mask] = _quantise(np.array([no_echo], dtype="float64"), target)[0]
     if valid.any():
         table[valid] = _quantise(
             codes[valid].astype("float64") * source_scale + source_offset, target
@@ -157,6 +168,8 @@ def _encode_direct(
     source_offset: float,
     source_missing,
     source_out_of_image,
+    source_no_echo=frozenset(),
+    no_echo: float | None = None,
 ) -> np.ndarray:
     """The general path: no lookup table, so each pixel is converted directly.
 
@@ -168,12 +181,15 @@ def _encode_direct(
     raw = np.asarray(values)
     out = np.empty(raw.shape, dtype=target.dtype)
     out_mask = _code_mask(raw, source_out_of_image)
-    missing_mask = _code_mask(raw, source_missing) & ~out_mask
+    echo_mask = _code_mask(raw, source_no_echo) & ~out_mask
+    missing_mask = _code_mask(raw, source_missing) & ~out_mask & ~echo_mask
     if raw.dtype.kind == "f":
         missing_mask = missing_mask | ~np.isfinite(raw)
-    valid = ~(out_mask | missing_mask)
+    valid = ~(out_mask | missing_mask | echo_mask)
     out[out_mask] = target.out_of_image
     out[missing_mask] = target.missing
+    if echo_mask.any():
+        out[echo_mask] = _quantise(np.array([no_echo], dtype="float64"), target)[0]
     if valid.any():
         decoded = raw[valid].astype("float64") * source_scale + source_offset
         out[valid] = _quantise(decoded, target)

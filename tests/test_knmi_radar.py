@@ -35,6 +35,7 @@ import yaml
 
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, SourceConfig, StoreConfig, Variable
+from meteopack.core.encoding import Encoding
 from meteopack.core.store import gridded
 from meteopack.core.timeline import Timeline
 from meteopack.sources.base import RawFile, Source, TimeWindow
@@ -42,6 +43,7 @@ from meteopack.sources.knmi_radar import (
     ImageSpec,
     KnmiRadar,
     SchemaDriftError,
+    _encode_image,
     calibrate,
     member_time,
     parse_calibration,
@@ -178,6 +180,7 @@ def make_cfg(**extra) -> ProductConfig:
                 long_name="Radar precipitation accumulation",
                 valid_min=0.0,
                 valid_max=200.0,
+                no_echo=0.0,
             ),
             Variable(
                 name="quality",
@@ -330,6 +333,82 @@ def test_missing_policy_can_be_forced_either_way(tmp_path: Path) -> None:
         tmp_path / "b", counts_modern, legacy=False, missing_data_policy="no_echo"
     )
     np.testing.assert_array_equal(forced_echo, np.zeros_like(forced_echo))
+
+
+# The three calibrations the echotop archive actually uses, censused on real
+# frames: PV=0 is 39-49% of every image, PV=1 is never used, so PV=0 is "no echo"
+# throughout. Only the first decodes PV=0 to 0 km.
+ECHOTOP_GENERATIONS = [
+    ("2008", 0.062992, 0.0),
+    ("2017", 0.062992, -0.062992),
+    ("2019", 0.102362, -0.102362),
+]
+ECHOTOP_TARGET = Encoding(np.dtype("uint8"), 0.102362, -0.102362, 254, 255)
+
+
+@pytest.mark.parametrize(("year", "scale", "offset"), ECHOTOP_GENERATIONS)
+def test_no_echo_echo_top_is_zero_km_in_every_generation(year, scale, offset) -> None:
+    """The bug this guards: no echo became -0.102 km once KNMI shifted the offset.
+
+    The fix was to give the no-echo code the variable's stated value instead of
+    letting the file's calibration decode it - the arithmetic is right only where
+    the offset happens to be 0.
+    """
+    spec = ImageSpec("image1", "HEIGHT_[KM]", scale, offset, 0.0, 255.0, "uint8", (NY, NX))
+    counts = np.zeros((NY, NX), dtype="uint8")
+    counts[0, 0] = 255
+    counts[0, 1] = 100
+    stored = _encode_image(counts, spec, ECHOTOP_TARGET, policy="no_echo_if_zero", no_echo=0.0)
+    km = ECHOTOP_TARGET.decode(stored)
+    assert np.isnan(km[0, 0])                                   # outside the image
+    assert km[0, 1] == pytest.approx(100 * scale + offset, abs=0.0513)  # half a target count
+    dry = km[1:, :]
+    assert (dry == 0.0).all(), f"{year}: no echo decoded to {np.unique(dry)}"
+
+
+@pytest.mark.parametrize("offset", [-31.5, -32.0])
+def test_no_echo_reflectivity_is_one_value_across_generations(offset) -> None:
+    """2008 frames decode PV=0 to -31.5 dBZ and 2019+ to -32.0.
+
+    Nothing range-checks that - both are inside [-32, 95] - so it would have
+    stayed a silent split of one physical fact across two numbers.
+    """
+    target = Encoding(np.dtype("uint8"), 0.5, -32.0, 254, 255)
+    spec = ImageSpec("image1", "REFLECTIVITY_[DBZ]", 0.5, offset, 0.0, 255.0, "uint8", (NY, NX))
+    stored = _encode_image(np.zeros((NY, NX), "uint8"), spec, target,
+                           policy="no_echo_if_zero", no_echo=-32.0)
+    assert (target.decode(stored) == -32.0).all()
+
+
+def test_a_variable_with_no_no_echo_state_honours_the_zero_sentinel() -> None:
+    """Quality and adjustment fields have no 'no echo'. Their code 0 is missing.
+
+    Decoding it instead gave adjustment -32.768 dB, clipped to the floor of the
+    store's range: a plausible-looking number for a pixel the file says is empty.
+    """
+    target = Encoding(np.dtype("uint8"), 0.16, -20.24, 254, 255)
+    spec = ImageSpec("image2", "ADJUSTMENT_FACTOR_[DB]", 0.001, -32.768, 0.0, 65535.0,
+                     "uint16", (NY, NX))
+    stored = _encode_image(np.zeros((NY, NX), "uint16"), spec, target,
+                           policy="no_echo_if_zero", no_echo=None)
+    assert (stored == target.missing).all()
+
+
+def test_a_no_echo_policy_without_a_no_echo_value_is_refused(tmp_path: Path) -> None:
+    """Forgetting `no_echo:` must not quietly erase the dry mask."""
+    cfg = make_cfg()
+    cfg.variables[0].no_echo = None
+    with pytest.raises(ValueError, match="no_echo"):
+        KnmiRadar()._missing_policy(cfg)
+
+
+def test_the_float_path_uses_the_same_no_echo_value() -> None:
+    spec = ImageSpec("image1", "HEIGHT_[KM]", 0.102362, -0.102362, 0.0, 255.0, "uint8", (NY, NX))
+    out = calibrate(np.zeros((NY, NX), "uint8"), spec, policy="no_echo_if_zero", no_echo=0.0)
+    assert (out == 0.0).all()
+    honoured = calibrate(np.zeros((NY, NX), "uint8"), spec, policy="no_echo_if_zero",
+                         no_echo=None)
+    assert np.isnan(honoured).all()
 
 
 def test_unknown_missing_policy_is_rejected() -> None:

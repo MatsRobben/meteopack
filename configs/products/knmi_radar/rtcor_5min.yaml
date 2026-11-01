@@ -87,6 +87,7 @@ variables:
     # uint16 count scales to at most 655.33 mm, so this cap also catches any
     # unresolved sentinel that slipped through as a plausible number.
     valid_max: 200.0
+    no_echo: 0.0   # no rain is 0 mm
     encoding:
       dtype: uint16
       scale: 0.01                       # 0.01 mm, the product's own resolution

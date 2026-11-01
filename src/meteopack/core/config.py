@@ -154,6 +154,16 @@ class Variable(BaseModel):
     dtype: str = "float32"
     valid_min: float | None = None
     valid_max: float | None = None
+    #: The value a "no echo" pixel takes. KNMI radar declares its missing code
+    #: as 0 in several generations while 0 is the commonest pixel in the frame
+    #: (a dry country, no echo top); `missing_data_policy` decides that such a
+    #: code means no echo, and this is the value it then gets. It has to be
+    #: stated, not derived: decoding the code with the file's own calibration
+    #: gives 0 only where the offset is 0, and KNMI shifted the offset by one
+    #: count between generations - which put no-echo echo tops at -0.102 km
+    #: and split no-echo reflectivity across -31.5 and -32.0 dBZ. Unset, a
+    #: zero sentinel is honoured as missing data.
+    no_echo: float | None = None
     #: Store this variable as integers with a fixed calibration instead of
     #: float32. See meteopack.core.encoding: halves the store for imagery that
     #: is already integer on disk, and keeps `missing` and `out_of_image`

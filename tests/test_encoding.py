@@ -239,3 +239,25 @@ def test_every_configured_variable_names_its_units():
             var = Variable(**spec)
             assert var.units is not None, f"{path}: {var.name} has no units"
             assert var.cf_attrs["long_name"], f"{path}: {var.name} has no long_name"
+
+
+def test_no_echo_codes_take_the_stated_value_not_the_decoded_one():
+    """Code 0 decodes to -0.102 under a shifted calibration; no echo is still 0."""
+    target = Encoding(np.dtype("uint8"), 0.102362, -0.102362, 254, 255)
+    counts = np.array([0, 0, 100, 255], dtype="uint8")
+    stored = encode(counts, target, source_scale=0.102362, source_offset=-0.102362,
+                    source_out_of_image={255}, source_no_echo={0}, no_echo=0.0)
+    decoded = target.decode(stored)
+    assert decoded[0] == decoded[1] == 0.0
+    assert np.isnan(decoded[3])
+    floats = encode(counts.astype("float32"), target, source_scale=0.102362,
+                    source_offset=-0.102362, source_out_of_image={255},
+                    source_no_echo={0}, no_echo=0.0)
+    np.testing.assert_array_equal(floats, stored)  # the direct path agrees with the table
+
+
+def test_no_echo_codes_without_a_value_are_refused():
+    target = Encoding(np.dtype("uint8"), 1.0, 0.0, 254, 255)
+    with pytest.raises(ValueError, match="no_echo"):
+        encode(np.zeros(3, "uint8"), target, source_scale=1.0, source_offset=0.0,
+               source_no_echo={0})
