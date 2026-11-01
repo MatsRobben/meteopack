@@ -11,6 +11,9 @@
 #SBATCH --job-name=mp-radar
 #SBATCH --account=das
 #SBATCH --partition=das
+# das-normal caps a job at 12 CPUs and 46G; das-large has no CPU cap. Not
+# preempt: a benchmark that can be killed half-way measures nothing.
+#SBATCH --qos=das-large
 #SBATCH --exclude=cn79
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
