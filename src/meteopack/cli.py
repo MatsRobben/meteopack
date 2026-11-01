@@ -194,31 +194,57 @@ def stage_fetch(ctx: Context) -> int:
     if ctx.args.dry_run or not p.units:
         return 0
 
-    workers = ctx.args.workers or min(ctx.source_cfg.rate_limit.max_workers, 32)
-    ok = skipped = failed = 0
+    from dataclasses import replace as _replace
 
-    def one(unit):
-        return unit, ctx.src.fetch(unit, ctx.raw_root)
+    from meteopack.jobs.plan import is_volatile
+
+    workers = ctx.args.workers or min(ctx.source_cfg.rate_limit.max_workers, 32)
+    ok = skipped = failed = still_filling = 0
+
+    # One decision about re-downloading, made here and handed to every source as
+    # meta["volatile"] (read by sources.common.refresh). The planner and the
+    # fetchers used to decide separately and disagreed: DWD's recent/ archives
+    # were planned as "always refreshed" and then skipped because the file
+    # existed. A unit whose last fetch caught it still filling is refreshed too.
+    partial = ctx.catalog.partial("fetch")
+    units = []
+    for u in p.units:
+        changing = is_volatile(u, ctx.cfg)
+        refresh = changing or job_key("fetch", u.key) in partial
+        units.append((_replace(u, meta={**(u.meta or {}), "volatile": refresh}), changing))
 
     with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-        for future in cf.as_completed([pool.submit(one, u) for u in p.units]):
-            unit, raw = None, None
+        futures = {pool.submit(ctx.src.fetch, u, ctx.raw_root): (u, changing)
+                   for u, changing in units}
+        for future in cf.as_completed(futures):
+            unit, changing = futures[future]
+            key = job_key("fetch", unit.key)
             try:
-                unit, raw = future.result()
+                raw = future.result()
             except Exception as exc:                      # noqa: BLE001 - reported, not swallowed
+                # Recorded against its own unit: the failure path used to lose
+                # which unit failed, and the ledger's `failed` status was unused.
                 failed += 1
-                logger.error("fetch failed: %s", exc)
+                logger.error("fetch failed for %s: %s", unit.key, exc)
+                ctx.catalog.mark(key, "failed", source=ctx.cfg.source, product=ctx.cfg.product,
+                                 error=f"{type(exc).__name__}: {exc}"[:500])
                 continue
             if raw is None:
                 skipped += 1
-                ctx.catalog.mark(job_key("fetch", unit.key), "done", error="absent upstream")
+                ctx.catalog.mark(key, "done", error="absent upstream")
                 continue
             ok += 1
             ctx.catalog.record_file(raw, source=ctx.cfg.source, product=ctx.cfg.product,
                                     url=unit.url, valid_time=unit.valid_time)
-            ctx.catalog.mark(job_key("fetch", unit.key), "done")
+            # Still changing upstream: fetched, not finished. The next run
+            # fetches it again, and only a fetch after it stops marks it done.
+            if changing:
+                still_filling += 1
+            ctx.catalog.mark(key, "pending" if changing else "done")
     ctx.catalog.flush()
-    print(f"fetched {ok}, absent upstream {skipped}, failed {failed}")
+    note = f", {still_filling} still filling upstream (fetched again next run)" \
+        if still_filling else ""
+    print(f"fetched {ok}{note}, absent upstream {skipped}, failed {failed}")
     return 1 if failed else 0
 
 

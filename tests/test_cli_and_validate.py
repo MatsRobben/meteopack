@@ -560,3 +560,53 @@ def test_read_only_commands_do_not_create_a_data_root(tmp_path, argv):
     root = tmp_path / "never_created"
     main([*argv, "--data-root", str(root)])
     assert not root.exists(), sorted(p.relative_to(root) for p in root.rglob("*"))
+
+
+def _fetch_run(tmp_path, source):
+    from meteopack.cli import Context, build_parser, stage_fetch
+
+    ctx = Context(build_parser().parse_args(["fetch", "dmi", "--data-root", str(tmp_path)]))
+    ctx._src = source
+    return stage_fetch(ctx), ctx
+
+
+def test_a_unit_fetched_while_still_filling_is_fetched_again_once_it_closes(tmp_path):
+    """E-SOH: an hour harvested at 10:37 was marked done, so 10:37-11:00 was never
+    requested again - from a feed that keeps no archive."""
+    from meteopack.sources.base import RawFile, Unit
+
+    state = {"open": True}
+    refreshed = []
+
+    class Feed:
+        def list(self, window, cfg):
+            return [Unit(key="slot-10", url="u", meta={"volatile": state["open"]})]
+
+        def fetch(self, unit, raw_root):
+            refreshed.append(unit.meta["volatile"])
+            path = tmp_path / "slot-10.json"
+            path.write_text("x")
+            return RawFile(path=path, sha256="0" * 64, n_bytes=1, unit_key=unit.key)
+
+    assert _fetch_run(tmp_path, Feed())[0] == 0          # 10:37, still filling
+    state["open"] = False
+    assert _fetch_run(tmp_path, Feed())[0] == 0          # 11:05, closed: fetched again
+    assert _fetch_run(tmp_path, Feed())[0] == 0          # finished now: left alone
+    assert refreshed == [True, True], refreshed          # both over the existing copy
+
+
+def test_a_failed_fetch_is_recorded_against_its_own_unit(tmp_path):
+    """The failure path lost which unit failed, and nothing reached the ledger."""
+    from meteopack.sources.base import Unit
+
+    class Broken:
+        def list(self, window, cfg):
+            return [Unit(key="station-7", url="u", meta={})]
+
+        def fetch(self, unit, raw_root):
+            raise ConnectionError("reset by peer")
+
+    code, ctx = _fetch_run(tmp_path, Broken())
+    assert code == 1
+    rows = ctx.catalog.query("SELECT job_key, status, error FROM jobs")
+    assert rows.row(0) == ("fetch:station-7", "failed", "ConnectionError: reset by peer")

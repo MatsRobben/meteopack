@@ -478,6 +478,7 @@ def test_a_volatile_file_is_re_downloaded_rather_than_skipped(monkeypatch, src, 
 
     def handler(args):
         seen["existed"] = Path(args["dest"]).exists()
+        seen["overwrite"] = args["overwrite"]
         return RawFile(path=args["dest"], sha256="c" * 64, n_bytes=2, unit_key=args["unit_key"])
 
     _install_http(monkeypatch, handler)
@@ -487,7 +488,9 @@ def test_a_volatile_file_is_re_downloaded_rather_than_skipped(monkeypatch, src, 
 
     meta = {"dep": "59", "filename": "H_59_latest-2025-2026.csv.gz", "volatile": True}
     src.fetch(Unit(key="k", url="https://example.invalid/x.csv.gz", meta=meta), tmp_path)
-    assert seen["existed"] is False
+    # Downloaded again over the old copy, which stays until the new one is
+    # complete: this used to delete it first, losing it if the download failed.
+    assert seen == {"existed": True, "overwrite": True}
 
     closed = tmp_path / "59" / "H_59_2010-2019.csv.gz"
     closed.write_bytes(b"a closed decade, already correct")
@@ -499,7 +502,7 @@ def test_a_volatile_file_is_re_downloaded_rather_than_skipped(monkeypatch, src, 
         ),
         tmp_path,
     )
-    assert seen["existed"] is True
+    assert seen == {"existed": True, "overwrite": False}
 
 
 # ------------------------------------------------------------------------ parse

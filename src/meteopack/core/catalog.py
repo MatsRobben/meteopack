@@ -482,6 +482,22 @@ class Catalog:
         finished = set(done["job_key"].to_list()) if len(done) else set()
         return [k for k in wanted if k not in finished]
 
+    def partial(self, stage: str) -> set[str]:
+        """Job keys at ``stage`` fetched while still changing and not since finished.
+
+        `fetch` records a unit whose content was still filling upstream as
+        `pending` rather than `done`, so the next run fetches it again - over
+        the old copy - and only a fetch made after it stopped changing marks it
+        done. Without that, an E-SOH hour harvested at 10:37 was done for good,
+        and 10:37-11:00 was never requested again from a feed with no archive.
+        """
+        escaped = stage.replace("'", "''")
+        rows = self.query(
+            f"SELECT job_key FROM jobs WHERE stage = '{escaped}' GROUP BY job_key "
+            f"HAVING bool_or(status = 'pending') AND NOT bool_or(status = 'done')"
+        )
+        return set(rows["job_key"].to_list()) if len(rows) else set()
+
     # ----------------------------------------------------------------- sugar
 
     def __enter__(self) -> Self:

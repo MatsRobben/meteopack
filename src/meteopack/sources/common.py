@@ -36,6 +36,24 @@ class CredentialError(SourceError):
     """A credential is missing, expired or rejected. Must name the file or var."""
 
 
+def refresh(unit: Any) -> bool:
+    """Whether `fetch` must download this unit again even though the file exists.
+
+    The one answer every fetcher uses. `meteopack fetch` stamps it onto the unit
+    as `meta["volatile"]`: true for content that upstream rewrites under the same
+    name (DWD recent/ and now/, a still-filling year or slot), and for a unit
+    whose last fetch caught it still filling. Before this, the planner and the
+    fetchers each had their own idea: the plan said "1718 volatile and always
+    refreshed" while `fetch_file` found the old file and kept it, and DMI and
+    meteofrance deleted the last good copy before trying to download.
+
+    Pass it as `fetch_file(..., overwrite=refresh(unit))`. The download goes to
+    a `.part` file and replaces the old one only when it completes, so a
+    failed refresh keeps the last good copy.
+    """
+    return bool((getattr(unit, "meta", None) or {}).get("volatile"))
+
+
 def fingerprint(names: Iterable[str], *, width: int = 16) -> str:
     """Stable digest of a set of names, independent of order and whitespace.
 

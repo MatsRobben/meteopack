@@ -47,6 +47,7 @@ from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variab
 from meteopack.core.timeline import Timeline
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
+from meteopack.sources.common import refresh
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
     import polars as pl
@@ -555,7 +556,7 @@ class DwdStations:
                 timeout=self.timeout,
                 # Rewritten upstream under the same name: the ledger re-queues it,
                 # so the download must actually happen rather than skip.
-                overwrite=bool((unit.meta or {}).get("volatile")),
+                overwrite=refresh(unit),
             )
         except NotFoundError:
             logger.info("dwd: no upstream file for %s (404)", unit.key)

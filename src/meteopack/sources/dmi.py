@@ -59,6 +59,7 @@ from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variab
 from meteopack.core.timeline import Timeline
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
+from meteopack.sources.common import refresh
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
     import polars as pl
@@ -576,11 +577,9 @@ class DmiStations:
             / meta.get("parameter", "unknown")
             / meta.get("filename", f"{unit.key.rsplit('/', 1)[-1]}.json")
         )
-        # `fetch_file` is a no-op when `dest` exists, which is exactly right for
-        # a closed window and exactly wrong for one that is still filling: the
-        # first harvest would freeze the rest of the block out forever.
-        if meta.get("volatile"):
-            dest.unlink(missing_ok=True)
+        # A still-filling window is downloaded again over the old file, which
+        # is replaced only once the new one is complete. Deleting it first, as
+        # this once did, lost the last good copy whenever the download failed.
         rl = self.rate_limit
         try:
             return fetch_file(
@@ -592,6 +591,7 @@ class DmiStations:
                 retries=rl.max_retries,
                 backoff=rl.backoff_seconds,
                 timeout=self.timeout,
+                overwrite=refresh(unit),
             )
         except NotFoundError:
             logger.info("dmi: no observations for %s (404)", unit.key)

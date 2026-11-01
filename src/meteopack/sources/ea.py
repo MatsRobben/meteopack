@@ -61,6 +61,7 @@ from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variab
 from meteopack.core.timeline import Timeline
 from meteopack.sources.base import RawFile, TimeWindow, Unit
 from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
+from meteopack.sources.common import refresh
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
     import polars as pl
@@ -516,6 +517,7 @@ class EaRainfall:
                 retries=rl.max_retries,
                 backoff=rl.backoff_seconds,
                 timeout=self.timeout,
+                overwrite=refresh(unit),
             )
         except NotFoundError:
             logger.info("ea: no such measure for %s (404)", unit.key)

@@ -542,6 +542,7 @@ def test_a_volatile_window_is_re_downloaded_rather_than_skipped(monkeypatch, src
 
     def handler(args):
         seen["existed"] = Path(args["dest"]).exists()
+        seen["overwrite"] = args["overwrite"]
         return RawFile(path=args["dest"], sha256="d" * 64, n_bytes=2, unit_key=args["unit_key"])
 
     _install_http(monkeypatch, handler)
@@ -556,12 +557,14 @@ def test_a_volatile_window_is_re_downloaded_rather_than_skipped(monkeypatch, src
         "volatile": True,
     }
     src.fetch(Unit(key="k", url="https://example.invalid/x", meta=meta), tmp_path)
-    assert seen["existed"] is False
+    # Downloaded again over the old copy, which stays until the new one is
+    # complete: this used to delete it first, losing it if the download failed.
+    assert seen == {"existed": True, "overwrite": True}
 
     dest.write_text("a closed window, already correct")
     src.fetch(Unit(key="k", url="https://example.invalid/x", meta={**meta, "volatile": False}),
               tmp_path)
-    assert seen["existed"] is True
+    assert seen == {"existed": True, "overwrite": False}
 
 
 # ------------------------------------------------------------------------ parse
