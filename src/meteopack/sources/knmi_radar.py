@@ -1044,6 +1044,9 @@ class KnmiRadar:
     #: failed the very consistency check it was meant to satisfy.
     product_fingerprint = staticmethod(product_fingerprint)
 
+    #: What each `source_layout_id` code means; `pack` writes it onto the store.
+    layout_names = LAYOUT_NAMES
+
     @staticmethod
     def _check_pins(cfg: ProductConfig) -> list[str]:
         """The pinned layout set, after checking the config agrees with itself.

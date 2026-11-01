@@ -273,32 +273,13 @@ def initialise(
     for name in names:
         var = declared[name]
         encoding = Encoding.from_config(var.encoding, name=name)
-        attributes: dict = {
-            **var.cf_attrs,
-            "grid_mapping": GRID_MAPPING_NAME,
-            "coordinates": "lat lon",
-        }
+        attributes = _field_attrs(var, encoding)
         if encoding is None:
             dtype: object = "float32"
             fill: object = np.float32("nan")
         else:
             dtype = encoding.dtype
             fill = encoding.missing
-            attributes.update({
-                "scale_factor": encoding.scale,
-                "add_offset": encoding.offset,
-                "calibration_formula": encoding.formula,
-                "calibration_missing_data": encoding.missing,
-                "calibration_out_of_image": encoding.out_of_image,
-                "_FillValue": encoding.missing,
-                # CF allows one _FillValue but a vector missing_value, and
-                # xarray's mask_and_scale honours both. Without this, a plain
-                # `xr.open_zarr(...)` decodes out_of_image as a real value:
-                # 65535 * 0.01 = 655.35 mm of rain over the whole footprint
-                # mask. The two codes stay distinguishable in the raw array and
-                # in the two named attributes above.
-                "missing_value": [encoding.missing, encoding.out_of_image],
-            })
         group.create_array(
             name,
             shape=shape,
@@ -405,6 +386,60 @@ def _create_coordinates(group: zarr.Group, grid) -> None:
         array[:] = values
 
 
+def _field_attrs(var, encoding: Encoding | None) -> dict:
+    """The attributes of one field array, from its config. Used at creation and refresh."""
+    attributes: dict = {
+        **var.cf_attrs,
+        "grid_mapping": GRID_MAPPING_NAME,
+        "coordinates": "lat lon",
+    }
+    if var.no_echo is not None:
+        # The commonest pixel in a radar frame. Without this a reader has to
+        # know the product to tell "no echo" from a small value.
+        attributes["no_echo_value"] = float(var.no_echo)
+        attributes["comment"] = (f"Where the radar saw no echo the value is {var.no_echo:g} "
+                                 f"{var.units}; that is an observation, not missing data.")
+    if encoding is not None:
+        attributes.update({
+            "scale_factor": encoding.scale,
+            "add_offset": encoding.offset,
+            "calibration_formula": encoding.formula,
+            "calibration_missing_data": encoding.missing,
+            "calibration_out_of_image": encoding.out_of_image,
+            "_FillValue": encoding.missing,
+            # CF allows one _FillValue but a vector missing_value, and
+            # xarray's mask_and_scale honours both. Without this, a plain
+            # `xr.open_zarr(...)` decodes out_of_image as a real value:
+            # 65535 * 0.01 = 655.35 mm of rain over the whole footprint
+            # mask. The two codes stay distinguishable in the raw array and
+            # in the two named attributes above.
+            "missing_value": [encoding.missing, encoding.out_of_image],
+        })
+    return attributes
+
+
+#: What each per-frame provenance array means, on the array itself.
+PROVENANCE_DESCRIPTIONS = {
+    "is_missing_frame": "no source file covered this time step",
+    "is_corrupt_frame": "a source file covered this time step but its frame could not be "
+                        "used - unreadable, truncated, or a calibration the product config "
+                        "lists as broken (extra.corrupt_layouts); its data is left missing",
+    "source_layout_id": "which upstream layout produced this frame; the codes are in "
+                        "flag_values and flag_meanings",
+    "source_record_id": "the raw file this frame was packed from: its row in "
+                        "provenance.parquet beside dataset.zarr (column "
+                        "source_record_id); -1 if never packed",
+}
+
+
+def _layout_flags(names: Mapping[int, str]) -> dict:
+    """CF flag attributes for `source_layout_id` from a source's code -> name table."""
+    codes = sorted(names)
+    return {"flag_values": [int(c) for c in codes],
+            "flag_meanings": " ".join(names[c].replace(",", "").replace(" ", "_")
+                                      for c in codes)}
+
+
 def _create_provenance(group: zarr.Group, n_times: int, chunk: int) -> None:
     """One array per provenance field, chunked like the shards.
 
@@ -413,15 +448,7 @@ def _create_provenance(group: zarr.Group, n_times: int, chunk: int) -> None:
     all and 36 held a file that would not read. Without these, both are
     indistinguishable from a frame that was present and empty.
     """
-    descriptions = {
-        "is_missing_frame": "no source file covered this time step",
-        "is_corrupt_frame": "a source file existed but could not be read",
-        "source_layout_id": "which upstream layout produced this frame; see the "
-                            "layouts attribute on the root group",
-        "source_record_id": "the raw file this frame was packed from: its row in "
-                            "provenance.parquet beside dataset.zarr (column "
-                            "source_record_id); -1 if never packed",
-    }
+    descriptions = PROVENANCE_DESCRIPTIONS
     for name, (dtype, fill) in PROVENANCE.items():
         group.create_array(
             name,
@@ -652,16 +679,31 @@ def refresh_attrs(
     root: str | os.PathLike[str],
     *,
     layer: Layer = DEFAULT_LAYER,
+    layout_names: Mapping[int, str] | None = None,
 ) -> None:
-    """Re-publish the root metadata from the current config.
+    """Re-publish the metadata from the current config: root, fields and provenance.
 
     The root attributes used to be written once, when the store was created,
     so editing the config afterwards - adding a title, an institution, a
     reference - changed nothing on disk and the store kept describing itself
     with the fallback. The time bounds are left alone: those belong to the
-    store, not to the config, and `extend` maintains them.
+    store, not to the config, and `extend` maintains them. Only attributes are
+    touched, never data.
+
+    `layout_names` (a source's code -> description table) becomes CF
+    flag_values/flag_meanings on `source_layout_id`.
     """
     group = _open(cfg.store_id, root, layer, "r+")
+    present = {n for n, _ in group.arrays()}
+    for var in cfg.variables:
+        if var.name in present:
+            encoding = Encoding.from_config(var.encoding, name=var.name)
+            group[var.name].attrs.update(_field_attrs(var, encoding))
+    for name, description in PROVENANCE_DESCRIPTIONS.items():
+        if name in present:
+            group[name].attrs.update({"long_name": description})
+    if layout_names and "source_layout_id" in present:
+        group["source_layout_id"].attrs.update(_layout_flags(layout_names))
     grid = grids.get(cfg.grid_id) if cfg.grid_id else None
     if grid is None:
         return

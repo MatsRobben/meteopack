@@ -170,40 +170,53 @@ def store_readme(cfg, store_path: Path | str, info: dict | None = None) -> Path 
             lines.append(f"- shape: {tuple(info['shape'])} (time, y, x)")
     lines += ["", "## Variables", ""]
     if kind == "gridded":
-        lines += ["| name | units | stored as | decode | was called |",
+        lines += ["| name | units | stored as | decode | no echo |",
                   "|---|---|---|---|---|"]
         for var in cfg.variables:
             enc = var.encoding or {}
             stored = enc.get("dtype", "float32")
             decode = (f"`{enc['scale']} * v + {enc.get('offset', 0.0)}`"
                       if enc.get("scale") is not None else "as stored")
-            lines.append(
-                f"| `{var.name}` | {var.units} | {stored} | {decode} | "
-                f"{('`' + var.legacy_name + '`') if var.legacy_name else '-'} |"
-            )
+            no_echo = f"{var.no_echo:g} {var.units}" if var.no_echo is not None else "-"
+            lines.append(f"| `{var.name}` | {var.units} | {stored} | {decode} | {no_echo} |")
         lines += [
             "",
-            "Integer fields reserve two codes, on each array's attributes as",
-            "`calibration_missing_data` and `calibration_out_of_image`: the first means",
-            "the instrument measured nothing there, the second that the pixel is outside",
-            "the product footprint. They are different facts; do not merge them.",
+            "`xr.open_zarr` decodes these for you: you get physical values, and NaN",
+            "wherever the store holds one of its two reserved codes - `missing` (the",
+            "instrument measured nothing there) or `out_of_image` (outside the product",
+            "footprint). The codes and the calibration are on each array's attributes",
+            "(`calibration_missing_data`, `calibration_out_of_image`,",
+            "`calibration_formula`); open with `mask_and_scale=False` to see them.",
             "",
-            "## Per-frame provenance",
+            "**No echo is data, not missing.** Where the radar looked and saw nothing",
+            "the value is the one in the last column (also the array's",
+            "`no_echo_value` attribute). It is the commonest pixel in most frames.",
             "",
-            "`is_missing_frame` - no source file covered this time step.",
-            "`is_corrupt_frame` - a file existed but could not be read.",
-            "`source_layout_id` - which upstream generation produced the frame.",
-            "`source_record_id` - which raw file the frame was packed from; look it up",
-            "in `provenance.parquet` beside `dataset.zarr` (name, size, mtime, the slots",
-            "it covered, how many were missing, when it was packed).",
+            "## Per-frame flags and provenance",
             "",
-            "Both read as missing imagery, so only these arrays tell them apart.",
+            "| array | meaning |",
+            "|---|---|",
+            "| `is_missing_frame` | no source file covered this time step |",
+            ("| `is_corrupt_frame` | a file covered it, but the frame was unusable: "
+            "unreadable, truncated, or a calibration the product config lists as broken |"),
+            ("| `source_layout_id` | which upstream layout produced the frame; codes in its "
+            "`flag_values` / `flag_meanings` |"),
+            ("| `source_record_id` | which raw file it came from: look the id up in "
+            "`provenance.parquet` beside `dataset.zarr` |"),
+            "",
+            "Missing and corrupt frames both read as all-NaN imagery; only these flags",
+            "tell them apart from each other. Mask on `is_missing_frame | is_corrupt_frame`.",
+            "",
+            "Beside `dataset.zarr`: `manifest.json` (how and when it was built),",
+            "`provenance.parquet` (one row per raw file) and `scan_report.json` (every",
+            "upstream image layout seen, with frame counts).",
             "",
             "## Reading it",
             "",
             "```python",
             "import xarray as xr",
-            f"ds = xr.open_zarr('{Path(store_path).name}/dataset.zarr', consolidated=False)",
+            "ds = xr.open_zarr('dataset.zarr', consolidated=False)   # path from this folder",
+            "usable = ~(ds.is_missing_frame | ds.is_corrupt_frame)",
             "```",
         ]
     else:
@@ -216,7 +229,8 @@ def store_readme(cfg, store_path: Path | str, info: dict | None = None) -> Path 
             "",
             "```python",
             "import duckdb",
-            "duckdb.sql(\"select * from read_parquet('observations/**/*.parquet')\")",
+            "duckdb.sql(\"select * from read_parquet('observations/**/*.parquet', \"",
+            "           \"union_by_name=true, hive_partitioning=false)\")",
             "```",
             "",
             "Station coordinates are in `stations/`, joined on `station_id` (text).",

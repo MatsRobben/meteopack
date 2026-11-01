@@ -1,6 +1,6 @@
 # Running meteopack on the Science Cluster
 
-Verified 2026-10-31 (job 12303351 completed on cn79).
+Facts here were measured on the cluster in October-November 2026.
 
 ## Accounts and partitions
 
@@ -10,9 +10,38 @@ Verified 2026-10-31 (job 12303351 completed on cn79).
 | `icis` | `icis`, `icis-prio` | `icis-{small,normal,large,preempt}` |
 | `csedu`, `cseduproject` | `csedu`, `csedu-prio` | `csedu-{small,normal,large,preempt}` |
 
-`das` has 4 nodes, `icis` 2 (usually busier). Use `*-preempt` for anything
-restartable — every meteopack stage is, because the job ledger skips units
-already marked done, so a preemption costs at most the in-flight unit.
+`das` has 4 nodes, `icis` 2 (usually busier).
+
+**Which QOS.** `fetch` is restartable - the ledger skips units already done, so
+a preemption costs at most the in-flight unit - and `*-preempt` suits it.
+`pack` is not incremental: a preempted pack starts over, and a benchmark that
+can be killed half-way measures nothing. Use `*-normal` for those.
+
+| QOS | per-job limit | note |
+|---|---|---|
+| `das-normal` | 12 CPUs, 46 GB, 12 h | no shared pool, so it schedules |
+| `icis-normal` | 48 CPUs, 125 GB, 12 h | |
+| `das-large` | none per job, 2 days | a 74-CPU pool shared by everyone; often full (`QOSGrpCpuLimit`) |
+| `icis-large` | none per job, 2 days | a 128-CPU shared pool |
+
+(`sacctmgr show qos format=Name,MaxTRES,GrpTRES,MaxWall` shows the current values.)
+
+## Sizing a job (measured 2026-11-01)
+
+* **A Slurm CPU is a hyperthread.** `--cpus-per-task=48` is 24 physical cores;
+  12 is 6. One worker per hardware thread is right: running twice as many
+  workers as CPUs made a radar pack 1.6x *slower*.
+* **Reads come from one NFS server, ~230 MiB/s in total.** One node alone gets
+  ~165 MiB/s; three reading at once got ~77 each. Spreading an I/O-bound job
+  over more nodes buys 25-40%, not a multiple. Above ~32 concurrent readers per
+  node, throughput falls.
+* **Per product:** rtcor is read-bound from ~24 workers (and its workers reach
+  2.2 GB each); echotop and refl are CPU-bound and want every core, ~1 GB per
+  worker. Full archives: rtcor ~21 min, echotop ~10 min, refl ~19 min at 48 CPUs.
+* **Check the node before timing anything.** `scontrol show node <n> | grep
+  CPULoad` - one node once had a load of 122 on 32 allocated CPUs, which made
+  parsing 50% slower. cn84, where interactive sessions run, has a 1 GbE link
+  and should not run packs at all.
 
 ## Submitting
 

@@ -927,6 +927,8 @@ def stage_pack(ctx: Context) -> int:
             print(f"  {off_cadence} frame(s) were not on the "
                   f"{ctx.cfg.cadence_seconds}s cadence and were dropped")
         _write_pack_scan_report(ctx, store, results)
+        gridded.refresh_attrs(ctx.cfg, ctx.root,
+                              layout_names=getattr(ctx.src, "layout_names", None))
         records = [rec for r in results for rec in (r.get("records") or ())]
         if records:
             gridded.write_provenance_table(ctx.root, ctx.cfg.store_id, records)

@@ -1,5 +1,12 @@
 # Output layout and store schema: a revision
 
+> **Design record, written 2026-11-01.** It explains why the stores look the
+> way they do; some details have moved on since. Variable names are KNMI's own
+> (`accumulation_mm`, not `precipitation_amount` - see section 6), no-echo
+> pixels take a stated value, frames with a broken calibration are recorded
+> corrupt, and `source_record_id` now indexes a real `provenance.parquet`.
+> For the store as it is, read [docs/stores.md](../stores.md).
+
 Written after reading the radar_v3 and 10min_in_situ_v3 stores in `data_raw`
 and the code that produced them. The short version is that the previous
 implementation of those stores was right about several things this one got

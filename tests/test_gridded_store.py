@@ -806,3 +806,25 @@ def test_derive_can_size_its_axis_from_a_store_the_current_code_writes(tmp_path:
                           cadence_seconds=CADENCE_SECONDS, n_timesteps=2, shard_samples=4)
     axis = _derive_timeline(derive, tmp_path, None)
     assert axis.start >= timeline.start and axis.end <= timeline.end
+
+
+def test_store_metadata_says_what_no_echo_and_the_layout_codes_mean(tmp_path: Path):
+    """source_layout_id pointed at a root attribute that did not exist, and
+    nothing told a reader that 0 km means "no echo", the commonest pixel."""
+    import zarr
+
+    cfg, timeline = make_cfg(), make_timeline()
+    cfg.variables[0].no_echo = 0.0
+    gridded.initialise(cfg, tmp_path, timeline)
+    group = zarr.open_group(gridded.zarr_path(tmp_path, cfg.store_id), mode="r")
+    assert group["rain"].attrs["no_echo_value"] == 0.0
+    assert "flag_meanings" not in group["source_layout_id"].attrs
+
+    gridded.refresh_attrs(cfg, tmp_path, layout_names={0: "missing", 1: "corrupt",
+                                                       6: "echo top height"})
+    group = zarr.open_group(gridded.zarr_path(tmp_path, cfg.store_id), mode="r")
+    flags = group["source_layout_id"].attrs
+    assert flags["flag_values"] == [0, 1, 6]
+    assert flags["flag_meanings"] == "missing corrupt echo_top_height"
+    assert "flag_meanings" in flags["long_name"] or "flag_values" in flags["long_name"]
+    assert "corrupt_layouts" in group["is_corrupt_frame"].attrs["long_name"]
