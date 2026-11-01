@@ -7,6 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -573,3 +574,50 @@ def test_provenance_is_optional(tmp_path: Path):
     gridded.initialise(cfg, tmp_path, timeline)
     result = gridded.write(day_dataset(timeline, 0), cfg, tmp_path)
     assert result.written == FRAMES_PER_DAY and result.outside == 0
+
+
+def test_files_sharing_a_shard_are_packed_by_one_task(tmp_path: Path):
+    """A zarr shard is one file, so it may have exactly one writer.
+
+    Two processes writing different frames of one shard each read-modify-write
+    the whole shard and replace it atomically; the slower one's frames vanish.
+    Almost every daily tar is exactly one shard, but two of the 2,680 KNMI
+    radar tars start at 08:00 rather than 08:05 and straddle a boundary.
+    """
+    import argparse
+    from datetime import datetime, timedelta
+
+    from meteopack.cli import _pack_tasks
+
+    timeline = make_timeline()
+    cfg = make_cfg(chunks={"time": 1}, shard={"time": FRAMES_PER_DAY})
+
+    class FakeSource:
+        """Dates a file from its name: day0a and day0b fall in the same shard."""
+
+        spans: ClassVar[dict] = {
+            "day0a": (0, 11),      # first half of day 0
+            "day0b": (12, 23),     # second half of day 0 - same shard
+            "day1": (24, 47),      # day 1 - its own shard
+        }
+
+        def span_of(self, path):
+            lo, hi = self.spans[Path(path).stem]
+            step = timedelta(seconds=CADENCE_SECONDS)
+            return (timeline.start + lo * step, timeline.start + hi * step)
+
+    class Ctx:
+        src = FakeSource()
+        root = tmp_path
+        args = argparse.Namespace(configs=None)
+
+    Ctx.cfg = cfg
+    files = [tmp_path / f"{n}.tar" for n in ("day0a", "day0b", "day1")]
+    tasks = _pack_tasks(Ctx(), files, timeline)
+
+    assert len(tasks) == 2, f"expected one task per shard, got {[t.paths for t in tasks]}"
+    by_size = sorted(tasks, key=lambda t: -len(t.paths))
+    assert len(by_size[0].paths) == 2, "the two same-shard files must share a task"
+    assert {Path(p).stem for p in by_size[0].paths} == {"day0a", "day0b"}
+    assert {Path(p).stem for p in by_size[1].paths} == {"day1"}
+    assert isinstance(datetime.now(), datetime)

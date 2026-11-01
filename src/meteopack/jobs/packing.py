@@ -33,6 +33,17 @@ class PackTask:
     raw_path: str
     root: str
     configs: str | None = None
+    #: Further raw files this task must pack *itself*, because they write into
+    #: a shard this task already owns. A zarr shard is one file: two processes
+    #: writing different frames of it both read-modify-write the whole thing
+    #: and the slower one's frames vanish - measured here as whole half-shards
+    #: reading back empty. Grouping them into one task is what makes the
+    #: parallel pack equal the serial one.
+    also: tuple[str, ...] = ()
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        return (self.raw_path, *self.also)
 
 
 def _load(task: PackTask):
@@ -79,13 +90,18 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
     from meteopack.core.store import gridded
 
     src, cfg = _load(task)
-    ds = src.parse(_raw_file(task.raw_path), cfg)
-    if ds is None or not ds.sizes.get("time"):
-        return {"path": task.raw_path, "frames": 0}
-    result = gridded.write(ds, cfg, Path(task.root))
-    del ds
-    return {"path": task.raw_path, "frames": result.written,
-            "outside": result.outside, "off_cadence": result.off_cadence}
+    frames = outside = off_cadence = 0
+    for raw_path in task.paths:
+        ds = src.parse(_raw_file(raw_path), cfg)
+        if ds is None or not ds.sizes.get("time"):
+            continue
+        result = gridded.write(ds, cfg, Path(task.root))
+        del ds
+        frames += result.written
+        outside += result.outside
+        off_cadence += result.off_cadence
+    return {"path": task.raw_path, "frames": frames,
+            "outside": outside, "off_cadence": off_cadence}
 
 
 def run(tasks: list[PackTask], fn, *, workers: int | None = None,
