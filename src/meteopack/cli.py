@@ -674,8 +674,6 @@ def stage_pack(ctx: Context) -> int:
     else:
         import tempfile
 
-        import polars as pl
-
         from meteopack.core.store import points
 
         # Workers spill to per-partition files and the parent handles one
@@ -686,7 +684,13 @@ def stage_pack(ctx: Context) -> int:
         try:
             tasks = _pack_tasks(ctx, files)
             tasks = [replace(t, spill=str(spill)) for t in tasks]
-            results = packing.run(tasks, packing.parse_points, workers=workers)
+            # Points tasks are small and short. Recycling a worker every 32
+            # of them costs more in respawns - interpreter startup plus the
+            # source import - than it saves; dwd's 8,494 files would pay that
+            # 265 times. The leak that motivated recycling is on the gridded
+            # path, which keeps the tighter number.
+            results = packing.run(tasks, packing.parse_points, workers=workers,
+                                  max_tasks_per_child=512)
             errors = [r for r in results if r.get("error")]
 
             by_partition: dict[str, list[str]] = {}
@@ -697,17 +701,35 @@ def stage_pack(ctx: Context) -> int:
                 print("nothing parsed")
                 return 1
 
+            # Partitions are written concurrently: they are independent, and
+            # this is the expensive half of a points pack. dwd coalesces ~60
+            # million duplicate (time, station) rows per partition - its five
+            # variable groups each contribute a row for the same instant - and
+            # doing seventeen of those one after another left fifteen cores
+            # idle.
+            part_tasks = [
+                packing.PartitionTask(
+                    label=label, files=tuple(by_partition[label]),
+                    source=ctx.cfg.source, product=ctx.cfg.product,
+                    root=str(ctx.root), configs=ctx.args.configs,
+                )
+                for label in sorted(by_partition)
+            ]
+            part_workers = min(len(part_tasks), workers)
+            print(f"writing {len(part_tasks)} partition(s) with {part_workers} worker(s)")
+            written = packing.run(part_tasks, packing.write_partition,
+                                  workers=part_workers, max_tasks_per_child=0)
             n_records = 0
             paths: list[Path] = []
-            for label in sorted(by_partition):
-                part = pl.concat(
-                    [pl.read_ipc(f) for f in by_partition[label]], how="diagonal_relaxed"
-                )
-                part = _coalesce_observations(part)
-                paths.extend(points.write(part, ctx.cfg, ctx.root))
-                n_records += part.height
-                print(f"  {label}: {part.height} rows")
-                del part
+            for result in sorted(written, key=lambda r: str(r.get("label"))):
+                if result.get("error"):
+                    errors.append(result)
+                    continue
+                n_records += int(result["rows"])
+                paths.extend(Path(p) for p in result["paths"])
+                merged = int(result.get("merged") or 0)
+                note = f", {merged:,} duplicate rows merged" if merged else ""
+                print(f"  {result['label']}: {int(result['rows']):,} rows{note}")
         finally:
             shutil.rmtree(spill, ignore_errors=True)
 

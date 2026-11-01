@@ -14,6 +14,7 @@ share a zarr shard.
 from __future__ import annotations
 
 import concurrent.futures as cf
+import functools
 import logging
 import multiprocessing
 import os
@@ -51,13 +52,27 @@ class PackTask:
         return (self.raw_path, *self.also)
 
 
-def _load(task: PackTask):
+@functools.lru_cache(maxsize=8)
+def _load_cached(source: str, product: str | None, configs: str | None):
     from meteopack.jobs.plan import load_product_config, load_source_config
     from meteopack.sources import registry
 
-    cfg = load_product_config(task.source, task.product, configs=task.configs)
-    src = registry.build(task.source, load_source_config(task.source, configs=task.configs))
+    cfg = load_product_config(source, product, configs=configs)
+    src = registry.build(source, load_source_config(source, configs=configs))
     return src, cfg
+
+
+def _load(task: PackTask):
+    """The source and config for this task, built once per worker process.
+
+    This re-read and re-parsed the YAML on every task: 19.6 ms each, almost
+    all of it in the YAML scanner, which over dwd's 8,494 files is 166 seconds
+    of pure setup. Cached, it is 0.3 us. A source is reusable across tasks by
+    design - it holds a session and its own caches, which is exactly what
+    should persist - and the cache stays small because one worker only ever
+    sees one product.
+    """
+    return _load_cached(task.source, task.product, task.configs)
 
 
 def _raw_file(path: str):
@@ -106,6 +121,72 @@ def parse_points(task: PackTask) -> dict[str, Any]:
         group.drop("__part").write_ipc(target)
         parts[label] = str(target)
     return {"path": task.raw_path, "rows": frame.height, "ipc": None, "parts": parts}
+
+
+@dataclass(frozen=True, slots=True)
+class PartitionTask:
+    """One store partition's spilled frames, ready to merge and write.
+
+    Partitions are independent - a `(time, station_id)` pair belongs to
+    exactly one, because the key is derived from `time` - so they can be
+    written concurrently. Doing them in a loop left fifteen cores idle through
+    the most expensive phase of a points pack: dwd coalesces ~60 million
+    duplicate rows per partition, because its five variable groups each
+    contribute a row for the same (time, station).
+    """
+
+    label: str
+    files: tuple[str, ...]
+    source: str
+    product: str | None
+    root: str
+    configs: str | None = None
+
+
+def write_partition(task: PartitionTask) -> dict[str, Any]:
+    """Merge one partition's spill files, coalesce them, and write it."""
+    import polars as pl
+
+    from meteopack.core.store import points
+
+    _, cfg = _load_cached(task.source, task.product, task.configs)
+    frame = pl.concat([pl.read_ipc(f) for f in task.files], how="diagonal_relaxed")
+    frame, merged = coalesce_observations(frame)
+    paths = points.write(frame, cfg, Path(task.root))
+    return {"label": task.label, "rows": frame.height, "merged": merged,
+            "paths": [str(p) for p in paths]}
+
+
+def coalesce_observations(df):
+    """Merge rows describing the same (time, station) into one.
+
+    Sources differ in what a unit contains. DWD ships a station-year of every
+    variable in its group, so the same (time, station) arrives once per group;
+    DMI ships one PARAMETER per station-window. Concatenating stacks them
+    instead of merging, and the store then holds a row per parameter rather
+    than per observation - 711,570 duplicate pairs on the first real DMI pack,
+    and ~60 million per partition on dwd.
+
+    Only pays for itself when duplicates exist, so the common case is a cheap
+    check. Where two files genuinely disagree the first non-null wins, which
+    is arbitrary but deterministic; the count is returned so a source
+    producing real conflicts is visible rather than silently reconciled.
+    """
+    import polars as pl
+
+    keys = [c for c in ("time", "station_id") if c in df.columns]
+    if len(keys) < 2 or df.is_empty():
+        return df, 0
+    n_dup = int(df.select(keys).is_duplicated().sum())
+    if not n_dup:
+        return df, 0
+    values = [c for c in df.columns if c not in keys]
+    merged = (
+        df.group_by(keys)
+        .agg([pl.col(c).drop_nulls().first().alias(c) for c in values])
+        .sort(keys)
+    )
+    return merged, n_dup
 
 
 def write_gridded(task: PackTask) -> dict[str, Any]:
@@ -160,15 +241,22 @@ def scan_files(task: PackTask) -> dict[str, Any]:
     dictionary that has to be merged, and merging a few dozen is cheaper than
     merging thousands.
     """
-    src, cfg = _load(task)
+    src, _cfg = _load(task)
     scan = getattr(src, "scan", None)
     if scan is None:
         return {"error": f"{task.source} does not implement scan()"}
     return scan([_raw_file(p) for p in task.paths])
 
 
+#: Tasks per worker before it is replaced. 32 came from the radar benchmark,
+#: where RSS climbed 1,328 MiB across repeats. It is the wrong number for
+#: cheap tasks: a respawn costs interpreter startup plus the source import,
+#: and dwd's 8,494 small files would pay that 265 times. The caller picks.
+DEFAULT_MAX_TASKS_PER_CHILD = 32
+
+
 def run(tasks: list[PackTask], fn, *, workers: int | None = None,
-        max_tasks_per_child: int = 32,
+        max_tasks_per_child: int = DEFAULT_MAX_TASKS_PER_CHILD,
         stall_timeout: float | None = DEFAULT_STALL_TIMEOUT) -> list[dict[str, Any]]:
     """Map `fn` over `tasks`, and fail rather than hang when a worker dies.
 
