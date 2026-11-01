@@ -746,6 +746,8 @@ class KnmiRadar:
         corrupt = np.zeros(len(stamped), dtype=bool)
         #: message -> first member that showed it. Reported once per tar.
         drifted: dict[str, str] = {}
+        #: fingerprint -> what was seen, counted. The scan report, for free.
+        layouts: dict[str, dict] = {}
         # Config consistency is checked once, up front, and raises: nothing
         # should be written against a config that disagrees with itself.
         self._check_pins(cfg)
@@ -791,6 +793,19 @@ class KnmiRadar:
                             except SchemaDriftError as exc:
                                 drifted.setdefault(str(exc), member.name)
                             seen_layout = layout
+                        # Every layout this pack saw, so the pins can be
+                        # refreshed from the pack itself. A separate `scan` is
+                        # a second full pass over the archive - 36 minutes for
+                        # the radar tars - and skipping it is what left the
+                        # pins incomplete and cost 5,508 frames.
+                        fp = schema_fingerprint(layout)
+                        entry = layouts.get(fp)
+                        if entry is None:
+                            layouts[fp] = {"fingerprint": fp, "count": 1,
+                                           "images": list(layout),
+                                           "example": member.name}
+                        else:
+                            entry["count"] += 1
                         layout_ids[index] = layout_id(specs)
                         matched = _fill_frame(
                             frame, member.name, specs, wanted, frames, hits, index, policy,
@@ -849,6 +864,7 @@ class KnmiRadar:
                 "unit_key": raw.unit_key,
                 "raw_sha256": raw.sha256,
                 "schema_drift": sorted(drifted),
+                "layouts_seen": list(layouts.values()),
             },
         )
 

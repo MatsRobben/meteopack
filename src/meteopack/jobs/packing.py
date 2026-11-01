@@ -123,18 +123,27 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
     # still reads correctly, and discarding its whole tar lost 5,508 frames on
     # the real archive. `pack` fails at the end on anything collected here.
     drift: set[str] = set()
+    layouts: dict[str, dict] = {}
     for raw_path in task.paths:
         ds = src.parse(_raw_file(raw_path), cfg)
         if ds is None or not ds.sizes.get("time"):
             continue
         drift.update(ds.attrs.get("schema_drift") or ())
+        for entry in ds.attrs.get("layouts_seen") or ():
+            fp = str(entry.get("fingerprint"))
+            seen = layouts.get(fp)
+            if seen is None:
+                layouts[fp] = dict(entry)
+            else:
+                seen["count"] += int(entry.get("count", 0))
         result = gridded.write(ds, cfg, Path(task.root))
         del ds
         frames += result.written
         outside += result.outside
         off_cadence += result.off_cadence
     return {"path": task.raw_path, "frames": frames, "outside": outside,
-            "off_cadence": off_cadence, "drift": sorted(drift)}
+            "off_cadence": off_cadence, "drift": sorted(drift),
+            "layouts": list(layouts.values())}
 
 
 #: How long `run` waits for *any* task to finish before concluding the pool is
@@ -142,6 +151,20 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
 #: scene at ~20 s and a radar tar at ~13 s, so half an hour with nothing at all
 #: completing is not slowness.
 DEFAULT_STALL_TIMEOUT = 1800.0
+
+
+def scan_files(task: PackTask) -> dict[str, Any]:
+    """Scan this task's raw files and return the partial report.
+
+    One task per batch of files rather than per file: a scan report is a
+    dictionary that has to be merged, and merging a few dozen is cheaper than
+    merging thousands.
+    """
+    src, cfg = _load(task)
+    scan = getattr(src, "scan", None)
+    if scan is None:
+        return {"error": f"{task.source} does not implement scan()"}
+    return scan([_raw_file(p) for p in task.paths])
 
 
 def run(tasks: list[PackTask], fn, *, workers: int | None = None,

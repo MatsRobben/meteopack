@@ -550,6 +550,58 @@ def _spill_root(root: Path) -> Path:
 _MIN_SPILL_BYTES = 20 * 1024**3
 
 
+def _write_pack_scan_report(ctx: Context, store, results: list[dict]) -> None:
+    """Write what the pack saw, so pins can be refreshed without a second pass.
+
+    `scan` opens every frame of every file; so does `pack`. On the 127 GB radar
+    archive that is two 36-minute reads of the same bytes to learn the same
+    thing, and the filesystem is the bottleneck - measured at 66 MiB/s against
+    a 76 MiB/s ceiling, so the second pass is pure cost.
+
+    Emitting it here also removes the reason to skip it. Dropping the separate
+    scan from a run left the pinned layout set incomplete and cost 5,508
+    frames; a report that falls out of the pack cannot be skipped.
+    """
+    import json
+
+    layouts: dict[str, dict] = {}
+    for result in results:
+        for entry in result.get("layouts") or ():
+            fp = str(entry.get("fingerprint"))
+            seen = layouts.get(fp)
+            if seen is None:
+                layouts[fp] = dict(entry)
+            else:
+                seen["count"] += int(entry.get("count", 0))
+    if not layouts:
+        return
+
+    ordered = sorted(layouts.values(), key=lambda e: -int(e.get("count", 0)))
+    payload = {
+        "store_id": ctx.cfg.store_id,
+        "written_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "source": "pack",
+        "n_layouts": len(ordered),
+        "layouts": ordered,
+        "known_layouts": sorted(layouts),
+        "schema_fingerprint": _product_fingerprint(sorted(layouts)),
+    }
+    target = Path(store) / "scan_report.json"
+    try:
+        target.write_text(json.dumps(payload, indent=2))
+    except OSError as exc:
+        logger.debug("could not write %s: %s", target, exc)
+        return
+    print(f"  saw {len(ordered)} layout(s); report at {target}")
+
+
+def _product_fingerprint(fingerprints: list[str]) -> str:
+    """The hash `schema_fingerprint` pins, computed the way the source does."""
+    from meteopack.sources.common import fingerprint
+
+    return fingerprint(fingerprints)
+
+
 def stage_pack(ctx: Context) -> int:
     from meteopack.core import readme
     from meteopack.core.store import manifest
@@ -601,6 +653,7 @@ def stage_pack(ctx: Context) -> int:
         if off_cadence:
             print(f"  {off_cadence} frame(s) were not on the "
                   f"{ctx.cfg.cadence_seconds}s cadence and were dropped")
+        _write_pack_scan_report(ctx, store, results)
         drift = sorted({d for r in results for d in (r.get("drift") or ())})
         if drift:
             print(f"  ERROR {len(drift)} unpinned schema layout(s); the frames were "
@@ -765,6 +818,92 @@ def _compare_schema(cfg, report: dict) -> tuple[list[str], str]:
     return [], f"nothing pinned to compare against; observed {got}"
 
 
+def _run_scan(ctx: Context, files: list[Path], scan) -> dict:
+    """Scan every raw file, across processes when there are enough to be worth it.
+
+    A scan opens every frame of every file, and it was doing that on one core:
+    2,680 radar tars at ~3 s each is 2.2 hours of a sixteen-core node sitting
+    at 60% of one core in NFS wait. The work is embarrassingly parallel - one
+    file is independent of the next - and parallel readers are exactly what a
+    network filesystem serves well.
+    """
+    workers = ctx.args.workers or len(os.sched_getaffinity(0))
+    if workers <= 1 or len(files) < workers * 2:
+        return scan(_as_raw(files))
+
+    from meteopack.jobs import packing
+
+    # One task per worker-sized batch: a scan report is a dict that has to be
+    # merged, so merging a few dozen beats merging a few thousand.
+    batches = max(workers * 4, 1)
+    size = -(-len(files) // batches)
+    chunks = [files[i:i + size] for i in range(0, len(files), size)]
+    tasks = [
+        packing.PackTask(source=ctx.cfg.source, product=ctx.cfg.product,
+                         raw_path=str(chunk[0]), root=str(ctx.root),
+                         configs=ctx.args.configs,
+                         also=tuple(str(p) for p in chunk[1:]))
+        for chunk in chunks
+    ]
+    print(f"scanning {len(files)} file(s) in {len(tasks)} batch(es) "
+          f"across {workers} worker(s)")
+    return _merge_scan_reports(packing.run(tasks, packing.scan_files, workers=workers))
+
+
+def _merge_scan_reports(reports: list[dict]) -> dict:
+    """Combine partial scan reports into the one a serial scan would produce.
+
+    Deliberately generic: sources report different keys, and a merge that knew
+    about each of them would be another place for the two to drift apart.
+    Counts add, lists and dicts union, and variants combine on their
+    fingerprint - which is what identifies a variant in every source here.
+    """
+    merged: dict = {}
+    variants: dict[str, dict] = {}
+    errors: list = []
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        for key, value in report.items():
+            if key == "variants":
+                for variant in value or []:
+                    fp = str(variant.get("fingerprint"))
+                    seen = variants.get(fp)
+                    if seen is None:
+                        variants[fp] = dict(variant)
+                    else:
+                        seen["count"] = int(seen.get("count", 0)) + int(variant.get("count", 0))
+                        examples = list(seen.get("examples") or [])
+                        for example in variant.get("examples") or []:
+                            if len(examples) < 3 and example not in examples:
+                                examples.append(example)
+                        seen["examples"] = examples
+            elif key == "errors":
+                errors.extend(value or [])
+            elif key in {"n_files", "n_variants"}:
+                merged[key] = merged.get(key, 0) + int(value or 0)
+            elif isinstance(value, dict):
+                combined = dict(merged.get(key) or {})
+                for k, v in value.items():
+                    if isinstance(v, list) and isinstance(combined.get(k), list):
+                        combined[k] = sorted(set(combined[k]) | set(v))
+                    else:
+                        combined.setdefault(k, v)
+                merged[key] = combined
+            elif isinstance(value, list):
+                existing = merged.get(key) or []
+                merged[key] = sorted({*existing, *value}, key=str)
+            else:
+                merged.setdefault(key, value)
+
+    ordered = sorted(variants.values(), key=lambda e: (-int(e.get("count", 0)),
+                                                       str(e.get("fingerprint"))))
+    merged["variants"] = ordered
+    merged["n_variants"] = len(ordered)
+    merged["errors"] = errors
+    return merged
+
+
 def stage_scan(ctx: Context) -> int:
     files = ctx.raw_files()
     if not files:
@@ -774,7 +913,7 @@ def stage_scan(ctx: Context) -> int:
     if scan is None:
         print(f"source {ctx.cfg.source!r} does not implement scan()")
         return 2
-    report = scan(_as_raw(files))
+    report = _run_scan(ctx, files, scan)
     print(f"scanned {report.get('n_files', len(files))} files, "
           f"{report.get('n_variants', '?')} schema variant(s)")
     for variant in report.get("variants", []):
