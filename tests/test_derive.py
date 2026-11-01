@@ -99,7 +99,8 @@ class StrictGridded:
             return
         inspect.signature(real).bind(*args, **kwargs)
 
-    def read(self, store_id, root, *, time_range=None, variables=None, layer="packed"):
+    def read(self, store_id, root, *, time_range=None, variables=None, layer="packed",
+             decode=True):
         self._bind(
             "read", store_id, root, time_range=time_range, variables=variables, layer=layer
         )
@@ -470,6 +471,44 @@ def test_bricks_against_the_real_gridded_store(tmp_path):
     ds = bricks.read(spec, tmp_path)
     assert ds["rain"].shape == (spec.n_samples, 2, 256, 256)
     _check_contents(spec, ds)
+
+
+def test_bricks_from_an_integer_encoded_store_hold_physical_values(tmp_path):
+    """The radar stores are integer codes. A brick must hold millimetres.
+
+    The end-to-end test above uses a float store, which is why it never saw
+    this: bricks built from a uint16 store held 1234 for 12.34 mm and carried
+    the 65534/65535 sentinels through as if they were rain.
+    """
+    from meteopack.core.config import Variable
+
+    product = ProductConfig(
+        source="radar", product="rtcor_enc",
+        cadence_seconds=int(CADENCE.total_seconds()), grid_id="knmi_1km_stereo",
+        variables=[Variable(name="rain", source_key="RAD", units="mm", encoding={
+            "dtype": "uint16", "scale": 0.01, "offset": 0.0,
+            "missing": 65534, "out_of_image": 65535})],
+        store=StoreConfig(kind="gridded", chunks={"time": 1, "y": 765, "x": 700}),
+    )
+    timeline = Timeline(utc(2024, 1, 1), utc(2024, 1, 1, 0, 20), CADENCE)
+    real_gridded.initialise(product, tmp_path, timeline)
+    ny, nx = grids.get("knmi_1km_stereo").shape
+    codes = np.full((len(timeline), ny, nx), 1234, dtype="uint16")
+    codes[:, 0, :] = 65535                       # out of image along the top row
+    codes[:, 1, :] = 65534                       # missing along the second
+    real_gridded.write(
+        xr.Dataset({"rain": (("time", "y", "x"), codes)}, coords={"time": timeline.values()}),
+        product, tmp_path,
+    )
+    cfg = DeriveConfig(name="nowcast_enc", inputs=[product.store_id], grid_id="knmi_1km_stereo",
+                       cadence_seconds=int(CADENCE.total_seconds()), n_timesteps=2,
+                       tile=None, shard_samples=4)
+    spec = base.DeriveSpec(cfg, timeline)
+    bricks.build(spec, tmp_path)
+    rain = bricks.read(spec, tmp_path)["rain"].values
+    assert np.isnan(rain[:, :, 0, :]).all() and np.isnan(rain[:, :, 1, :]).all()
+    body = rain[:, :, 2:, :]
+    np.testing.assert_allclose(body, 12.34, rtol=1e-6)
 
 
 # --------------------------------------------------------------------------

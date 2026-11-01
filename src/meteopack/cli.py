@@ -213,6 +213,29 @@ def _as_raw(files: list[Path]) -> list[RawFile]:
     ]
 
 
+def _parse_gridded(ctx: Context, files: list[Path]) -> int:
+    """Parse each file and say what it held; nothing is concatenated or written.
+
+    A gridded source returns one xarray Dataset per file - a day of 765x700
+    frames - and these were handed to polars.concat, which crashed. Stacking
+    them would not be useful anyway: `parse` is the dry run, and the useful
+    answer is per file.
+    """
+    failed = 0
+    for raw in _as_raw(files):
+        try:
+            ds = ctx.src.parse(raw, ctx.cfg)
+        except Exception as exc:                          # noqa: BLE001
+            logger.error("parse failed for %s: %s", Path(raw.path).name, exc)
+            failed += 1
+            continue
+        n = int(ds.sizes.get("time", 0)) if ds is not None else 0
+        missing = int(ds["is_missing_frame"].sum()) if n and "is_missing_frame" in ds else 0
+        print(f"  {Path(raw.path).name}: {n} frame(s), {missing} missing, "
+              f"variables {sorted(str(v) for v in ds.data_vars) if n else []}")
+    return 1 if failed else 0
+
+
 def _parse_all(ctx: Context, files: list[Path]):
     import polars as pl
 
@@ -234,6 +257,8 @@ def _parse_all(ctx: Context, files: list[Path]):
 def stage_parse(ctx: Context) -> int:
     files = ctx.raw_files()
     print(f"parsing {len(files)} raw files under {ctx.raw_root}")
+    if ctx.cfg.store.kind == "gridded":
+        return _parse_gridded(ctx, files)
     df = _parse_all(ctx, files)
     if df is None:
         print("nothing parsed")
@@ -1242,11 +1267,14 @@ def _derive_timeline(cfg, root: Path, window):
         except (OSError, ValueError):
             continue
         if kind == "gridded":
-            import zarr
+            from meteopack.core.store import gridded
 
-            attrs = zarr.open_group(base, mode="r").attrs
-            spans.append((datetime.fromisoformat(str(attrs["time_start"])),
-                          datetime.fromisoformat(str(attrs["time_end"]))))
+            # Through the store module, which knows where the group lives:
+            # opening `base` directly broke when the group moved into
+            # dataset.zarr, and `derive` could open no store written since.
+            meta = gridded.info(store_id, root)
+            spans.append((datetime.fromisoformat(meta["time_start"]),
+                          datetime.fromisoformat(meta["time_end"])))
         elif kind == "points":
             import duckdb
 

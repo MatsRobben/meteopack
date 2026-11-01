@@ -1043,3 +1043,23 @@ def test_the_digest_is_a_choice_because_hashing_is_a_full_read(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="checksum must be"):
         fetch_with("md5", "d")
+
+
+def test_parse_stage_summarises_gridded_files_instead_of_concatenating(tmp_path, capsys):
+    """`meteopack parse` on a radar source handed xarray Datasets to polars.concat."""
+    from types import SimpleNamespace
+
+    from meteopack.cli import _parse_gridded
+
+    counts = np.full((NY, NX), 7, dtype="uint16")
+    paths = [
+        write_tar(tmp_path / tar_name(day), {
+            f"RAD_NL25_RAC_RT_{day}0805.h5": frame_bytes(precip_frame(counts, legacy=True)),
+            f"RAD_NL25_RAC_RT_{day}0810.h5": frame_bytes(precip_frame(counts, legacy=True)),
+        })
+        for day in ("20190601", "20190602")
+    ]
+    ctx = SimpleNamespace(src=KnmiRadar(), cfg=make_cfg())
+    assert _parse_gridded(ctx, paths) == 0
+    out = capsys.readouterr().out
+    assert out.count("2 frame(s)") == 2, out

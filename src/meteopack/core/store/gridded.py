@@ -723,12 +723,21 @@ def read(
     time_range: tuple[datetime, datetime] | None = None,
     variables: Sequence[str] | None = None,
     layer: Layer = DEFAULT_LAYER,
+    decode: bool = True,
 ) -> xr.Dataset:
     """Read a window of the store as a ``(time, y, x)`` dataset.
 
     The window is resolved to positions before any chunk is touched, so
     ``time_range`` is what bounds the read: a whole-store read of a multi-year
     radar store will not fit in memory, and is not meant to.
+
+    Integer-encoded fields come back decoded - physical values, NaN for both
+    the missing and the out-of-image code - by xarray's own CF decoder, from
+    the same attributes `xr.open_zarr` reads. So this and `xr.open_zarr` give
+    the same numbers by construction. They did not: this returned the stored
+    codes, and training bricks built from it held 1234 for 12.34 mm and
+    treated the 65534/65535 sentinels as rain. `decode=False` returns the
+    codes, for a caller that wants to copy them exactly.
     """
     import xarray as xr
 
@@ -744,9 +753,14 @@ def read(
     if missing:
         raise ValueError(f"{store_id} has no array for {missing}; present: {available}")
 
-    data: dict = {
-        name: (DIMS, np.asarray(group[name][lo:hi]), dict(group[name].attrs)) for name in names
-    }
+    data: dict = {}
+    for name in names:
+        variable = xr.Variable(DIMS, np.asarray(group[name][lo:hi]), dict(group[name].attrs))
+        if decode:
+            # One variable at a time: decoding the whole dataset would also
+            # apply CF masking to the provenance coordinates.
+            variable = xr.conventions.decode_cf_variable(name, variable, decode_times=False)
+        data[name] = variable
     present = {n for n, _ in group.arrays()}
     coords: dict = {TIME_NAME: times[lo:hi]}
     # Provenance rides along as coordinates, not as data variables. It is

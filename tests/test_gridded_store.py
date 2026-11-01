@@ -751,3 +751,58 @@ def test_write_batching_does_not_change_a_single_byte(tmp_path: Path, monkeypatc
         p.relative_to(b) for p in b.rglob("*") if p.is_file() and p.name != "zarr.json")
     for rel in files:
         assert (a / rel).read_bytes() == (b / rel).read_bytes(), rel
+
+
+def _encoded_cfg() -> ProductConfig:
+    cfg = make_cfg()
+    cfg.variables[0].encoding = {"dtype": "uint16", "scale": 0.01, "offset": 0.0,
+                                 "missing": 65534, "out_of_image": 65535}
+    return cfg
+
+
+def test_gridded_read_and_xarray_agree_on_an_integer_encoded_store(tmp_path: Path):
+    """One store, two readers, the same numbers.
+
+    `gridded.read` used to return the stored codes while `xr.open_zarr` decoded
+    them, and training bricks were built from the codes: 1234 where the value
+    is 12.34 mm, and the 65534/65535 sentinels read as rain.
+    """
+    cfg, timeline = _encoded_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    codes = np.full((FRAMES_PER_DAY, NY, NX), 1234, dtype="uint16")
+    codes[0, 0, 0], codes[0, 0, 1], codes[1, 2, 2] = 65534, 65535, 0
+    gridded.write(dataset(timeline.values()[:FRAMES_PER_DAY], codes), cfg, tmp_path)
+
+    ours = gridded.read(cfg.store_id, tmp_path,
+                        time_range=(timeline.start, timeline.start + timedelta(days=1)))["rain"]
+    theirs = xr.open_zarr(gridded.zarr_path(tmp_path, cfg.store_id))["rain"].isel(
+        time=slice(0, FRAMES_PER_DAY)).load()
+    assert ours.dtype == theirs.dtype
+    np.testing.assert_array_equal(ours.values, theirs.values)       # NaNs in the same places
+    assert np.isnan(ours.values[0, 0, 0]) and np.isnan(ours.values[0, 0, 1])
+    assert ours.values[1, 2, 2] == 0.0
+    assert ours.values[5, 3, 3] == pytest.approx(12.34)
+
+    raw = gridded.read(cfg.store_id, tmp_path, decode=False,
+                       time_range=(timeline.start, timeline.start + timedelta(days=1)))["rain"]
+    np.testing.assert_array_equal(raw.values, codes)
+
+
+def test_derive_can_size_its_axis_from_a_store_the_current_code_writes(tmp_path: Path):
+    """`derive` opened the store directory, not the dataset.zarr inside it.
+
+    Every gridded store written since the group moved into dataset.zarr raised
+    GroupNotFoundError there - reproduced on the real rtcor store.
+    """
+    from meteopack.cli import _derive_timeline
+    from meteopack.core.config import DeriveConfig
+    from meteopack.core.store import manifest
+
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    manifest.write(gridded.store_path(tmp_path, cfg.store_id),
+                   manifest.Manifest.new(cfg.store_id, "packed", "gridded", cfg))
+    derive = DeriveConfig(name="d", inputs=[cfg.store_id], grid_id=cfg.grid_id,
+                          cadence_seconds=CADENCE_SECONDS, n_timesteps=2, shard_samples=4)
+    axis = _derive_timeline(derive, tmp_path, None)
+    assert axis.start >= timeline.start and axis.end <= timeline.end
