@@ -693,3 +693,25 @@ def test_a_file_spanning_two_shards_is_grouped_with_both_neighbours(tmp_path: Pa
     )
     assert where["day2"] != where["day0"], "an untouched shard keeps its own task"
     assert sum(len(t.paths) for t in tasks) == len(files), "no file packed twice"
+
+
+def test_write_batching_does_not_change_a_single_byte(tmp_path: Path, monkeypatch):
+    """Batched chunk encoding is a speed setting only.
+
+    Checked on the real radar sample at batch sizes 1, 16, 64 and 288; this
+    keeps it true across zarr upgrades, which own the shard assembly.
+    """
+    cfg, timeline = make_cfg(), make_timeline()
+    stores = {}
+    for size in (1, gridded.WRITE_BATCH_SIZE):
+        root = tmp_path / f"b{size}"
+        monkeypatch.setattr(gridded, "WRITE_BATCH_SIZE", size)
+        gridded.initialise(cfg, root, timeline)
+        gridded.write(day_dataset(timeline, 1), cfg, root)
+        stores[size] = gridded.zarr_path(root, cfg.store_id)
+    a, b = stores.values()
+    files = sorted(p.relative_to(a) for p in a.rglob("*") if p.is_file() and p.name != "zarr.json")
+    assert files and files == sorted(
+        p.relative_to(b) for p in b.rglob("*") if p.is_file() and p.name != "zarr.json")
+    for rel in files:
+        assert (a / rel).read_bytes() == (b / rel).read_bytes(), rel

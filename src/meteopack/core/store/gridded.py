@@ -505,6 +505,22 @@ def write(
     hit = hit[order]
     breaks = (np.flatnonzero(np.diff(hit) != 1) + 1).tolist()
 
+    # Encode inner chunks in batches rather than one async round per chunk:
+    # 5-10% of write time on all three radar products, and the shard files
+    # come out byte-identical (checked at batch sizes 1, 16, 64 and 288).
+    # Scoped to this call so nothing else in the process changes behaviour.
+    with zarr.config.set({"codec_pipeline.batch_size": WRITE_BATCH_SIZE}):
+        _write_fields(group, ds, cfg, keep, hit, order, breaks)
+
+    _write_provenance(group, ds, rows, keep, hit, order, breaks)
+    return WriteResult(path, int(np.unique(hit).size), n_outside, n_off, *lost)
+
+
+#: Inner chunks encoded per batch when writing. Flat beyond ~16; see `write`.
+WRITE_BATCH_SIZE = 64
+
+
+def _write_fields(group, ds, cfg, keep, hit, order, breaks) -> None:
     for name in ds.data_vars:
         target = str(name)
         if target in PROVENANCE:
@@ -529,9 +545,6 @@ def write(
         block = block[keep]
         for run, picks in zip(np.split(hit, breaks), np.split(order, breaks), strict=True):
             array[int(run[0]) : int(run[-1]) + 1] = block[picks]
-
-    _write_provenance(group, ds, rows, keep, hit, order, breaks)
-    return WriteResult(path, int(np.unique(hit).size), n_outside, n_off, *lost)
 
 
 def _write_provenance(group, ds, rows, keep, hit, order, breaks) -> None:
