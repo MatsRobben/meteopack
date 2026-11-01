@@ -233,7 +233,9 @@ def test_every_configured_variable_names_its_units():
     from meteopack.core.config import Variable
 
     for path in sorted(glob.glob("configs/products/*/*.yaml")):
-        for spec in yaml.safe_load(open(path)).get("variables") or []:
+        with open(path) as handle:
+            spec_file = yaml.safe_load(handle)
+        for spec in spec_file.get("variables") or []:
             var = Variable(**spec)
             assert var.units is not None, f"{path}: {var.name} has no units"
             assert var.cf_attrs["long_name"], f"{path}: {var.name} has no long_name"

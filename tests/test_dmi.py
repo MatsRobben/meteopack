@@ -768,3 +768,73 @@ def test_every_parameter_in_the_real_archive_is_one_the_product_still_wants(prod
 
 def test_the_page_limit_constant_matches_what_the_config_pins(product):
     assert product.extra["page_limit"] == PAGE_LIMIT
+
+
+def test_the_compact_archive_form_reads_with_the_same_rules(tmp_path, product):
+    """An earlier pipeline archived metObs as bare [[time, value], ...] lists,
+    three years per file, with the station and parameter in the path rather
+    than the payload. 4,775 such files cover 2012-2026 and are worth reading.
+
+    The point of synthesising metObs-shaped features is that everything after
+    the read - the pivot, the units, the valid range - is the same code, so the
+    two forms cannot drift apart.
+    """
+    import json
+
+    import polars as pl
+
+    from meteopack.sources.base import RawFile
+    from meteopack.sources.dmi import DmiStations
+
+    cfg = product
+    param = next(v.source_key for v in cfg.variables)
+    path = tmp_path / "06188" / param / "2018.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps([
+        ["2018-01-01T00:00:00Z", 2.3],
+        ["2018-01-01T00:10:00Z", 2.2],
+        ["2018-01-01T00:20:00Z", None],
+    ]))
+
+    raw = RawFile(path=path, sha256="x", n_bytes=path.stat().st_size,
+                  unit_key=f"dmi/stations_10min/06188/{param}/2018")
+    frame = DmiStations().parse(raw, cfg)
+
+    assert frame.height == 3
+    assert frame["station_id"].to_list() == ["06188"] * 3
+    assert frame["time"].dtype == pl.Datetime("us", "UTC")
+    column = next(v.name for v in cfg.variables)
+    assert frame[column][2] is None, "JSON null stays null, it is not a value"
+
+
+def test_a_compact_file_outside_its_directory_is_refused(tmp_path, product):
+    """Nothing in the payload says what it measures, so a file moved away from
+    its <station>/<parameter>/ path must not be guessed at."""
+    import json
+
+    import pytest
+
+    from meteopack.sources.base import RawFile
+    from meteopack.sources.dmi import DmiStations, SchemaDriftError
+
+    path = tmp_path / "loose.json"
+    path.write_text(json.dumps([["2018-01-01T00:00:00Z", 1.0]]))
+    raw = RawFile(path=path, sha256="x", n_bytes=1, unit_key="dmi/x")
+    with pytest.raises(SchemaDriftError, match="station and parameter"):
+        DmiStations().parse(raw, product)
+
+
+def test_an_unrecognisable_payload_is_still_refused(tmp_path, product):
+    import json
+
+    import pytest
+
+    from meteopack.sources.base import RawFile
+    from meteopack.sources.dmi import DmiStations, SchemaDriftError
+
+    path = tmp_path / "06188" / "wind_speed" / "2018.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"not": "a feature collection"}))
+    raw = RawFile(path=path, sha256="x", n_bytes=1, unit_key="dmi/x")
+    with pytest.raises(SchemaDriftError, match="compact"):
+        DmiStations().parse(raw, product)

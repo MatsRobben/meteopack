@@ -616,9 +616,13 @@ class DmiStations:
 
         wanted = variables_by_parameter(cfg)
         document = _read_document(Path(raw.path))
-        features = _features(document, Path(raw.path).name)
-        self._check_overflow(features, cfg, Path(raw.path).name)
-        self._check_fingerprint(features, cfg, Path(raw.path).name)
+        features, compact = _features(document, Path(raw.path))
+        if not compact:
+            # Neither check applies to the compact archive form: it has no page
+            # limit to overflow, and no property schema of its own to drift -
+            # its two fields are positional.
+            self._check_overflow(features, cfg, Path(raw.path).name)
+            self._check_fingerprint(features, cfg, Path(raw.path).name)
 
         fallback = (raw.unit_key or "").split("/")
         default_station = station_id(fallback[-3]) if len(fallback) >= 3 else ""
@@ -740,7 +744,7 @@ class DmiStations:
         for raw in raw_files:
             path = Path(raw.path)
             try:
-                features = _features(_read_document(path), path.name)
+                features, _compact = _features(_read_document(path), path)
             except Exception as exc:  # noqa: BLE001 - a bad file is a finding, not a crash
                 errors.append({"path": str(path), "error": f"{type(exc).__name__}: {exc}"})
                 continue
@@ -797,12 +801,64 @@ def _read_document(path: Path) -> Any:
         raise SchemaDriftError(f"{path.name}: not valid JSON ({exc})") from None
 
 
-def _features(document: Any, filename: str) -> list[dict]:
-    if not isinstance(document, Mapping) or "features" not in document:
+def _features(document: Any, path: Path) -> tuple[list[dict], bool]:
+    """Features from a metObs page, or from the compact archive form.
+
+    Returns `(features, is_compact)`. The compact form is what an earlier
+    pipeline archived: a bare ``[[timestamp, value], ...]`` list, three years
+    per file, with the station and the parameter in the path rather than in the
+    payload (``<station>/<parameter>/<start year>.json``). It is not what the
+    API returns, so it is recognised rather than assumed - a list is the only
+    shape that triggers it.
+
+    Synthesising metObs-shaped features here means the pivot, the unit handling
+    and the valid-range checks downstream are the same code for both, which is
+    the point: a second parsing path is a second place for the two to diverge.
+    """
+    if isinstance(document, Mapping) and "features" in document:
+        return [f for f in (document.get("features") or []) if isinstance(f, dict)], False
+    if isinstance(document, list):
+        return _features_from_pairs(document, path), True
+    raise SchemaDriftError(
+        f"{path.name}: expected a GeoJSON FeatureCollection with a 'features' list, "
+        f"or the compact [[time, value], ...] archive form"
+    )
+
+
+def _features_from_pairs(rows: list, path: Path) -> list[dict]:
+    """`[[iso_time, value], ...]` -> metObs-shaped features.
+
+    The station and parameter come from the two directories above the file, so
+    a file moved out of its directory cannot be read - which is correct, since
+    nothing in the payload says what it measures.
+    """
+    parameter = path.parent.name
+    folder = path.parent.parent.name
+    # A DMI station id is numeric. Requiring that is what distinguishes a file
+    # sitting in its archive from one that has been moved somewhere else:
+    # nothing in the payload says which station it belongs to, so guessing
+    # would attribute a whole file of observations to the wrong place.
+    if not parameter or not folder.isdigit():
         raise SchemaDriftError(
-            f"{filename}: expected a GeoJSON FeatureCollection with a 'features' list"
+            f"{path}: the compact archive form takes its station and parameter from "
+            f"<station>/<parameter>/<file>.json, and {folder!r} is not a station id"
         )
-    return [f for f in (document.get("features") or []) if isinstance(f, dict)]
+    station = station_id(folder)
+    out: list[dict] = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            raise SchemaDriftError(
+                f"{path.name}: expected [time, value] pairs, got {row!r}"
+            )
+        out.append({
+            "properties": {
+                _PARAMETER: parameter,
+                _OBSERVED: row[0],
+                _VALUE: row[1],
+                _STATION: station,
+            }
+        })
+    return out
 
 
 def _property_keys(features: Iterable[Mapping[str, Any]]) -> set[str]:
