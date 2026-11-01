@@ -194,7 +194,8 @@ def test_gridded_timeline_snaps_to_the_shard_grid_not_the_cadence(tmp_path, monk
     from meteopack.jobs.plan import shard_span_seconds, timeline_origin
 
     args = build_parser().parse_args(
-        ["pack", "knmi_radar", "--window", "2024-07-02/2024-07-04",
+        ["pack", "knmi_radar", "--product", "rtcor_5min",
+         "--window", "2024-07-02/2024-07-04",
          "--data-root", str(tmp_path)])
     ctx = Context(args)
     from meteopack.cli import _timeline_for
@@ -231,7 +232,8 @@ def test_gridded_timeline_can_be_derived_from_the_catalog(tmp_path):
                         valid_time=datetime(2024, 7, day, 8, 5, tzinfo=UTC))
     cat.flush()
 
-    args = build_parser().parse_args(["pack", "knmi_radar", "--data-root", str(tmp_path)])
+    args = build_parser().parse_args(
+        ["pack", "knmi_radar", "--product", "rtcor_5min", "--data-root", str(tmp_path)])
     tl = _timeline_for(Context(args))
     assert tl.start <= datetime(2024, 7, 2, 8, 5, tzinfo=UTC)
     assert tl.end >= datetime(2024, 7, 3, 8, 5, tzinfo=UTC)
@@ -240,7 +242,8 @@ def test_gridded_timeline_can_be_derived_from_the_catalog(tmp_path):
 def test_pack_without_a_window_or_catalog_says_what_to_do(tmp_path):
     from meteopack.cli import Context, _timeline_for, build_parser
 
-    args = build_parser().parse_args(["pack", "knmi_radar", "--data-root", str(tmp_path)])
+    args = build_parser().parse_args(
+        ["pack", "knmi_radar", "--product", "rtcor_5min", "--data-root", str(tmp_path)])
     with pytest.raises(SystemExit, match="Pass --window"):
         _timeline_for(Context(args))
 

@@ -468,3 +468,20 @@ def test_http_session_keeps_a_user_agent_the_caller_meant():
     deliberate = requests.Session()
     deliberate.headers["User-Agent"] = "set-by-the-caller"
     assert http_session(cfg, deliberate).headers["User-Agent"] == "set-by-the-caller"
+
+
+def test_a_source_with_several_products_refuses_to_pick_one():
+    """knmi_radar carries three archives - rtcor, echotop and the reflectivity
+    composites - and guessing between them would write one product's data into
+    another's store. The refusal is the feature; this pins the message so it
+    stays actionable.
+    """
+    import pytest
+
+    from meteopack.jobs.plan import load_product_config
+
+    with pytest.raises(ValueError, match="name one explicitly") as caught:
+        load_product_config("knmi_radar")
+    for product in ("rtcor_5min", "echotop_5min", "refl_5min"):
+        assert product in str(caught.value), f"{product} should be offered in the message"
+        assert load_product_config("knmi_radar", product).product == product
