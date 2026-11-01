@@ -292,23 +292,66 @@ def _pack_tasks(ctx: Context, files: list[Path], timeline=None) -> list:
     if per_shard <= 1:
         return [task(p) for p in files]
 
-    groups: dict[int, list[Path]] = {}
-    loose: list[Path] = []
-    for path in files:
+    n_steps = len(timeline)
+
+    def shards_touched(path: Path) -> set[int] | None:
+        """Every shard this file writes into, not just the one it starts in.
+
+        Keying on the first frame alone is not enough: a file whose span
+        crosses a boundary writes into two shards, and grouping it with only
+        the first leaves it racing the neighbour that owns the second. That is
+        exactly the case this exists for - the KNMI tars that start at 08:00
+        rather than 08:05.
+
+        The span is converted to axis positions arithmetically rather than
+        through `index_of`, because a span's endpoints need not land exactly on
+        the cadence and a file that starts half a step early still writes into
+        the shard it overlaps.
+        """
         try:
             span = span_of(path)
         except Exception:  # noqa: BLE001 - an undatable file gets its own task
-            span = None
+            return None
         if span is None:
-            loose.append(path)
-            continue
-        first = timeline.index_of(np.array([np.datetime64(
-            span[0].replace(tzinfo=None), "ns")]))[0]
-        groups.setdefault(int(first) // per_shard if first >= 0 else -1, []).append(path)
+            return None
+        edges = []
+        for when in span:
+            ns = int(np.datetime64(when.replace(tzinfo=None), "ns").astype("int64"))
+            edges.append((ns - timeline.start_ns) // timeline.step_ns)
+        first, last = min(edges), max(edges)
+        if last < 0 or first >= n_steps:
+            return None                      # nothing of this file is on the axis
+        first = max(first, 0)
+        last = min(last, n_steps - 1)
+        return set(range(first // per_shard, last // per_shard + 1))
 
-    out = [task(p) for p in loose]
-    for _, members in sorted(groups.items()):
-        out.append(task(members[0], tuple(members[1:])))
+    # Files that share any shard must share a task. Union them by shard.
+    owner: dict[int, int] = {}          # shard -> group id
+    members: dict[int, list[Path]] = {}  # group id -> files
+    out: list = []
+    for path in files:
+        touched = shards_touched(path)
+        if not touched:
+            out.append(task(path))
+            continue
+        existing = sorted({owner[sh] for sh in touched if sh in owner})
+        if not existing:
+            gid = len(members)
+            members[gid] = []
+        else:
+            gid = existing[0]
+            for other in existing[1:]:          # two groups now joined
+                members[gid].extend(members.pop(other))
+                for sh, g in list(owner.items()):
+                    if g == other:
+                        owner[sh] = gid
+        members[gid].append(path)
+        for sh in touched:
+            owner[sh] = gid
+
+    for group in members.values():
+        if group:
+            out.append(task(group[0], tuple(group[1:])))
     return out
 
 

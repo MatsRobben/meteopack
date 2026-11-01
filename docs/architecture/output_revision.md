@@ -188,3 +188,55 @@ name, which breaks the day anything is stored in different units. The previous
 name is kept in `legacy_name` so existing code can be ported by grep, and the
 whole mapping is a config file - if you would rather have the old names, it is
 one edit per variable and no code change.
+
+---
+
+## 7. What was built, and what it was checked against
+
+Implemented and verified on real data rather than in fixtures.
+
+### Verified against radar_v3
+
+Same tars, same frames, compared cell by cell.
+
+| generation | frames | result |
+|---|---|---|
+| 2024-07-02, three images, modern calibration | 576 | `precipitation_amount`, `radar_quality_index`, `gauge_adjustment_factor`: **12,852,000 cells each over 24 frames, 0 differing** |
+| 2018-12-20, two images, `PRECIP_[MM]`, missing code 0 | 484 | `source_layout_id` agrees for every frame; precipitation and quality **10,710,000 cells each, 0 differing**; adjustment factor 1,863 of 10,708,137 differ by one count |
+
+Those 1,863 were chased to the end. The 2018 adjustment factor is
+`GEO=0.001*PV-32.768`, so re-encoding is real arithmetic, and one input code in
+160 is an exact `.5` boundary in exact arithmetic. radar_v3 resolved those in
+float32, this does it in float64. **Every differing cell is such a near-tie,
+and both answers sit 0.5 counts — 0.08 dB — from the true value.** Neither is
+more accurate; float64 is used because it reproduces the intended value 10⁷
+times more closely everywhere else.
+
+The dry-pixel rule holds on a real 2018 frame that advertises
+`calibration_missing_data = 0`: 426,929 zeros preserved as dry, 104,669
+out-of-image, 0 missing.
+
+### Found by opening the store rather than by reading the writer
+
+- A plain `xr.open_zarr` decoded `out_of_image` as data: 65535 × 0.01 = **655.35
+  mm of rain** over the whole footprint mask. Fixed with a vector
+  `missing_value`; now 66,404 NaN cells, exactly the out-of-image count, and a
+  physical maximum of 1.11 mm.
+- Root attributes were written once at creation, so adding a title to the
+  config changed nothing on disk.
+- `read()` returned the provenance arrays as data variables, so `derive` tried
+  to build training bricks out of `is_corrupt_frame`.
+
+### Found by reviewing the parallel plan before running it
+
+A zarr shard is one file and may have one writer. `pack` submitted one task per
+raw file; 2 of the 2,680 radar tars start at 08:00 rather than 08:05 and
+straddle a shard boundary, so they would have raced their neighbours. Files
+sharing any shard are now unioned into one task — by the **whole span**, not by
+the first frame, which was the first version of the fix and still left a
+straddler racing the shard at its far end.
+
+### Storage
+
+28 MB for 576 frames extrapolates to ~37 GB for the 772,129-frame archive,
+against 34 GB for radar_v3 and ~68 GB had this stayed float32.

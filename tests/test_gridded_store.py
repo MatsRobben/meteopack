@@ -621,3 +621,50 @@ def test_files_sharing_a_shard_are_packed_by_one_task(tmp_path: Path):
     assert {Path(p).stem for p in by_size[0].paths} == {"day0a", "day0b"}
     assert {Path(p).stem for p in by_size[1].paths} == {"day1"}
     assert isinstance(datetime.now(), datetime)
+
+
+def test_a_file_spanning_two_shards_is_grouped_with_both_neighbours(tmp_path: Path):
+    """Keying on the first frame alone is not enough.
+
+    A file whose span crosses a shard boundary writes into two shards; grouped
+    with only the first, it still races whoever owns the second. This is the
+    real KNMI case: the 08:00 tar overlaps the shard the 08:05 tar owns.
+    """
+    import argparse
+    from datetime import timedelta
+
+    from meteopack.cli import _pack_tasks
+
+    timeline = make_timeline()
+    cfg = make_cfg(chunks={"time": 1}, shard={"time": FRAMES_PER_DAY})
+    step = timedelta(seconds=CADENCE_SECONDS)
+
+    class FakeSource:
+        spans: ClassVar[dict] = {
+            # straddles the day0/day1 boundary at frame 24
+            "straddler": (20, 27),
+            "day0": (0, 19),
+            "day1": (28, 47),
+            "day2": (48, 71),
+        }
+
+        def span_of(self, path):
+            lo, hi = self.spans[Path(path).stem]
+            return (timeline.start + lo * step, timeline.start + hi * step)
+
+    class Ctx:
+        src = FakeSource()
+        root = tmp_path
+        args = argparse.Namespace(configs=None)
+
+    Ctx.cfg = cfg
+    files = [tmp_path / f"{n}.tar" for n in ("day0", "straddler", "day1", "day2")]
+    tasks = _pack_tasks(Ctx(), files, timeline)
+
+    where = {Path(p).stem: i for i, t in enumerate(tasks) for p in t.paths}
+    assert where["day0"] == where["straddler"] == where["day1"], (
+        "the straddler joins both neighbours into one task: "
+        f"{[sorted(Path(p).stem for p in t.paths) for t in tasks]}"
+    )
+    assert where["day2"] != where["day0"], "an untouched shard keeps its own task"
+    assert sum(len(t.paths) for t in tasks) == len(files), "no file packed twice"
