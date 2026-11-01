@@ -1,0 +1,77 @@
+# KNMI 5-minute echo top height composite (RAD_NL25_ETH).
+#
+# Same reader as rtcor_5min: the three KNMI radar archives share a naming
+# scheme and a grid, and differ in which tar token and member prefix they use,
+# which `extra` carries. One image per frame.
+source: knmi_radar
+description: >-
+  KNMI radar echo top height over the Netherlands, 5-minute composite on the
+  765x700 national grid.
+product: echotop_5min
+version: 1
+
+cadence_seconds: 300
+grid_id: knmi_1km_stereo
+
+attrs:
+  title: KNMI 5-minute radar echo top height composite over the Netherlands
+  institution: Royal Netherlands Meteorological Institute (KNMI)
+  source: >-
+    Composite of the Herwijnen and Den Helder C-band Doppler weather radars.
+    The echo top is the highest altitude at which a reflectivity threshold is
+    exceeded.
+  comment: >-
+    Integer codes; decode with value = scale_factor * stored + add_offset.
+    A stored 0 is a real observation - no echo, hence no echo top - and not a
+    missing value, which is why calibration_missing_data is not honoured
+    literally. See extra.missing_data_policy.
+
+store:
+  kind: gridded
+  chunks: {time: 1, y: 765, x: 700}
+  shard: {time: 288, y: 765, x: 700}   # exactly one tar
+  compressor: zstd
+  compression_level: 3
+  partition_by: [year]
+
+raw_layout: {archive: tar, granularity: day}
+
+retention:
+  raw: {keep: true, tier: cold}
+  canonical: {keep: true}
+  derived: {keep: true}
+
+variables:
+  # The source calibration MOVES across the archive. Sampled 2026-11-02:
+  #   2008  GEO = 0.062992 * PV + 0.000000
+  #   2017  GEO = 0.062992 * PV + -0.062992
+  #   2026  GEO = 0.102362 * PV + -0.102362
+  # Every frame is re-encoded onto the one below, which is the modern
+  # calibration and the one radar_v3 settled on, so a reader needs a single
+  # pair of numbers for the whole archive instead of knowing its generation.
+  - name: echo_top_height
+    source_key: "HEIGHT_[KM]"
+    units: km
+    legacy_name: echotop_height_km
+    long_name: Height of the highest radar echo exceeding the product threshold
+    valid_min: 0.0
+    valid_max: 25.0
+    encoding:
+      dtype: uint8
+      scale: 0.102362
+      offset: -0.102362
+      missing: 254
+      out_of_image: 255
+
+extra:
+  archive_root: ${KNMI_ECHOTOP_ARCHIVE}
+  tar_token: TARETH
+  member_prefix: RAD_NL25_ETH_NA_
+  day_start: "00:00"        # midnight-aligned, unlike rtcor's 08:05
+  # `..._20240602T000000` is the exclusive end: the tar stops at 23:55.
+  # rtcor's end token names the last frame it holds, so it needs the opposite.
+  end_token_is_exclusive: true
+  # A calibration_missing_data of 0 collides with a genuine "no echo top",
+  # which is the common case over a dry country. Honouring it literally would
+  # erase every dry pixel, exactly as it would for rtcor.
+  missing_data_policy: no_echo_if_zero

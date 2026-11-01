@@ -1,0 +1,76 @@
+# KNMI 5-minute reflectivity composite (RAD_NL25_PCP).
+#
+# Same reader as rtcor_5min and echotop_5min: the three KNMI radar archives
+# share a naming scheme and a grid and differ in the tar token and member
+# prefix, which `extra` carries. One image per frame.
+source: knmi_radar
+description: >-
+  KNMI radar reflectivity composite over the Netherlands, 5-minute, on the
+  765x700 national grid.
+product: refl_5min
+version: 1
+
+cadence_seconds: 300
+grid_id: knmi_1km_stereo
+
+attrs:
+  title: KNMI 5-minute radar reflectivity composite over the Netherlands
+  institution: Royal Netherlands Meteorological Institute (KNMI)
+  source: >-
+    Composite of the Herwijnen and Den Helder C-band Doppler weather radars,
+    uncorrected reflectivity.
+  comment: >-
+    Integer codes; decode with value = scale_factor * stored + add_offset.
+    The bottom of the scale is no echo rather than no measurement, which is
+    why calibration_missing_data is not honoured literally. See
+    extra.missing_data_policy.
+
+store:
+  kind: gridded
+  chunks: {time: 1, y: 765, x: 700}
+  shard: {time: 288, y: 765, x: 700}   # exactly one tar
+  compressor: zstd
+  compression_level: 3
+  partition_by: [year]
+
+raw_layout: {archive: tar, granularity: day}
+
+retention:
+  raw: {keep: true, tier: cold}
+  canonical: {keep: true}
+  derived: {keep: true}
+
+variables:
+  # The source offset MOVES across the archive. Sampled 2026-11-02:
+  #   2008   GEO = 0.500000 * PV + -31.500000
+  #   2017+  GEO = 0.500000 * PV + -32.000000
+  # Every frame is re-encoded onto the one below - the modern calibration,
+  # and the one radar_v3 settled on - so a reader needs one pair of numbers
+  # for the whole archive rather than having to know its generation.
+  - name: equivalent_reflectivity_factor
+    source_key: "REFLECTIVITY_[DBZ]"
+    units: dBZ
+    standard_name: equivalent_reflectivity_factor
+    legacy_name: reflectivity_dbz
+    long_name: Radar equivalent reflectivity factor
+    valid_min: -32.0
+    valid_max: 95.0
+    encoding:
+      dtype: uint8
+      scale: 0.5
+      offset: -32.0
+      missing: 254
+      out_of_image: 255
+
+extra:
+  archive_root: ${KNMI_REFL_ARCHIVE}
+  tar_token: TARPCP
+  member_prefix: RAD_NL25_PCP_NA_
+  day_start: "00:00"        # midnight-aligned, unlike rtcor's 08:05
+  # `..._20240602T000000` is the exclusive end: the tar stops at 23:55.
+  # rtcor's end token names the last frame it holds, so it needs the opposite.
+  end_token_is_exclusive: true
+  # The bottom code is no echo, not no measurement: a dry country is mostly
+  # bottom-of-scale, and honouring calibration_missing_data = 0 literally
+  # would erase it.
+  missing_data_policy: no_echo_if_zero

@@ -69,3 +69,54 @@ Measured on 96 frames, serial, with the file hot so the phases are visible:
 ~15 ms of CPU per frame against ~40 ms of I/O at 60 MiB/s: the CPU is less
 than half-busy even at one worker, which is the same conclusion from the other
 side.
+
+---
+
+# The three radar archives (added 2026-11-02)
+
+There are three, not one, and they are the same reader with different tokens:
+
+| product | tar token | member prefix | tars | raw | day boundary |
+|---------|-----------|---------------|------|-----|--------------|
+| `rtcor_5min`   | `TARRRT` | `RAD_NL25_RAC_RT_` | 2,680 | 127 G | 08:05 |
+| `echotop_5min` | `TARETH` | `RAD_NL25_ETH_NA_` | 6,668 | 38 G  | 00:00 |
+| `refl_5min`    | `TARPCP` | `RAD_NL25_PCP_NA_` | 6,670 | 104 G | 00:00 |
+
+Three things differ between them and all three cost data if assumed away.
+
+**The calibration moves within an archive.** Already handled by the re-encoding
+machinery, and already documented in the previous pipeline - this is a note,
+not a discovery:
+
+    echotop  2008  GEO = 0.062992 * PV + 0.000000
+             2017  GEO = 0.062992 * PV + -0.062992
+             2026  GEO = 0.102362 * PV + -0.102362
+    refl     2008  GEO = 0.500000 * PV + -31.500000
+             2017+ GEO = 0.500000 * PV + -32.000000
+
+**The end token means different things.** `rtcor`'s
+`..._20240704T080000` names the LAST frame the tar holds, so the half-open end
+is one cadence later. `echotop` and `refl` write
+`..._20240602T000000`, which is already the exclusive end. Treating them alike
+adds a cadence that does not exist and pulls a whole neighbouring day into
+every window. `extra.end_token_is_exclusive` carries the difference.
+
+**A stored 0 is an observation, not an absence.** Both declare
+`calibration_missing_data = 0` with `calibration_out_of_image = 255`. Measured
+on 2024-05-31 12:00:
+
+| | out_of_image (255) | zeros | zeros outside the footprint |
+|---|---|---|---|
+| echotop | 273,287 | 238,869 | **0** |
+| refl    | 104,443 | 357,203 | **0** |
+
+Not one zero falls outside the radar's own coverage mask, and they are 91% and
+83% of the in-image pixels. That is the radar looking and seeing no echo,
+which for a precipitation dataset is the most common observation there is.
+
+radar_v3 mapped every one of them to 255, and never used 254 at all, so
+`missing` and `out_of_image` collapsed into a single code there. This store
+keeps the zeros and keeps the two sentinels apart - the same judgement the
+previous pipeline already made for rtcor's accumulation image, where it
+preserved 426,929 dry pixels. It is `extra.missing_data_policy`, one line per
+product, if the other reading is wanted.

@@ -106,15 +106,54 @@ logger = logging.getLogger(__name__)
 #: `\d+` rather than `\d{6}` on purpose: at least one archived name has a stray
 #: digit (`20181220T0080000`), and a day that cannot be read from its own
 #: filename is still a day — see `_time_of_day`.
-ARCHIVE_RE = re.compile(
-    r"^RAD25_OPER_R___TARRRT__L2__"
+#: The KNMI radar archives share a naming scheme and differ only in two
+#: tokens: which product the tar holds, and what its members are called.
+#: `extra.tar_token` and `extra.member_prefix` carry them, so echotop and the
+#: reflectivity composites are configuration rather than three copies of this
+#: module. The defaults are rtcor's, which is what existed first.
+DEFAULT_TAR_TOKEN = "TARRRT"
+DEFAULT_MEMBER_PREFIX = "RAD_NL25_RAC_RT_"
+
+
+def archive_re(token: str = DEFAULT_TAR_TOKEN) -> re.Pattern[str]:
+    r"""`RAD25_OPER_R___<token>__L2__<from>_<to>_<version>.tar`.
+
+    The time tokens are `\d+` rather than `\d{6}` on purpose: at least one
+    archived name has a stray digit (`20181220T0080000`), and a day that
+    cannot be read from its own filename is still a day - see `_time_of_day`.
+    """
+    return re.compile(
+        rf"^RAD25_OPER_R___{re.escape(token)}__L2__"
+        r"(?P<from_date>\d{8})T(?P<from_time>\d+)_"
+        r"(?P<to_date>\d{8})T(?P<to_time>\d+)"
+        r"_(?P<version>\d+)\.tar$"
+    )
+
+
+def member_re(prefix: str = DEFAULT_MEMBER_PREFIX) -> re.Pattern[str]:
+    """`<prefix><YYYYMMDDHHMM>.h5`, one frame."""
+    return re.compile(rf"^{re.escape(prefix)}(?P<stamp>\d{{12}})\.h5$")
+
+
+ARCHIVE_RE = archive_re()
+
+#: Any of the three radar archives. `span_of` is handed a path and nothing
+#: else, and only needs the dates out of the name, so it does not need to know
+#: which product the tar holds.
+#: Any radar member, whichever product it belongs to. `scan` is a discovery
+#: operation - it is answering "what is in here" - so it accepts all three
+#: products; `parse` is strict, because it has to know what it is reading.
+ANY_MEMBER_RE = re.compile(r"^RAD_NL25_\w+?_(?P<stamp>\d{12})\.h5$")
+
+ANY_ARCHIVE_RE = re.compile(
+    r"^RAD25_OPER_R___\w+?__L2__"
     r"(?P<from_date>\d{8})T(?P<from_time>\d+)_"
     r"(?P<to_date>\d{8})T(?P<to_time>\d+)"
     r"_(?P<version>\d+)\.tar$"
 )
 
 #: `RAD_NL25_RAC_RT_<YYYYMMDDHHMM>.h5`, one frame.
-MEMBER_RE = re.compile(r"^RAD_NL25_RAC_RT_(?P<stamp>\d{12})\.h5$")
+MEMBER_RE = member_re()
 
 #: `GEO = <scale> * PV + <offset>`, with or without spaces, and with the offset
 #: sign written either once (`+ 0.0`) or twice (`+-32.768`).
@@ -466,9 +505,14 @@ def _time_of_day(token: str, filename: str) -> timedelta | None:
     return None
 
 
-def member_time(name: str) -> datetime | None:
-    """`RAD_NL25_RAC_RT_201906010805.h5` -> that instant in UTC, else `None`."""
-    m = MEMBER_RE.match(Path(name).name)
+def member_time(name: str, prefix: str | None = DEFAULT_MEMBER_PREFIX) -> datetime | None:
+    """`RAD_NL25_RAC_RT_201906010805.h5` -> that instant in UTC, else `None`.
+
+    `prefix` names the product: the echotop members are `RAD_NL25_ETH_NA_` and
+    the reflectivity composites are `RAD_NL25_PCP_NA_`.
+    """
+    pattern = ANY_MEMBER_RE if prefix is None else member_re(prefix)
+    m = pattern.match(Path(name).name)
     if not m:
         return None
     stamp = m.group("stamp")
@@ -537,6 +581,24 @@ class KnmiRadar:
             "in the product or source config"
         )
 
+    @staticmethod
+    def _end_is_exclusive(cfg: ProductConfig) -> bool:
+        """Does the filename's end token name the last frame, or one past it?
+
+        The three KNMI radar archives disagree, and the difference is a whole
+        day of frames: rtcor names the last frame it holds and the other two
+        name the exclusive end.
+        """
+        return bool(cfg.extra.get("end_token_is_exclusive", False))
+
+    @staticmethod
+    def _tar_token(cfg: ProductConfig) -> str:
+        return str(cfg.extra.get("tar_token", DEFAULT_TAR_TOKEN))
+
+    @staticmethod
+    def _member_prefix(cfg: ProductConfig) -> str:
+        return str(cfg.extra.get("member_prefix", DEFAULT_MEMBER_PREFIX))
+
     def _day_start(self, cfg: ProductConfig) -> timedelta:
         return _hhmm(str(cfg.extra.get("day_start", DEFAULT_DAY_START)))
 
@@ -577,8 +639,9 @@ class KnmiRadar:
         day_start = self._day_start(cfg)
         units: dict[str, Unit] = {}
         skipped = 0
+        pattern = archive_re(self._tar_token(cfg))
         for filename in self._listing(root):
-            m = ARCHIVE_RE.match(filename)
+            m = pattern.match(filename)
             if not m:
                 skipped += 1
                 continue
@@ -607,7 +670,7 @@ class KnmiRadar:
         whole archive for one day. `None` means "cannot tell", and the caller
         packs the file rather than risk dropping it.
         """
-        m = ARCHIVE_RE.match(Path(path).name)
+        m = ANY_ARCHIVE_RE.match(Path(path).name)
         if not m:
             return None
         first = _yyyymmdd(m.group("from_date"))
@@ -637,9 +700,15 @@ class KnmiRadar:
         if end_offset is None:
             last_exclusive = first + timedelta(days=1)
         else:
-            # The end token names the LAST frame, so the half-open end is one
-            # cadence later.
-            last_exclusive = _yyyymmdd(m.group("to_date")) + end_offset + cfg.cadence
+            last_exclusive = _yyyymmdd(m.group("to_date")) + end_offset
+            if not self._end_is_exclusive(cfg):
+                # rtcor's end token names the LAST frame, so the half-open end
+                # is one cadence later: `..._20240704T080000` holds a frame at
+                # 08:00. The echotop and reflectivity archives instead name the
+                # exclusive end - `..._20240602T000000` stops at 23:55 - and
+                # adding a cadence there claims a frame the tar does not have,
+                # which pulls a whole neighbouring day into every window.
+                last_exclusive = last_exclusive + cfg.cadence
         if last_exclusive <= first:
             last_exclusive = first + cfg.cadence
 
@@ -751,7 +820,7 @@ class KnmiRadar:
         if not wanted:
             raise ValueError(f"{cfg.store_id} declares no variables")
 
-        stamped = _members(path)
+        stamped = _members(path, self._member_prefix(cfg))
         if not stamped:
             logger.warning("knmi_radar: no radar members in %s", path.name)
             return xr.Dataset(coords={"time": np.array([], dtype="datetime64[ns]")})
@@ -968,9 +1037,9 @@ class KnmiRadar:
         for raw in raw_files:
             path = Path(raw.path)
             try:
-                stamped = _members(path)
+                stamped = _members(path, None)
                 if not stamped:
-                    raise ValueError("no RAD_NL25_RAC_RT_*.h5 members")
+                    raise ValueError("no RAD_NL25_*.h5 members")
                 wanted = len(stamped) if members_per_file is None else max(1, members_per_file)
                 step = max(1, len(stamped) // wanted)
                 with tarfile.open(path, "r") as tar:
@@ -1145,14 +1214,16 @@ def _encode_image(
     )
 
 
-def _members(path: Path) -> list[tuple[datetime, tarfile.TarInfo]]:
+def _members(
+    path: Path, prefix: str | None = DEFAULT_MEMBER_PREFIX
+) -> list[tuple[datetime, tarfile.TarInfo]]:
     """Radar members of one tar, in timestamp order. Anything else is ignored."""
     with tarfile.open(path, "r") as tar:
         stamped = []
         for member in tar:
             if not member.isfile():
                 continue
-            when = member_time(member.name)
+            when = member_time(member.name, prefix)
             if when is not None:
                 stamped.append((when, member))
     return sorted(stamped, key=lambda item: item[0])

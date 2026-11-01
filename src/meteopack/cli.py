@@ -643,13 +643,17 @@ def stage_pack(ctx: Context) -> int:
             if added:
                 print(f"extended the time axis by {added} steps "
                       f"to cover {timeline.end:%Y-%m-%dT%H:%M}")
-        results = packing.run(_pack_tasks(ctx, files, timeline),
-                              packing.write_gridded, workers=workers)
+        tasks = _pack_tasks(ctx, files, timeline)
+        results = packing.run(tasks, packing.write_gridded, workers=workers)
         frames = sum(r.get("frames", 0) for r in results)
         outside = sum(r.get("outside", 0) for r in results)
         off_cadence = sum(r.get("off_cadence", 0) for r in results)
         errors = [r for r in results if r.get("error")]
-        print(f"wrote {frames} frames from {len(results) - len(errors)} file(s)")
+        # Count files, not tasks: a task can hold several files now that
+        # everything sharing a shard goes to one worker, and "from 1 file(s)"
+        # for three tars is the kind of number you stop trusting.
+        packed_files = sum(1 + len(t.also) for t in tasks) - len(errors)
+        print(f"wrote {frames} frames from {packed_files} file(s)")
         if off_cadence:
             print(f"  {off_cadence} frame(s) were not on the "
                   f"{ctx.cfg.cadence_seconds}s cadence and were dropped")
