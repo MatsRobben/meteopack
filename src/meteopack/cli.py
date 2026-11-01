@@ -26,6 +26,9 @@ logger = logging.getLogger("meteopack")
 #: When this process got as far as importing the CLI: the zero for METEOPACK_TRACE.
 _STARTED = time.time()
 
+#: Stages that write into the data root. Everything else only reads it.
+_WRITING_STAGES = frozenset({"fetch", "pack"})
+
 STAGES = ("scan", "list", "fetch", "parse", "pack", "derive", "validate", "catalog",
           "credentials")
 
@@ -114,9 +117,11 @@ class Context:
         self.window = parse_window(args.window)
         self._src = None
         # The data root outlives the checkout that made it, so it carries its
-        # own explanation of what `raw/`, `canonical/`, `derived/` and
-        # `catalog/` hold. Best effort, and never read back.
-        readme.write(self.root)
+        # own explanation of what each directory holds. Only stages that write
+        # data refresh it: `validate` or a dry run with no data root set used to
+        # create ./data/ in whatever directory they ran in. Best effort.
+        if args.stage in _WRITING_STAGES and not getattr(args, "dry_run", False):
+            readme.write(self.root)
 
     @property
     def src(self):

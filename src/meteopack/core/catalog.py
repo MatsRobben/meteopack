@@ -270,8 +270,9 @@ class Catalog:
         self._dirty: set[str] = set()
         self._attempts: dict[str, int] = {}
         self._lock = threading.Lock()
-        for name in SCHEMAS:
-            (self.root / name).mkdir(parents=True, exist_ok=True)
+        # Directories are made on first write, not here: opening the catalog to
+        # read it - `list`, `validate`, a dry run - must not create a data root
+        # in whatever directory the command happened to run in.
 
     # ------------------------------------------------------------------ write
 
@@ -302,6 +303,7 @@ class Catalog:
                 continue
             frame = pl.DataFrame(rows, schema=SCHEMAS[table])
             path = self.shard_path(table)
+            path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
             frame.write_parquet(tmp)
             os.replace(tmp, path)

@@ -551,3 +551,12 @@ def test_another_sources_product_of_the_same_name_does_not_size_the_axis(tmp_pat
     args = build_parser().parse_args(["pack", "dwd", "--data-root", str(tmp_path)])
     tl = _timeline_for(Context(args))
     assert tl.start.year == 2024, tl
+
+
+@pytest.mark.parametrize("argv", [["validate", "dwd"], ["list", "dwd", "--dry-run"],
+                                  ["pack", "dwd", "--dry-run"], ["scan", "dwd"]])
+def test_read_only_commands_do_not_create_a_data_root(tmp_path, argv):
+    """`validate` with no data root set used to create ./data/_bookkeeping wherever it ran."""
+    root = tmp_path / "never_created"
+    main([*argv, "--data-root", str(root)])
+    assert not root.exists(), sorted(p.relative_to(root) for p in root.rglob("*"))

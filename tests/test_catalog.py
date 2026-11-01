@@ -186,6 +186,8 @@ def test_writers_never_share_a_shard(tmp_path: Path):
 def test_temp_files_are_invisible_to_readers(tmp_path: Path, table: str):
     cat = Catalog(tmp_path)
     cat.mark("fetch:u0", "done", stage="fetch")
+    # Table directories appear on first write to that table, not on construction.
+    (cat.root / table).mkdir(parents=True, exist_ok=True)
     (cat.root / table / ".half-written.parquet.deadbeef.tmp").write_bytes(b"not parquet")
     cat.jobs()  # must not try to read the temp file
 
