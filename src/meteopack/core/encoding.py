@@ -25,6 +25,7 @@ the ones no document mentions.
 """
 from __future__ import annotations
 
+import functools
 import logging
 from dataclasses import dataclass
 
@@ -138,7 +139,41 @@ def encode(
                               source_missing, source_out_of_image,
                               source_no_echo, no_echo)
 
+    table = _table(raw.dtype, float(source_scale), float(source_offset),
+                   _codes(source_missing), _codes(source_out_of_image),
+                   _codes(source_no_echo), no_echo, target)
     info = np.iinfo(raw.dtype)
+    if info.min == 0:
+        # Unsigned pixels are already table positions. Indexing with them
+        # directly skips an int64 copy of the whole image per frame.
+        return table[raw]
+    return table[raw.astype("int64") - int(info.min)]
+
+
+def _codes(codes) -> frozenset[int]:
+    return frozenset(int(c) for c in codes)
+
+
+@functools.lru_cache(maxsize=64)
+def _table(
+    dtype: np.dtype,
+    source_scale: float,
+    source_offset: float,
+    source_missing: frozenset[int],
+    source_out_of_image: frozenset[int],
+    source_no_echo: frozenset[int],
+    no_echo: float | None,
+    target: Encoding,
+) -> np.ndarray:
+    """The lookup table for one (source calibration, target) pair, built once.
+
+    Every frame of a radar tar carries the same calibration, and building the
+    table - 65,536 entries for uint16, with two set-membership tests and a
+    quantise pass - was 1-2 ms per frame and variable: about a fifth of all
+    parse time, spent recomputing the same array. Read-only, because it is
+    shared between calls.
+    """
+    info = np.iinfo(dtype)
     span = int(info.max) - int(info.min) + 1
 
     codes = np.arange(int(info.min), int(info.max) + 1, dtype="int64")
@@ -157,8 +192,8 @@ def encode(
         table[valid] = _quantise(
             codes[valid].astype("float64") * source_scale + source_offset, target
         )
-
-    return table[raw.astype("int64") - int(info.min)]
+    table.setflags(write=False)
+    return table
 
 
 def _encode_direct(

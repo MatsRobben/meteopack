@@ -261,3 +261,29 @@ def test_no_echo_codes_without_a_value_are_refused():
     with pytest.raises(ValueError, match="no_echo"):
         encode(np.zeros(3, "uint8"), target, source_scale=1.0, source_offset=0.0,
                source_no_echo={0})
+
+
+@pytest.mark.parametrize("dtype", ["uint8", "uint16"])
+def test_the_cached_table_agrees_with_the_per_pixel_path(dtype):
+    """The table is cached across frames; it must still be the same answer.
+
+    `_encode_direct` converts each pixel arithmetically with no table at all,
+    so it is an independent implementation of the same rules.
+    """
+    from meteopack.core.encoding import _encode_direct
+
+    rng = np.random.default_rng(7)
+    info = np.iinfo(dtype)
+    target = Encoding(np.dtype("uint8"), 0.102362, -0.102362, 254, 255)
+    for scale, offset in [(0.102362, -0.102362), (0.062992, 0.0), (0.01, 0.0), (0.5, -31.5)]:
+        raw = rng.integers(0, int(info.max) + 1, size=(40, 50), dtype=dtype)
+        kwargs = {"source_missing": {int(info.max) - 1},
+                  "source_out_of_image": {int(info.max)},
+                  "source_no_echo": {0}, "no_echo": 0.0}
+        expected = _encode_direct(raw, target, scale, offset, **kwargs)
+        for _ in range(2):                       # second call is served from the cache
+            got = encode(raw, target, source_scale=scale, source_offset=offset, **kwargs)
+            np.testing.assert_array_equal(got, expected)
+        got[...] = 0                             # a caller mutating its result ...
+        again = encode(raw, target, source_scale=scale, source_offset=offset, **kwargs)
+        np.testing.assert_array_equal(again, expected)   # ... cannot poison the cache
