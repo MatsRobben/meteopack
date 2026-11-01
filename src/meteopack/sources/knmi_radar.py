@@ -658,6 +658,36 @@ class KnmiRadar:
 
     # -------------------------------------------------------------------- fetch
 
+    def _digest(self, path: Path) -> str:
+        """Integrity key for a published file: a hash, or cheap identity.
+
+        Hashing is a full read. On the 127 GB radar archive that is ~36 minutes
+        at the 60 MiB/s this filesystem gives, and it buys nothing against
+        transfer error, because `link_mode: hardlink` moves no bytes - the raw
+        file and the archive file are the same inode. It does guard against
+        later silent corruption, which is worth having when you can afford it.
+
+        So it is a choice, stated in the config. `checksum: sha256` reads and
+        hashes; the default `size` records the identity the filesystem already
+        knows. Re-running `fetch` over a published archive is then free instead
+        of being another 36-minute read.
+        """
+        from meteopack.core.http import _sha256_file
+
+        mode = str(self.source.extra.get("checksum", "size")).lower()
+        if mode == "sha256":
+            return _sha256_file(path)[0]
+        if mode not in {"size", "none"}:
+            raise ValueError(
+                f"knmi_radar: checksum must be 'sha256' or 'size', got {mode!r}"
+            )
+        if mode == "none":
+            return ""
+        stat = path.stat()
+        # Not a hash and not pretending to be: size and mtime, which is what
+        # the filesystem can answer without reading the file.
+        return f"size:{stat.st_size}:mtime:{int(stat.st_mtime)}"
+
     def fetch(self, unit: Unit, raw_root: Path) -> RawFile | None:
         """Publish one daily tar into the raw layer. `None` if it has vanished.
 
@@ -675,15 +705,15 @@ class KnmiRadar:
         # Private, but these are the house implementations of "name a temp file
         # safely" and "hash a file"; a second copy of either is how the two
         # drift apart.
-        from meteopack.core.http import _part_path, _sha256_file
+        from meteopack.core.http import _part_path
 
         meta = unit.meta or {}
         src = Path(meta.get("source_path") or _path_from_uri(unit.url))
         # One directory per year: 2680 tars in one directory is already enough.
         dest = Path(raw_root) / _archive_year(meta, src.name) / src.name
         if dest.exists():
-            digest, n = _sha256_file(dest)
-            return RawFile(path=dest, sha256=digest, n_bytes=n, unit_key=unit.key)
+            return RawFile(path=dest, sha256=self._digest(dest), n_bytes=dest.stat().st_size,
+                           unit_key=unit.key)
         if not src.exists():
             logger.warning("knmi_radar: %s is gone from the archive; skipping", src)
             return None
@@ -697,8 +727,8 @@ class KnmiRadar:
         except BaseException:
             part.unlink(missing_ok=True)
             raise
-        digest, n = _sha256_file(dest)
-        return RawFile(path=dest, sha256=digest, n_bytes=n, unit_key=unit.key)
+        return RawFile(path=dest, sha256=self._digest(dest), n_bytes=dest.stat().st_size,
+                       unit_key=unit.key)
 
     # -------------------------------------------------------------------- parse
 

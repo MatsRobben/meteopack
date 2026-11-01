@@ -553,7 +553,11 @@ def test_fetch_publishes_hashes_and_is_idempotent(tmp_path: Path) -> None:
     path = day_tar(archive, "20190601")
     expected = hashlib.sha256(path.read_bytes()).hexdigest()
 
-    source = KnmiRadar(archive_root=archive)
+    source = KnmiRadar(
+        archive_root=archive,
+        source=SourceConfig(name="knmi_radar", base_url=str(archive),
+                            extra={"checksum": "sha256"}),
+    )
     unit = source.list(
         TimeWindow(datetime(2019, 6, 1, tzinfo=UTC), datetime(2019, 6, 3, tzinfo=UTC)), make_cfg()
     )[0]
@@ -913,3 +917,39 @@ def test_a_frame_with_no_images_is_corrupt_not_drift(tmp_path, monkeypatch):
     assert "if not specs:" in source, "an imageless frame must be handled before the layout check"
     assert "LAYOUT_CORRUPT" in source
     assert isinstance(np.int16(knmi_radar.LAYOUT_CORRUPT), np.int16)
+
+
+def test_the_digest_is_a_choice_because_hashing_is_a_full_read(tmp_path: Path) -> None:
+    """`link_mode: hardlink` moves no bytes - the raw file and the archive file
+    are the same inode - so hashing buys nothing against transfer error and
+    costs a complete read. On the 127 GB radar archive that is ~36 minutes at
+    the 60 MiB/s this filesystem gives. It still guards against later silent
+    corruption, so it stays available; it is just no longer mandatory.
+    """
+    archive = tmp_path / "archive"
+    path = day_tar(archive, "20190601")
+    window = TimeWindow(datetime(2019, 6, 1, tzinfo=UTC), datetime(2019, 6, 3, tzinfo=UTC))
+
+    def fetch_with(checksum: str, into: str):
+        src = KnmiRadar(
+            archive_root=archive,
+            source=SourceConfig(name="knmi_radar", base_url=str(archive),
+                                extra={"checksum": checksum}),
+        )
+        return src.fetch(src.list(window, make_cfg())[0], tmp_path / into)
+
+    hashed = fetch_with("sha256", "a")
+    assert hashed.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+
+    cheap = fetch_with("size", "b")
+    assert cheap.sha256.startswith("size:"), cheap.sha256
+    assert str(path.stat().st_size) in cheap.sha256
+    assert cheap.n_bytes == path.stat().st_size
+
+    # The default is the cheap one: a published archive is re-fetched often.
+    default = KnmiRadar(archive_root=archive)
+    raw = default.fetch(default.list(window, make_cfg())[0], tmp_path / "c")
+    assert raw.sha256.startswith("size:")
+
+    with pytest.raises(ValueError, match="checksum must be"):
+        fetch_with("md5", "d")
