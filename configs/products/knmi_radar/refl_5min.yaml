@@ -62,6 +62,11 @@ variables:
       missing: 254
       out_of_image: 255
 
+# Hash of extra.known_layouts + extra.corrupt_layouts (product_fingerprint),
+# as the pack's scan_report.json reports it. Editing either list without
+# re-pinning this makes `parse` fail loudly.
+schema_fingerprint: 498b46dd0d6dfbee
+
 extra:
   archive_root: ${KNMI_REFL_ARCHIVE}
   tar_token: TARPCP
@@ -74,3 +79,16 @@ extra:
   # bottom-of-scale, and honouring calibration_missing_data = 0 literally
   # would erase it.
   missing_data_policy: no_echo_if_zero
+
+  # Every image layout in the full archive, from the census `pack` wrote to
+  # scan_report.json on 2026-11-01 (all frames, not a sample).
+  known_layouts:
+    - 8e1d900e1ddfa872    #  1005784 frames  scale=0.5 offset=-32
+    - dc6bc2bcb8799100    #   913122 frames  scale=0.5 offset=-31.5
+  # Placeholder calibrations over empty images: failed products, recorded as
+  # corrupt frames with their data left missing. Checked frame by frame
+  # (benchmarks/odd_calibration_census.py): 471 frames on 114 days, 2008-03-17 to 2026-03-02,
+  # and not one holds an echo pixel; where checked, the frames 5 minutes
+  # either side hold tens of thousands. Decoded, they claimed no echo anywhere.
+  corrupt_layouts:
+    - 38822f5f476c31f2    #      471 frames  GEO = 1.0 * PV + 0 (scale 1)

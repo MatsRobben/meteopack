@@ -1,74 +1,84 @@
-# Where the time goes (measured 2026-11-02, cn84: 16 cores, 251 GB RAM, NFS)
+# Radar packing on the compute nodes (measured 2026-11-01)
 
-## The pipeline is I/O-bound, and already near the hardware ceiling
+Everything below was measured as Slurm jobs on das/icis nodes, from pinned
+commits (`benchmarks/slurm/radar_at.slurm`), with the page cache evicted
+(`posix_fadvise`) and A/B runs interleaved. An earlier version of this file
+said the pipeline was I/O-bound at a 76 MiB/s ceiling and that adding CPU
+could not help. That was measured on cn84, the interactive node, which has a
+1 GbE link; it does not describe the cluster.
 
-Radar parse throughput against the real archive, **cold cache, disjoint files
-per run** (re-running over the same tars measures the page cache: the first
-sample went 29 MiB/s cold to 483 MiB/s warm, which would have made every
-comparison nonsense):
+## The hardware
 
-| workers | MiB/s | parallel efficiency |
-|---------|-------|---------------------|
-| 1       | 26    | —                   |
-| 4       | 56    | 0.67                |
-| 8       | 57    | 0.39                |
-| 16      | 66    | 0.25                |
+| node | CPU | parse, rtcor / echotop | NFS read peak (one node alone) |
+|---|---|---|---|
+| cn104, cn105 | Xeon Silver 4214, 24 cores | 5.7 / 4.0 ms/frame | ~167 MiB/s at 16-32 readers |
+| cn117 | EPYC 7452, 64 cores | 4.9 / 3.5 | 171 |
+| cn114, cn115 | EPYC 7642, 96 cores | 4.9 / 3.5 | 157-187 |
 
-Raw filesystem ceiling, measured with `dd` independently of this code:
+* **The NFS server is the ceiling: about 230 MiB/s in total.** One node gets
+  ~165; two reading at once got 212 together, three got 231 (each slowing to
+  ~77). Spreading I/O-bound work across nodes buys 25-40%, not N times.
+  Above ~32 concurrent readers per node, throughput drops.
+* **A Slurm CPU is a hyperthread.** `--cpus-per-task=48` is 24 physical cores,
+  and a 12-CPU das-normal job is 6. Going from one worker per core to two gave
+  1.25x - the usual hyperthreading figure - and from 48 to 96 workers on 48
+  hardware threads was 1.6x *slower*.
+* **Co-tenants matter for CPU, not for reads.** cn115 (same chip as cn114) parsed
+  51% slower under a neighbour running ~120 threads on 32 allocated CPUs.
 
-* one cold stream: **29-43 MB/s**
-* eight parallel streams: **76 MiB/s**
-* a file already in page cache: **2.6 GB/s**
+## What bounds each product
 
-So at 16 workers the pipeline reaches ~87% of what the filesystem will give.
-**Adding CPU cannot make this faster.** The 16-core count is not the
-constraint; NFS bandwidth is.
+Measured at 12, 24 and 48 workers on cn114 on disjoint cold samples:
 
-## Which makes the number of passes the thing to optimise
+| | 12 | 24 | 48 workers |
+|---|---|---|---|
+| rtcor | 514 frames/s (87 MiB/s) | 810 (139) | 788 (135) |
+| echotop | 1,440 | 2,286 | 2,722 |
+| refl | 1,100 | 1,763 | 2,040 |
 
-Each full pass over the 127 GB radar archive costs ~36 minutes at 60 MiB/s.
-The pipeline currently makes three:
+rtcor is read-bound from ~24 workers: 135 MiB/s of reads plus its store
+writes to the same server. echotop and refl are CPU-bound and scale with
+physical cores. In a traced pack the workers were 91-99% busy at every count,
+with start-up and tail a few seconds, so the pool wastes nothing.
 
-1. `fetch` - hardlinks cost nothing, but it reads every byte to sha256 it
-2. `scan`  - opens every frame to collect layouts
-3. `pack`  - opens every frame again to write them
+## What was changed, and what was tried and dropped
 
-That is ~108 minutes of pure I/O for 36 minutes of actual work.
+Every change was required to write a store identical to the reference
+(`compare_stores.py`: values, dtypes, chunking, codecs, attrs).
 
-## The RAM is the lever, not the cores
+| change | effect | output |
+|---|---|---|
+| exact file spans for shard grouping | echotop/refl packed as 16/15 serial tasks before; now one per tar | (a correctness fix) |
+| cache each encode lookup table | rtcor 1.35x, echotop 1.22x, refl 1.24x (pack, A/B) | identical |
+| apply tables with `bytes.translate` / `np.take` | parse CPU -14 to -24% (serial profile) | identical |
+| zarr `codec_pipeline.batch_size` 64 on write | write -5 to -10% | byte-identical |
+| HDF5 open from a file image instead of BytesIO | none | dropped |
+| zarr thread-pool size | within noise | dropped |
+| read each tar in one sequential pass | none | dropped |
+| more workers than hardware threads | 1.6x slower | dropped |
+| zstd level 1 instead of 3 | -0.1 to -0.6 ms/frame, same size | not done: changes bytes on disk |
 
-251 GB of RAM against a 127 GB archive means **the whole thing fits in page
-cache**. A second pass over a file just read runs at 2.6 GB/s - 35x faster
-than reading it cold. The win is therefore to do all the work on a file while
-it is hot, rather than three cold sweeps over the whole archive.
+## Full archive, all three products (2026-11-01)
 
-Concretely, in order of value:
+| | tars | frames | pack | where |
+|---|---|---|---|---|
+| rtcor | 2,680 | 770,116 | 20.7 min | cn115, 24 workers, alongside refl |
+| echotop | 6,668 | 1,918,484 | 9.8 min | cn114, 48 workers |
+| refl | 6,670 | 1,919,430 | 18.6 min | cn114, 48 workers, after echotop |
 
-1. **Fuse scan into pack.** `pack` already opens every frame and already
-   classifies its layout; emitting the scan report as a by-product removes an
-   entire 36-minute pass. This also removes the failure mode that cost 5,508
-   frames: pins can be refreshed from the pack itself rather than from a
-   separate sweep that is tempting to skip.
-2. **Stop re-reading to hash.** `fetch` hardlinks from a local archive, so no
-   bytes move and the digest guards against later corruption rather than
-   against transfer error - at the price of a full read.
-3. **Do not raise the worker count.** 4 workers already reach 85% of the
-   throughput that 16 reach, at a quarter of the memory.
+The same echotop pack took 85 minutes on cn84 that morning and lost a third
+of its frames to the grouping bug.
 
-## Per-frame CPU, for reference
+## Measuring traps met on the way
 
-Measured on 96 frames, serial, with the file hot so the phases are visible:
-
-| phase  | ms/frame | note |
-|--------|----------|------|
-| decode | 6.7      | zlib, inside h5py |
-| encode | 5.5      | lookup-table re-encode onto the canonical calibration |
-| open   | 2.5      | h5py metadata parse |
-| read   | 0.1      | from page cache |
-
-~15 ms of CPU per frame against ~40 ms of I/O at 60 MiB/s: the CPU is less
-than half-busy even at one worker, which is the same conclusion from the other
-side.
+* A "cold" benchmark that read 148 MiB/s on a 119 MiB/s link was page cache.
+  Check any cold number against the link.
+* `posix_fadvise(DONTNEED)` empties the node's cache, not the NFS server's: a
+  second run over the same files is faster for reasons unrelated to the code.
+* The first parse in a process pays ~12 s of imports from the NFS-hosted venv;
+  profile after a warm-up.
+* A 14-second pack on a small sample cannot resolve a 10% CPU change; use the
+  serial profile for CPU changes and the sample pack for equality.
 
 ---
 
@@ -137,8 +147,19 @@ adjustment factor - the two where 0 would genuinely mean "no measurement" - it
 is declared and never used. The non-zero sentinels (254, 65534) are honoured
 normally, and 254 really does cover 81.57% of a quality frame.
 
-So not honouring a 0 is safe across every variant of all three products, and
-it is what makes the record continuous. rtcor renames
+So reading a declared 0 as "no echo" is safe across every variant of all
+three products, and it is what makes the record continuous. Note the value it
+takes comes from the product config (`no_echo:` - 0 mm, 0 km, -32 dBZ), not
+from decoding the code with the file's calibration: KNMI shifted the offset by
+one count between generations, and decoding put no-echo echo tops at -0.102 km
+and split no-echo reflectivity between -31.5 and -32.0 dBZ (fixed 2026-11-01).
+
+Two placeholder calibrations are not data at all: frames declaring
+`GEO = 1.0 * PV + 0` (691 echotop and 471 refl frames on ~140 days from 2008
+to 2026) or, once, the reflectivity formula on a height image carry an image
+with no echo pixel at all - all 1,163 checked - while the neighbours checked
+hold tens of thousands. They are failed products, listed in
+`extra.corrupt_layouts` and recorded as corrupt frames. rtcor renames
 `PRECIP_[MM]` to `ACCUMULATION_[MM]` in 2023 and moves the missing code from 0
 to 65534 at the same time. Honouring it literally would make the archive read
 ~75% missing before the change and ~75% dry after it - a step in the middle of
@@ -202,7 +223,8 @@ was identical and the test was wrong.
 
 ## The general lesson
 
-Two sources, two opposite bottlenecks. Measure before optimising: adding
-workers to radar does nothing (it is at 87% of the filesystem ceiling), and
-adding workers to in-situ helps a lot. The per-stage profile is what
+Two sources, two opposite bottlenecks. Measure before optimising - and on
+the machine that will run it: on cn84's 1 GbE link radar looked I/O-bound
+everywhere, while on the compute nodes only rtcor is, and adding workers to
+in-situ helps a lot. The per-stage profile is what
 distinguishes them, not intuition about "tabular data should be fast".

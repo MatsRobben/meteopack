@@ -63,6 +63,11 @@ variables:
       missing: 254
       out_of_image: 255
 
+# Hash of extra.known_layouts + extra.corrupt_layouts (product_fingerprint),
+# as the pack's scan_report.json reports it. Editing either list without
+# re-pinning this makes `parse` fail loudly.
+schema_fingerprint: 458782f41f467e68
+
 extra:
   archive_root: ${KNMI_ECHOTOP_ARCHIVE}
   tar_token: TARETH
@@ -75,3 +80,18 @@ extra:
   # which is the common case over a dry country. Honouring it literally would
   # erase every dry pixel, exactly as it would for rtcor.
   missing_data_policy: no_echo_if_zero
+
+  # Every image layout in the full archive, from the census `pack` wrote to
+  # scan_report.json on 2026-11-01 (all frames, not a sample).
+  known_layouts:
+    - a97a7395121e6761    #   910239 frames  scale=0.062992 offset=0
+    - 045dc96ec6cde9ac    #   815153 frames  scale=0.102362 offset=-0.102362
+    - f6018d1f97c4c012    #   192342 frames  scale=0.062992 offset=-0.062992
+  # Placeholder calibrations over empty images: failed products, recorded as
+  # corrupt frames with their data left missing. Checked frame by frame
+  # (benchmarks/odd_calibration_census.py): 691 + 1 frames on 140 days, 2008-03-11 to 2026-01-26,
+  # and not one holds an echo pixel; where checked, the frames 5 minutes
+  # either side hold tens of thousands. Decoded, they claimed no echo anywhere.
+  corrupt_layouts:
+    - 296753a5c4606923    #      691 frames  GEO = 1.0 * PV + 0 (scale 1)
+    - 060f88f245854355    #        1 frames  the reflectivity formula, on a height image
