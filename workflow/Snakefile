@@ -1,7 +1,0 @@
-# pack + derive DAG, day/month granularity.
-# Thin by design: every rule shells out to `meteopack <stage>`; no logic here.
-
-configfile: "configs/pipeline.yaml"
-
-rule all:
-    input: []

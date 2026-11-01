@@ -628,43 +628,6 @@ def _timeline_for(ctx: Context):
     return Timeline(start, end, step)
 
 
-def _coalesce_observations(df):
-    """Merge rows that describe the same (time, station) into one.
-
-    Sources differ in what a unit contains. DWD ships a station-year of every
-    variable in its group; DMI ships one PARAMETER per station-window, so six
-    files for three stations arrive as six rows per timestamp, each carrying a
-    different column. Concatenating those stacks them instead of merging, and
-    the store then holds a row per parameter rather than a row per observation
-    — 711,570 duplicate (time, station) pairs on the first real DMI pack.
-
-    Only pays for itself when duplicates exist, so the common case is a cheap
-    check. Where two files genuinely disagree on a value the first non-null
-    wins, which is arbitrary but deterministic; the count is logged so a source
-    producing real conflicts is visible rather than silently reconciled.
-    """
-    import polars as pl
-
-    keys = [c for c in ("time", "station_id") if c in df.columns]
-    if len(keys) < 2 or df.is_empty():
-        return df
-    n_dup = int(df.select(keys).is_duplicated().sum())
-    if not n_dup:
-        return df
-
-    values = [c for c in df.columns if c not in keys]
-    merged = (
-        df.group_by(keys)
-        .agg([pl.col(c).drop_nulls().first().alias(c) for c in values])
-        .sort(keys)
-    )
-    logger.info(
-        "coalesced %d duplicate (time, station) rows into %d; %d remain",
-        n_dup, merged.height, df.height - merged.height,
-    )
-    return merged
-
-
 def _files_for_window(ctx, files: list[Path]) -> tuple[list[Path], int]:
     """Drop raw files that cannot contribute to `--window`.
 

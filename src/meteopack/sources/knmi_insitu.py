@@ -74,17 +74,10 @@ if TYPE_CHECKING:  # keep polars and xarray off the import path of `meteopack.so
 
 logger = logging.getLogger(__name__)
 
-#: The local archive of daily tars. A path, not an endpoint: see the docstring.
-#:
-#: The real location is site-specific, so it comes from `$KNMI_INSITU_ARCHIVE`
-#: (the source config sets `base_url` from the same variable). The literal
-#: below is only the fallback for the machine this was developed on - without
-#: it, a checkout here would need the variable set before anything ran at all.
-ARCHIVE_DIR = os.environ.get(
-    "KNMI_INSITU_ARCHIVE",
-    "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi/"
-    "10-minute-in-situ-meteorological-observations_tar",
-)
+#: Where the daily tars live: $KNMI_INSITU_ARCHIVE (the source config sets
+#: `base_url` from the same variable). Empty when unset - there is no built-in
+#: default, because the only sensible one was a path on one user's machine.
+ARCHIVE_DIR = os.environ.get("KNMI_INSITU_ARCHIVE", "")
 
 #: `KMDS__OPER_P___10M_OBS_L2__<from>T000000_<to>T000000_<counter>.tar`.
 #: The counter is matched rather than assumed: every one of the 5211 tars in the
@@ -245,7 +238,8 @@ class KnmiInsitu:
         limiter=None,
         now: datetime | None = None,
     ) -> None:
-        self.source = source or SourceConfig(name="knmi_insitu", base_url=f"file://{ARCHIVE_DIR}")
+        self.source = source or SourceConfig(
+            name="knmi_insitu", base_url=f"file://{ARCHIVE_DIR}" if ARCHIVE_DIR else None)
         self._now = now
         self._archive_cache: dict[date, Path] | None = None
         self._station_cache: dict[str, list[StationRecord]] = {}
@@ -262,7 +256,11 @@ class KnmiInsitu:
         override = self.source.extra.get("archive_dir")
         if override:
             return Path(str(override)).expanduser()
-        return local_path(self.source.base_url or ARCHIVE_DIR).expanduser()
+        where = self.source.base_url or ARCHIVE_DIR
+        if not where:
+            raise ValueError("no in-situ archive: set $KNMI_INSITU_ARCHIVE, or extra.archive_dir "
+                             "in the source config")
+        return local_path(where).expanduser()
 
     def _clock(self) -> datetime:
         return self._now or datetime.now(UTC)
