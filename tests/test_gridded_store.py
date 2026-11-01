@@ -432,6 +432,42 @@ def test_extending_the_axis_keeps_every_frame_already_written(tmp_path: Path):
     assert np.isfinite(np.asarray(grown_arr[:n])).sum() == n * NY * NX
 
 
+def test_a_store_grown_day_by_day_reads_like_one_packed_at_once(tmp_path: Path):
+    """What a consumer sees, not what the arrays hold.
+
+    `extend` rewrote the time axis in seconds under a nanoseconds unit, so every
+    timestamp read back as 1970, and it never resized the provenance arrays, so
+    `xr.open_zarr` and `gridded.read` refused the store ("conflicting sizes").
+    The test above compared one data array and passed throughout.
+    """
+    cfg, timeline = make_cfg(), make_timeline()
+    grown, whole = tmp_path / "grown", tmp_path / "whole"
+    first = Timeline(start=timeline.start, end=timeline.start + timedelta(days=1),
+                     cadence=timeline.cadence)
+    gridded.initialise(cfg, grown, first)
+    for day in range(DAYS):
+        gridded.extend(cfg, grown, Timeline(start=timeline.start,
+                                            end=timeline.start + timedelta(days=day + 1),
+                                            cadence=timeline.cadence))
+        gridded.write(day_dataset(timeline, day), cfg, grown)
+    gridded.initialise(cfg, whole, timeline)
+    for day in range(DAYS):
+        gridded.write(day_dataset(timeline, day), cfg, whole)
+
+    n = len(timeline)
+    a = xr.open_zarr(gridded.zarr_path(grown, cfg.store_id)).isel(time=slice(0, n))
+    b = xr.open_zarr(gridded.zarr_path(whole, cfg.store_id))
+    np.testing.assert_array_equal(a["time"].values, timeline.values())
+    for name in ("time", "rain", *gridded.PROVENANCE):
+        np.testing.assert_array_equal(a[name].values, b[name].values, err_msg=name)
+    # Past the last written day, the provenance says "nothing here" like fresh space does.
+    tail = xr.open_zarr(gridded.zarr_path(grown, cfg.store_id)).isel(time=slice(n, None))
+    if tail.sizes["time"]:
+        assert bool(tail["is_missing_frame"].all())
+    read = gridded.read(cfg.store_id, grown)
+    assert read.sizes["time"] >= n
+
+
 def test_extend_refuses_to_move_frames_that_are_already_written(tmp_path: Path):
     """Growing backwards would reindex every existing frame. Rebuild instead."""
     cfg, timeline = make_cfg(), make_timeline()

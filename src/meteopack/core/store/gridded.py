@@ -683,20 +683,26 @@ def extend(
             step = int(shards[0])
     need = -(-need // step) * step  # whole shards
 
-    for name in arrays:
+    # Every per-frame array grows, not just the fields. The provenance arrays
+    # are per-frame too; leaving them at the old length made the store
+    # unopenable ("conflicting sizes for dimension 'time'") and zarr silently
+    # dropped every provenance write past the old end. New space reads as each
+    # array's fill value - is_missing_frame=True - which is what it is.
+    present = {name for name, _ in group.arrays()}
+    for name in [*arrays, *(n for n in PROVENANCE if n in present)]:
         array = group[name]
         array.resize((need, *array.shape[1:]))
 
-    stamps = (
-        current.start_ns + np.arange(need, dtype="int64") * current.step_ns
-    ) // _NS_PER_S
+    # Nanoseconds, exactly as `initialise` writes them and as TIME_UNITS says.
+    # This once wrote seconds, and every timestamp in a grown store read 1970.
+    stamps = current.start_ns + np.arange(need, dtype="int64") * current.step_ns
     time = group[TIME_NAME]
     time.resize((need,))
     time[:] = stamps
     # `time_end` is the half-open end and timezone-aware, exactly as
     # `initialise` writes it: `_timeline_of` reads it straight back into a
     # Timeline, which rejects a naive or inclusive value.
-    end = datetime.fromtimestamp(int(stamps[-1]), UTC) + current.cadence
+    end = datetime.fromtimestamp(int(stamps[-1]) // _NS_PER_S, UTC) + current.cadence
     group.attrs.update({"n_times": need, "time_end": end.isoformat()})
     return need - have
 
