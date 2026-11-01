@@ -262,3 +262,37 @@ def test_raw_files_skips_sidecars_that_are_not_observations(tmp_path):
     names = [p.name for p in FakeCtx.raw_files(FakeCtx())]
     assert names == ["6414.csv"], names
     assert isinstance(argparse.Namespace(), argparse.Namespace)
+
+
+def test_pack_spill_goes_to_real_disk_with_room(tmp_path, monkeypatch):
+    """`/tmp` is 16 GB and shared on this cluster and a DMI backfill filled it;
+    `/dev/shm` is a tmpfs, so spilling there puts the data back in RAM and
+    undoes the reason for spilling. The default belongs on the data volume.
+    """
+    import os
+
+    from meteopack.cli import _spill_root
+
+    monkeypatch.delenv("METEOPACK_SPILL", raising=False)
+    root = tmp_path / "data"
+    root.mkdir()
+    assert _spill_root(root) == root / "_spill"
+    assert (root / "_spill").is_dir()
+
+    elsewhere = tmp_path / "fast"
+    monkeypatch.setenv("METEOPACK_SPILL", str(elsewhere))
+    assert _spill_root(root) == elsewhere
+    assert elsewhere.is_dir()
+    assert os.access(elsewhere, os.W_OK)
+
+
+def test_a_cramped_spill_filesystem_is_warned_about(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from meteopack import cli
+
+    monkeypatch.setenv("METEOPACK_SPILL", str(tmp_path / "small"))
+    monkeypatch.setattr(cli, "_MIN_SPILL_BYTES", 1 << 62)
+    with caplog.at_level(logging.WARNING):
+        cli._spill_root(tmp_path)
+    assert any("free at" in r.message for r in caplog.records), caplog.text

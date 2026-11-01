@@ -10,6 +10,7 @@ import argparse
 import concurrent.futures as cf
 import logging
 import os
+import shutil
 import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -491,6 +492,39 @@ def _files_for_window(ctx, files: list[Path]) -> tuple[list[Path], int]:
     return keep, undated
 
 
+def _spill_root(root: Path) -> Path:
+    """Where a points pack spills its parsed rows between parse and write.
+
+    Must be **real disk with room for the whole dataset**, which rules out both
+    defaults you would reach for first:
+
+    * `/tmp` is 16 GB here, shared between everyone on the node, and a DMI
+      backfill filled it - `OSError: No space left on device` partway through.
+    * `/dev/shm` is a tmpfs, which is to say RAM. Spilling there would put the
+      data straight back in memory and undo the reason for spilling at all.
+
+    So the default is inside the data root: it is the volume already sized for
+    this data, and a spill that outlives a crash is visible next to the store
+    rather than hidden in a system directory. `$METEOPACK_SPILL` overrides it
+    for a site with fast node-local disk, which would genuinely be better.
+    """
+    override = os.environ.get("METEOPACK_SPILL")
+    base = Path(override) if override else Path(root) / "_spill"
+    base.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(base).free
+    if free < _MIN_SPILL_BYTES:
+        logger.warning(
+            "only %.1f GB free at %s for pack spill; set $METEOPACK_SPILL to a "
+            "filesystem with room, and not to a tmpfs like /dev/shm, which is RAM",
+            free / 1e9, base,
+        )
+    return base
+
+
+#: Below this, say so before the pack rather than after it has filled the disk.
+_MIN_SPILL_BYTES = 20 * 1024**3
+
+
 def stage_pack(ctx: Context) -> int:
     from meteopack.core import readme
     from meteopack.core.store import manifest
@@ -549,7 +583,6 @@ def stage_pack(ctx: Context) -> int:
             errors.append({"path": str(store), "error": f"{outside} frames outside the axis"})
         n_records = frames
     else:
-        import shutil
         import tempfile
 
         import polars as pl
@@ -560,7 +593,7 @@ def stage_pack(ctx: Context) -> int:
         # partition at a time. Concatenating every parsed frame in the parent
         # is what killed the DWD backfill: 8,495 files, 74 GB peak RSS and a
         # SIGABRT from the allocator.
-        spill = Path(tempfile.mkdtemp(prefix="meteopack-pack-", dir=os.environ.get("TMPDIR")))
+        spill = Path(tempfile.mkdtemp(prefix="pack-", dir=_spill_root(ctx.root)))
         try:
             tasks = _pack_tasks(ctx, files)
             tasks = [replace(t, spill=str(spill)) for t in tasks]
