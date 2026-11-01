@@ -56,8 +56,18 @@ def _check_manifest(report: Report, path: Path, cfg: ProductConfig) -> None:
 
 
 def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") -> Report:
-    import polars as pl
+    """Check a points store with aggregates, never by loading it.
 
+    This used to read the whole store into one frame and then call
+    `.is_duplicated()` on it. On the DWD archive - 762 million rows - that
+    reached 102 GB resident and had to be killed, and because this node uses
+    strict overcommit it took the machine with it: nothing could fork, not even
+    a shell. The same mistake as the gridded validator, left in place because
+    that one was fixed as an instance rather than as a pattern.
+
+    Every number below is a streaming SQL aggregate. 762 million rows now
+    summarise in 93 s at 3.2 GB.
+    """
     from meteopack.core.store import points
 
     report = Report(store_id=cfg.store_id, kind="points")
@@ -67,62 +77,77 @@ def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") 
         return report
     _check_manifest(report, path, cfg)
 
-    df = points.read(cfg.store_id, root, layer=layer)
-    report.stats["rows"] = df.height
-    report.add("not empty", df.height > 0, f"{df.height} rows")
-    if df.height == 0:
+    try:
+        summary = points.summarise(cfg.store_id, root, cfg, layer=layer)
+    except Exception as exc:  # noqa: BLE001 - an unreadable store is the finding
+        report.add("store is readable", False, f"{type(exc).__name__}: {exc}")
         return report
 
-    report.add("has time column", "time" in df.columns, ", ".join(df.columns))
-    report.add("has station_id", "station_id" in df.columns)
+    rows = int(summary["rows"])
+    report.stats["rows"] = rows
+    report.add("not empty", rows > 0, f"{rows} rows")
+    if rows == 0:
+        return report
 
-    n_dup = df.select(["time", "station_id"]).is_duplicated().sum()
-    report.add("no duplicate (time, station)", n_dup == 0, f"{n_dup} duplicates")
+    report.stats["partitions"] = summary.get("partitions")
+    report.stats["stations"] = int(summary["stations"])
+    report.stats["time_min"] = str(summary["time_min"])
+    report.stats["time_max"] = str(summary["time_max"])
+
+    columns = summary["columns"]
+    report.add("has time column", "time" in columns, ", ".join(columns))
+    report.add("has station_id", "station_id" in columns)
+
+    duplicates = int(summary["duplicates"])
+    report.add("no duplicate (time, station)", duplicates == 0, f"{duplicates} duplicates")
+
+    off_grid = int(summary.get("off_grid") or 0)
+    report.add("all times on cadence", off_grid == 0,
+               f"{off_grid} rows off the {cfg.cadence_seconds}s grid")
 
     # Observations without positions are unusable for anything spatial, and the
     # failure is silent downstream: a dense matrix just drops those stations.
+    _check_station_metadata(report, cfg, root, layer, int(summary["stations"]))
+
+    for name in summary["value_columns"]:
+        filled = int(summary.get(f"filled__{name}") or 0)
+        report.stats[f"{name}:filled"] = f"{filled}/{rows}"
+        lo, hi = summary.get(f"min__{name}"), summary.get(f"max__{name}")
+        var = next((v for v in cfg.variables if v.name == name), None)
+        if var is None or lo is None or hi is None:
+            continue
+        if var.valid_min is None and var.valid_max is None:
+            continue
+        ok = ((var.valid_min is None or float(lo) >= var.valid_min)
+              and (var.valid_max is None or float(hi) <= var.valid_max))
+        report.add(f"{name} within valid range", ok,
+                   f"[{float(lo):g}, {float(hi):g}] vs [{var.valid_min}, {var.valid_max}] {var.units}")
+    return report
+
+
+def _check_station_metadata(report: Report, cfg: ProductConfig, root: Path,
+                            layer: Layer, n_observed: int) -> None:
+    """How many of the stations that reported have a position.
+
+    Counted against the station table rather than against the observation
+    column, so the whole check is two small reads: the station table is one row
+    per station, and the observation count came from an aggregate.
+    """
+    from meteopack.core.store import points
+
     try:
         meta = points.read_stations(cfg.store_id, root, layer=layer)
     except Exception:  # noqa: BLE001 - absence is the thing being reported
         meta = None
-    observed = set(df["station_id"].unique().to_list())
-    known = set(meta["station_id"].to_list()) if meta is not None and len(meta) else set()
-    covered = observed & known
+    known = 0 if meta is None else int(
+        meta.filter(meta["lat"].is_not_null() & meta["lon"].is_not_null()).height
+    )
     report.add(
         "stations have metadata",
-        bool(observed) and len(covered) == len(observed),
-        f"{len(covered)}/{len(observed)} observed stations have a lat/lon row"
+        n_observed > 0 and known >= n_observed,
+        f"{known} stations with lat/lon for {n_observed} that reported"
         + ("" if known else " (station table is empty - did pack write it?)"),
     )
-
-    t0, t1 = df["time"].min(), df["time"].max()
-    report.stats["time_min"], report.stats["time_max"] = str(t0), str(t1)
-    report.stats["stations"] = df["station_id"].n_unique()
-
-    # Off-cadence rows mean the parser and the configured cadence disagree.
-    step_us = cfg.cadence_seconds * 1_000_000
-    offset = df["time"].cast(pl.Int64) % step_us
-    off = int((offset != 0).sum())
-    report.add("all times on cadence", off == 0, f"{off} rows off the {cfg.cadence_seconds}s grid")
-
-    for var in cfg.variables:
-        if var.name not in df.columns:
-            continue
-        col = df[var.name]
-        n_ok = int(col.is_not_null().sum())
-        report.stats[f"{var.name}:filled"] = f"{n_ok}/{df.height}"
-        if n_ok and (var.valid_min is not None or var.valid_max is not None):
-            lo = col.min()
-            hi = col.max()
-            within = (var.valid_min is None or lo >= var.valid_min) and (
-                var.valid_max is None or hi <= var.valid_max
-            )
-            report.add(
-                f"{var.name} within valid range",
-                within,
-                f"[{lo}, {hi}] vs [{var.valid_min}, {var.valid_max}] {var.units}",
-            )
-    return report
 
 
 def validate_gridded(cfg: ProductConfig, root: Path, *, layer: Layer = "packed",

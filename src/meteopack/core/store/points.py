@@ -31,6 +31,7 @@ station metadata joinable without a dtype negotiation.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from collections.abc import Iterable, Sequence
@@ -46,6 +47,8 @@ from meteopack.core.timeline import Timeline
 
 #: Points stores are canonical-layer artefacts; derived datasets are built from
 #: them rather than written here.
+logger = logging.getLogger(__name__)
+
 DEFAULT_LAYER: Layer = "packed"
 
 OBSERVATIONS_DIR = "observations"
@@ -325,6 +328,100 @@ def write_stations(
     target = store_path(root, store_id, layer=layer) / STATIONS_DIR / name
     _write_atomic(frame.unique(subset=["station_id"], keep="last"), target)
     return target
+
+
+#: What the summary query may use. Deliberately small: it is a handful of
+#: scalar aggregates, and the point is that it never competes with a pack.
+_SUMMARY_MEMORY = "4GB"
+_SUMMARY_THREADS = 4
+
+
+def observations_glob(store_id: str, root: str | os.PathLike[str], *,
+                      layer: Layer = DEFAULT_LAYER) -> str:
+    """The parquet glob for a store's observations, for a streaming query."""
+    return str(store_path(root, store_id, layer=layer) / OBSERVATIONS_DIR / "**" / "*.parquet")
+
+
+def summarise(store_id: str, root: str | os.PathLike[str], cfg: ProductConfig, *,
+              layer: Layer = DEFAULT_LAYER) -> dict:
+    """Describe a points store with aggregates, without materialising it.
+
+    Validation used to read the whole store into one frame and then call
+    `.is_duplicated()` on it. On the DWD archive - 762 million rows - that
+    process reached 102 GB resident and had to be killed; it also pushed the
+    node past its strict overcommit limit, so nothing else could even fork.
+
+    Everything here is a scalar aggregate over the parquet files, which DuckDB
+    streams. The cost is bounded by the number of columns, not by the number of
+    rows.
+    """
+    glob = observations_glob(store_id, root, layer=layer)
+    con = duckdb.connect()
+    # DuckDB sizes itself at a fraction of total RAM by default, which on a
+    # shared node means it will happily reserve far more than its share and
+    # then die: the first attempt at this reached 48 GB and was killed. A
+    # modest budget plus a temp directory lets it spill the big GROUP BY
+    # instead, which is what makes a 762-million-row store summarisable at all.
+    con.execute(f"SET memory_limit='{_SUMMARY_MEMORY}'")
+    con.execute(f"SET threads={_SUMMARY_THREADS}")
+    con.execute("PRAGMA disable_progress_bar")
+    spill = Path(root) / "_spill" / "duckdb"
+    try:
+        spill.mkdir(parents=True, exist_ok=True)
+        con.execute(f"SET temp_directory='{spill}'")
+    except OSError as exc:  # pragma: no cover - falls back to DuckDB's default
+        logger.debug("no temp directory for the summary query: %s", exc)
+    # `hive_partitioning=false` for the same reason `read` sets it: the
+    # partition value lives in the path and is deliberately not a column, and
+    # DuckDB otherwise infers `year=2024/` into a synthetic `year` column that
+    # the files do not contain. Validation reported it as part of the schema.
+    src = f"read_parquet('{glob}', union_by_name=true, hive_partitioning=false)"
+    columns = [
+        r[0] for r in con.execute(f"SELECT * FROM {src} LIMIT 0").description
+    ]
+    values = [v.name for v in cfg.variables if v.name in columns]
+
+    pieces = [
+        "count(*) AS rows",
+        "count(DISTINCT station_id) AS stations",
+        "min(time) AS time_min",
+        "max(time) AS time_max",
+    ]
+    cadence = int(cfg.cadence_seconds)
+    if cadence > 0:
+        pieces.append(
+            f"count(*) FILTER (WHERE CAST(epoch(time) AS BIGINT) % {cadence} <> 0) AS off_grid"
+        )
+    for name in values:
+        q = f'"{name}"'
+        pieces += [f"count({q}) AS filled__{name}",
+                   f"min({q}) AS min__{name}",
+                   f"max({q}) AS max__{name}"]
+    row = con.execute(f"SELECT {', '.join(pieces)} FROM {src}").fetchone()
+    names = [p.rsplit(" AS ", 1)[1] for p in pieces]
+    out = dict(zip(names, row, strict=True))
+
+    # Duplicates are counted one partition at a time, not across the store. A
+    # (time, station_id) pair belongs to exactly one partition - the partition
+    # key is derived from `time` - so the per-partition counts sum to the
+    # global count, and the group-by never holds 762 million keys at once. The
+    # global form ran for minutes and spilled; this is seconds per file.
+    shards = sorted(
+        (store_path(root, store_id, layer=layer) / OBSERVATIONS_DIR).rglob("*.parquet")
+    )
+    out["duplicates"] = sum(
+        int(con.execute(
+            "SELECT count(*) FROM (SELECT time, station_id FROM "
+            f"read_parquet('{shard}', hive_partitioning=false) "
+            f"GROUP BY 1, 2 HAVING count(*) > 1)"
+        ).fetchone()[0])
+        for shard in shards
+    )
+    out["partitions"] = len(shards)
+    out["columns"] = columns
+    out["value_columns"] = values
+    con.close()
+    return out
 
 
 def read_stations(
