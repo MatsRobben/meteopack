@@ -78,7 +78,24 @@ def codes_of(calibration, key) -> set[int]:
     return {int(v) for v in np.asarray(value).reshape(-1)}
 
 
-def decode_raw(dataset, calibration) -> tuple[np.ndarray, np.ndarray]:
+def no_echo_values(product: str) -> dict[str, float]:
+    """The value each variable's "no echo" takes, read from the product config.
+
+    The config is the specification of the store, so this reads it rather than
+    asking the pipeline's code what it did - and not from the store's own
+    attrs either, which the pipeline wrote.
+    """
+    import yaml
+
+    path = Path(__file__).resolve().parents[1] / "configs" / "products" / "knmi_radar" / \
+        f"{product}.yaml"
+    cfg = yaml.safe_load(path.read_text())
+    return {v["name"]: float(v["no_echo"]) for v in cfg["variables"]
+            if v.get("no_echo") is not None}
+
+
+def decode_raw(dataset, calibration, no_echo: float | None = None
+               ) -> tuple[np.ndarray, np.ndarray]:
     """Physical values and a validity mask, straight from the file."""
     counts = np.asarray(dataset[:])
     scale, offset = parse_formula(text(calibration.attrs["calibration_formulas"]))
@@ -101,10 +118,12 @@ def decode_raw(dataset, calibration) -> tuple[np.ndarray, np.ndarray]:
 
     keep_missing = representable(missing)
     keep_out = representable(out_of_image)
-    # A declared missing code of 0 is not honoured. This is the one place this
-    # script states an interpretation of the data rather than just reading it,
-    # so here is the evidence, from a census of 40 tars per archive spread over
-    # 2008-2026 (benchmarks/README_findings.md):
+    # A declared missing code of 0 means "no echo" for the intensity variables,
+    # and takes the value the product config states for no echo (0 mm, 0 km,
+    # -32 dBZ). This is the one place this script states an interpretation of
+    # the data rather than just reading it, so here is the evidence, from a
+    # census of 40 tars per archive spread over 2008-2026
+    # (benchmarks/README_findings.md):
     #
     #   PRECIP_[MM]      miss=0    occurs on 75-80% of pixels
     #   REFLECTIVITY     miss=0    occurs on 70%
@@ -116,7 +135,14 @@ def decode_raw(dataset, calibration) -> tuple[np.ndarray, np.ndarray]:
     # is the bottom of the scale - the radar looked and saw no echo - and never
     # for the variables where 0 would genuinely mean "no measurement". The
     # non-zero sentinels (254, 65534) are honoured normally.
-    keep_missing.discard(0)
+    #
+    # It is NOT decoded with the file's calibration. That gives the stated
+    # value only where the offset is 0; KNMI shifted the offset by one count
+    # between generations, and this script used to call -0.102 km echo tops
+    # correct because the pipeline made the same mistake.
+    if no_echo is not None and 0 in keep_missing:
+        keep_missing.discard(0)
+        out[counts == 0] = no_echo
     reserved = sorted(keep_missing | keep_out)
     invalid = np.isin(counts, reserved) if reserved else np.zeros(counts.shape, bool)
     return out, ~invalid
@@ -132,6 +158,7 @@ def main() -> int:
     args = ap.parse_args()
 
     group = zarr.open(STORE, mode="r")
+    no_echo = no_echo_values(str(group.attrs["product"]))
     stamps = np.asarray(group["time"][:]).astype("datetime64[ns]")
     index = {t: i for i, t in enumerate(stamps)}
     written = ~np.asarray(group["is_missing_frame"][:])
@@ -186,7 +213,8 @@ def main() -> int:
                 if target is None or target not in present:
                     continue
 
-                truth, valid = decode_raw(node["image_data"], node["calibration"])
+                truth, valid = decode_raw(node["image_data"], node["calibration"],
+                                          no_echo.get(target))
                 array = group[target]
                 if tuple(array.shape[1:]) != (ny, nx):
                     print(f"FAIL grid {tuple(array.shape[1:])} != file {(ny, nx)}")
