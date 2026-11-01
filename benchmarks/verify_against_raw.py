@@ -40,11 +40,17 @@ STORE = os.environ.get(
     "/vol/knmimo-nobackup/users/mrobben/data_full/packed/knmi_radar/rtcor_5min/v1/dataset.zarr",
 )
 
-MEMBER_RE = re.compile(r"RAD_NL25_RAC_RT_(\d{12})\.h5$")
+# Any of the three radar products: rtcor members are RAD_NL25_RAC_RT_,
+# echotop RAD_NL25_ETH_NA_, the reflectivity composites RAD_NL25_PCP_NA_.
+MEMBER_RE = re.compile(r"RAD_NL25_\w+?_(\d{12})\.h5$")
+#: store variable -> the image_geo_parameter values that carry it, across all
+#: three radar products.
 WANTED = {
-    "precipitation_amount": ("PRECIP_[MM]", "ACCUMULATION_[MM]"),
-    "radar_quality_index": ("QUALITY_[-]",),
-    "gauge_adjustment_factor": ("ADJUSTMENT_FACTOR_[DB]",),
+    "accumulation_mm": ("PRECIP_[MM]", "ACCUMULATION_[MM]"),
+    "quality": ("QUALITY_[-]",),
+    "adjustment_factor_db": ("ADJUSTMENT_FACTOR_[DB]",),
+    "echotop_height_km": ("HEIGHT_[KM]",),
+    "reflectivity_dbz": ("REFLECTIVITY_[DBZ]",),
 }
 
 
@@ -95,10 +101,22 @@ def decode_raw(dataset, calibration) -> tuple[np.ndarray, np.ndarray]:
 
     keep_missing = representable(missing)
     keep_out = representable(out_of_image)
-    # A missing code of 0 collides with a genuinely dry pixel in the pre-2023
-    # generations, where it means no echo rather than no measurement.
-    if 0 in keep_missing and 65535 in out_of_image:
-        keep_missing.discard(0)
+    # A declared missing code of 0 is not honoured. This is the one place this
+    # script states an interpretation of the data rather than just reading it,
+    # so here is the evidence, from a census of 40 tars per archive spread over
+    # 2008-2026 (benchmarks/README_findings.md):
+    #
+    #   PRECIP_[MM]      miss=0    occurs on 75-80% of pixels
+    #   REFLECTIVITY     miss=0    occurs on 70%
+    #   HEIGHT_[KM]      miss=0    occurs on 45%
+    #   QUALITY_[-]      miss=0    occurs on  0.00%
+    #   ADJUSTMENT_[DB]  miss=0    occurs on  0.00%
+    #
+    # A code of 0 is only ever populated for the intensity variables, where it
+    # is the bottom of the scale - the radar looked and saw no echo - and never
+    # for the variables where 0 would genuinely mean "no measurement". The
+    # non-zero sentinels (254, 65534) are honoured normally.
+    keep_missing.discard(0)
     reserved = sorted(keep_missing | keep_out)
     invalid = np.isin(counts, reserved) if reserved else np.zeros(counts.shape, bool)
     return out, ~invalid
@@ -119,7 +137,21 @@ def main() -> int:
     written = ~np.asarray(group["is_missing_frame"][:])
     present = {k for k, _ in group.arrays()}
 
-    tars = sorted(ARCHIVE.glob("*.tar"))
+    # Only tars that overlap what the store actually holds. Sampling the whole
+    # archive against a two-day store spends every sample on a miss and then
+    # reports "nothing compared", which looks like a pass.
+    first, last = stamps[0], stamps[-1]
+    tars = []
+    for path in sorted(ARCHIVE.glob("*.tar")):
+        m = re.search(r"__(\d{8})T", path.name)
+        if not m:
+            continue
+        day = np.datetime64(f"{m.group(1)[:4]}-{m.group(1)[4:6]}-{m.group(1)[6:]}", "ns")
+        if first - np.timedelta64(2, "D") <= day <= last + np.timedelta64(1, "D"):
+            tars.append(path)
+    if not tars:
+        print(f"no tars in {ARCHIVE} overlap the store's {first}..{last}")
+        return 1
     rng = random.Random(args.seed)
     picks = rng.sample(tars, min(args.frames, len(tars)))
 

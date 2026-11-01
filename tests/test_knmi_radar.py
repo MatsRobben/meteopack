@@ -180,7 +180,7 @@ def make_cfg(**extra) -> ProductConfig:
                 valid_max=200.0,
             ),
             Variable(
-                name="radar_quality_index",
+                name="quality",
                 source_key="QUALITY_[-]",
                 units="1",
                 valid_min=0.0,
@@ -664,7 +664,7 @@ def test_quality_is_carried_when_the_product_provides_one(tmp_path: Path) -> Non
     )
     path = write_tar(tmp_path / tar_name("20230601"), {"RAD_NL25_RAC_RT_202306010805.h5": blob})
     ds = KnmiRadar().parse(raw_of(path), make_cfg())
-    values = ds["radar_quality_index"].values[0]
+    values = ds["quality"].values[0]
     assert np.isnan(values[0, 0])
     assert np.isnan(values[0, 1])
     assert values[1, 1] == pytest.approx(0.5)  # 125 * 0.004
@@ -675,7 +675,7 @@ def test_a_variable_with_no_image_is_dropped_not_written_as_nan(tmp_path: Path) 
     path = day_tar(tmp_path, "20190601")
     ds = KnmiRadar().parse(raw_of(path), make_cfg())
     assert "precipitation_amount" in ds.data_vars
-    assert "radar_quality_index" not in ds.data_vars
+    assert "quality" not in ds.data_vars
 
 
 def test_a_frame_with_none_of_the_configured_images_is_drift(tmp_path: Path) -> None:

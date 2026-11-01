@@ -47,11 +47,10 @@ variables:
   # Every frame is re-encoded onto the one below - the modern calibration,
   # and the one radar_v3 settled on - so a reader needs one pair of numbers
   # for the whole archive rather than having to know its generation.
-  - name: equivalent_reflectivity_factor
+  - name: reflectivity_dbz
     source_key: "REFLECTIVITY_[DBZ]"
     units: dBZ
     standard_name: equivalent_reflectivity_factor
-    legacy_name: reflectivity_dbz
     long_name: Radar equivalent reflectivity factor
     valid_min: -32.0
     valid_max: 95.0

@@ -114,7 +114,44 @@ Not one zero falls outside the radar's own coverage mask, and they are 91% and
 83% of the in-image pixels. That is the radar looking and seeing no echo,
 which for a precipitation dataset is the most common observation there is.
 
-radar_v3 mapped every one of them to 255, and never used 254 at all, so
+## Is it every schema variant, or just the one sampled?
+
+Every one. A census of 40 tars per archive spread over 2008-2026, counting how
+often each *declared* sentinel actually appears in the pixels:
+
+| parameter | dtype | declared missing | how often it occurs |
+|---|---|---|---|
+| `PRECIP_[MM]` | uint16 | 0 | **74.98%** |
+| `PRECIP_[MM]` | uint8 | 0 | **79.50%** |
+| `REFLECTIVITY_[DBZ]` | uint8 | 0 | **69.98%** |
+| `HEIGHT_[KM]` | uint8 | 0 | **44.72%** |
+| `QUALITY_[-]` | uint16 | 0 | **0.00%** |
+| `ADJUSTMENT_FACTOR_[DB]` | uint16 | 0 | **0.00%** |
+| `ACCUMULATION_[MM]` | uint16 | 65534 | 0.00% |
+| `QUALITY_[-]` | uint8 | 254 | **81.57%** |
+| `ADJUSTMENT_FACTOR_[DB]` | uint8 | 254 | **81.57%** |
+
+A declared missing code of **0 is only ever populated for the intensity
+variables**, where it is the bottom of the scale. For quality and the
+adjustment factor - the two where 0 would genuinely mean "no measurement" - it
+is declared and never used. The non-zero sentinels (254, 65534) are honoured
+normally, and 254 really does cover 81.57% of a quality frame.
+
+So not honouring a 0 is safe across every variant of all three products, and
+it is what makes the record continuous. rtcor renames
+`PRECIP_[MM]` to `ACCUMULATION_[MM]` in 2023 and moves the missing code from 0
+to 65534 at the same time. Honouring it literally would make the archive read
+~75% missing before the change and ~75% dry after it - a step in the middle of
+the record. Measured on the packed store, the dry fraction is flat across the
+boundary:
+
+    2019  73.9%   2021  73.7%   2023  74.2%   2025  79.0%
+    2020  73.7%   2022  78.0%   2024  74.2%   2026  74.3%
+
+(The `out_of_image` fraction does drop from ~19.5% to ~12.2% around 2023-24.
+That is a real change: the composite footprint widened.)
+
+radar_v3 mapped every zero to 255, and never used 254 at all, so
 `missing` and `out_of_image` collapsed into a single code there. This store
 keeps the zeros and keeps the two sentinels apart - the same judgement the
 previous pipeline already made for rtcor's accumulation image, where it

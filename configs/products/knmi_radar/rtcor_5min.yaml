@@ -68,7 +68,7 @@ attrs:
     add_offset. calibration_missing_data marks pixels the radar did not
     measure and calibration_out_of_image marks pixels outside the composite
     footprint - they are different facts and are kept apart. KNMI publishes a
-    quality value only where there is an echo, so radar_quality_index is
+    quality value only where there is an echo, so `quality` is
     missing over dry pixels by design.
 
 variables:
@@ -76,11 +76,10 @@ variables:
   # the 2023-and-later generation writes exactly these dtypes, scales and
   # sentinels, so a modern frame re-encodes to itself bit for bit and an older
   # one is converted once, at pack time, onto the same scale.
-  - name: precipitation_amount
+  - name: accumulation_mm
     source_key: "PRECIP_[MM]|ACCUMULATION_[MM]"
     units: mm
     standard_name: precipitation_amount
-    legacy_name: accumulation_mm        # what radar_v3 called it
     long_name: Radar precipitation accumulation over the preceding 5 minutes
     valid_min: 0.0
     # The field is mm accumulated in 5 minutes, NOT a rate: image_geo_parameter
@@ -95,11 +94,10 @@ variables:
       missing: 65534
       out_of_image: 65535
 
-  - name: radar_quality_index
+  - name: quality
     source_key: "QUALITY_[-]"
     units: "1"
-    standard_name: quality_flag
-    legacy_name: quality
+    # no CF standard name exists for a radar composite quality index
     long_name: Per-pixel radar composite quality index (0 worst, 1 best)
     valid_min: 0.0
     valid_max: 1.0
@@ -115,10 +113,9 @@ variables:
     # as one. Frames with no quality image keep the `missing` sentinel, which
     # is the honest answer and is distinguishable from a quality of zero.
 
-  - name: gauge_adjustment_factor
+  - name: adjustment_factor_db
     source_key: "ADJUSTMENT_FACTOR_[DB]"
     units: dB
-    legacy_name: adjustment_factor_db
     long_name: Gauge adjustment factor applied to the radar accumulation
     valid_min: -20.24
     valid_max: 20.24

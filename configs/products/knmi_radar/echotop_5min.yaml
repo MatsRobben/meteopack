@@ -49,10 +49,9 @@ variables:
   # Every frame is re-encoded onto the one below, which is the modern
   # calibration and the one radar_v3 settled on, so a reader needs a single
   # pair of numbers for the whole archive instead of knowing its generation.
-  - name: echo_top_height
+  - name: echotop_height_km
     source_key: "HEIGHT_[KM]"
     units: km
-    legacy_name: echotop_height_km
     long_name: Height of the highest radar echo exceeding the product threshold
     valid_min: 0.0
     valid_max: 25.0
