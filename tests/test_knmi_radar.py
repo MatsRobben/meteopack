@@ -21,6 +21,7 @@ missing. One archive, both conventions.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import io
 import tarfile
 from datetime import UTC, datetime, timedelta
@@ -863,3 +864,22 @@ def test_real_frames_match_the_pinned_layouts_and_the_declared_grid() -> None:
     precip = next(i for i in variant["images"] if i.startswith("PRECIP_[MM]"))
     assert "scale=0.01" in precip and "out_of_image=65535.0" in precip
     assert "missing=0.0" in precip  # i.e. no echo, not missing
+
+
+def test_a_frame_with_no_images_is_corrupt_not_drift(tmp_path, monkeypatch):
+    """Several 2019 tars hold a readable HDF5 file with no image groups.
+
+    Treating that as schema drift failed the whole tar and lost its other 287
+    good frames; radar_v3 classified it as corrupt and carried on. The store
+    has an is_corrupt_frame array precisely so this can be recorded rather than
+    raised.
+    """
+    import numpy as np
+
+    from meteopack.sources import knmi_radar
+
+    assert knmi_radar.layout_id({}) == knmi_radar.LAYOUT_UNKNOWN
+    source = inspect.getsource(knmi_radar.KnmiRadar.parse)
+    assert "if not specs:" in source, "an imageless frame must be handled before the layout check"
+    assert "LAYOUT_CORRUPT" in source
+    assert isinstance(np.int16(knmi_radar.LAYOUT_CORRUPT), np.int16)

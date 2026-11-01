@@ -17,6 +17,7 @@ import concurrent.futures as cf
 import logging
 import multiprocessing
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,10 @@ class PackTask:
     raw_path: str
     root: str
     configs: str | None = None
+    #: Where a points worker spills its parsed rows, one directory per store
+    #: partition. Unset means "hand the frame back inline", which is fine for a
+    #: handful of files and is what broke on 8,495 of them.
+    spill: str | None = None
     #: Further raw files this task must pack *itself*, because they write into
     #: a shard this task already owns. A zarr shard is one file: two processes
     #: writing different frames of it both read-modify-write the whole thing
@@ -63,21 +68,44 @@ def _raw_file(path: str):
 
 
 def parse_points(task: PackTask) -> dict[str, Any]:
-    """Parse one raw file to a DataFrame, returned as arrow-friendly bytes.
+    """Parse one raw file and spill it to disk, one file per store partition.
 
-    Polars frames pickle poorly across a spawn boundary, so the worker hands
-    back IPC bytes and the parent concatenates. Station data is small enough
-    that this is cheap; gridded never does it.
+    Returning the frame to the parent is what broke the DWD backfill: 8,495
+    files, every parsed frame held in the parent at once and then concatenated,
+    74 GB peak RSS and a SIGABRT from the allocator. Routing each worker's rows
+    into per-partition spill files instead means the parent only ever holds one
+    partition, and the pickling of large payloads through the pool's pipe goes
+    away with it.
+
+    `task.spill` is where those files go. Without it the frame comes back
+    inline, which is what the tests and small runs use.
     """
     import io
 
     src, cfg = _load(task)
     frame = src.parse(_raw_file(task.raw_path), cfg)
     if frame is None or not len(frame):
-        return {"path": task.raw_path, "rows": 0, "ipc": None}
-    buf = io.BytesIO()
-    frame.write_ipc(buf)
-    return {"path": task.raw_path, "rows": frame.height, "ipc": buf.getvalue()}
+        return {"path": task.raw_path, "rows": 0, "ipc": None, "parts": {}}
+
+    if not task.spill:
+        buf = io.BytesIO()
+        frame.write_ipc(buf)
+        return {"path": task.raw_path, "rows": frame.height, "ipc": buf.getvalue(), "parts": {}}
+
+    from meteopack.core.store.points import partition_labels
+
+    spill = Path(task.spill)
+    labels = partition_labels(frame, cfg)
+    tagged = frame.with_columns(labels.alias("__part"))
+    parts: dict[str, str] = {}
+    for value, group in tagged.partition_by("__part", as_dict=True).items():
+        label = str(value[0] if isinstance(value, tuple) else value)
+        directory = spill / label
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{uuid.uuid4().hex}.arrow"
+        group.drop("__part").write_ipc(target)
+        parts[label] = str(target)
+    return {"path": task.raw_path, "rows": frame.height, "ipc": None, "parts": parts}
 
 
 def write_gridded(task: PackTask) -> dict[str, Any]:

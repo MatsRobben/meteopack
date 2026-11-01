@@ -212,6 +212,32 @@ def write_schema(cfg: ProductConfig, root: str | os.PathLike[str], *,
     return target
 
 
+def partition_labels(frame: pl.DataFrame, cfg: ProductConfig) -> pl.Series:
+    """One label per row naming the partition it belongs to.
+
+    Exposed so a writer can route rows to a partition *before* materialising
+    the whole dataset. `write` derives the same labels internally; this is the
+    same expressions, so the two cannot disagree about where a row goes.
+    """
+    keys = list(cfg.store.partition_by)
+    if not keys:
+        return pl.Series("__part", ["all"] * frame.height, dtype=pl.String)
+    parts = []
+    for key in keys:
+        if key in _DERIVED:
+            expr, fmt = _DERIVED[key]
+            value = expr(pl.col("time"))
+            parts.append(value.map_elements(lambda v, f=fmt: f.format(v), return_dtype=pl.String))
+        elif key in frame.columns:
+            parts.append(pl.col(key).cast(pl.String))
+        else:
+            raise ValueError(f"partition key {key!r} is neither derived from time nor a column")
+    labelled = frame.with_columns(
+        pl.concat_str([p for p in parts], separator="/").alias("__part")
+    )
+    return labelled["__part"]
+
+
 def write(
     df: pl.DataFrame,
     cfg: ProductConfig,

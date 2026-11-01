@@ -11,6 +11,7 @@ import concurrent.futures as cf
 import logging
 import os
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -548,25 +549,49 @@ def stage_pack(ctx: Context) -> int:
             errors.append({"path": str(store), "error": f"{outside} frames outside the axis"})
         n_records = frames
     else:
-        import io
+        import shutil
+        import tempfile
 
         import polars as pl
 
         from meteopack.core.store import points
 
-        results = packing.run(_pack_tasks(ctx, files), packing.parse_points, workers=workers)
-        errors = [r for r in results if r.get("error")]
-        frames = [pl.read_ipc(io.BytesIO(r["ipc"])) for r in results if r.get("ipc")]
-        if not frames:
-            print("nothing parsed")
-            return 1
-        df = pl.concat(frames, how="diagonal_relaxed")
-        df = _coalesce_observations(df)
-        paths = points.write(df, ctx.cfg, ctx.root)
+        # Workers spill to per-partition files and the parent handles one
+        # partition at a time. Concatenating every parsed frame in the parent
+        # is what killed the DWD backfill: 8,495 files, 74 GB peak RSS and a
+        # SIGABRT from the allocator.
+        spill = Path(tempfile.mkdtemp(prefix="meteopack-pack-", dir=os.environ.get("TMPDIR")))
+        try:
+            tasks = _pack_tasks(ctx, files)
+            tasks = [replace(t, spill=str(spill)) for t in tasks]
+            results = packing.run(tasks, packing.parse_points, workers=workers)
+            errors = [r for r in results if r.get("error")]
+
+            by_partition: dict[str, list[str]] = {}
+            for result in results:
+                for label, path in (result.get("parts") or {}).items():
+                    by_partition.setdefault(label, []).append(path)
+            if not by_partition:
+                print("nothing parsed")
+                return 1
+
+            n_records = 0
+            paths: list[Path] = []
+            for label in sorted(by_partition):
+                part = pl.concat(
+                    [pl.read_ipc(f) for f in by_partition[label]], how="diagonal_relaxed"
+                )
+                part = _coalesce_observations(part)
+                paths.extend(points.write(part, ctx.cfg, ctx.root))
+                n_records += part.height
+                print(f"  {label}: {part.height} rows")
+                del part
+        finally:
+            shutil.rmtree(spill, ignore_errors=True)
+
         points.write_schema(ctx.cfg, ctx.root)
         store = points.store_path(ctx.root, ctx.cfg.store_id)
-        n_records = df.height
-        print(f"packed {df.height} rows into {len(paths)} partition file(s) at {store}")
+        print(f"packed {n_records} rows into {len(paths)} partition file(s) at {store}")
 
     manifest.write(store, manifest.Manifest.new(
         ctx.cfg.store_id, "packed", ctx.cfg.store.kind, ctx.cfg, n_records=n_records))

@@ -125,9 +125,27 @@ def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") 
     return report
 
 
-def validate_gridded(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") -> Report:
-    import numpy as np
+def validate_gridded(cfg: ProductConfig, root: Path, *, layer: Layer = "packed",
+                     sample_frames: int = 64) -> Report:
+    """Check a gridded store without reading it all.
 
+    The first version called `gridded.read()` with no time range. On the real
+    rtcor archive that is 772,129 x 765 x 700 across three variables - over a
+    terabyte - and validation died of memory before saying anything. The
+    store's own docstring says a whole-store read is not meant to fit; the
+    validator was the one caller ignoring it.
+
+    So: metadata and the per-frame provenance arrays are read in full, because
+    they are one value per time step and that is the point of them. The imagery
+    is sampled - `sample_frames` frames spread evenly across the axis - which
+    is enough to catch an all-missing variable or a range violation, and is
+    honest about being a sample rather than claiming to have checked every
+    pixel of 15 GB.
+    """
+    import numpy as np
+    import zarr
+
+    from meteopack.core.encoding import Encoding
     from meteopack.core.store import gridded
 
     report = Report(store_id=cfg.store_id, kind="gridded")
@@ -137,86 +155,132 @@ def validate_gridded(cfg: ProductConfig, root: Path, *, layer: Layer = "packed")
         return report
     _check_manifest(report, path, cfg)
 
-    ds = gridded.read(cfg.store_id, root, layer=layer)
-    report.stats["dims"] = dict(ds.sizes)
-    report.add("has time dim", "time" in ds.sizes)
-    if "time" in ds.sizes and ds.sizes["time"] > 1:
-        deltas = np.diff(ds["time"].values).astype("timedelta64[s]").astype(int)
-        uniform = bool(np.all(deltas == cfg.cadence_seconds))
-        report.add(
-            "time axis is regular at the configured cadence",
-            uniform,
-            f"steps seen: {sorted(set(deltas.tolist()))[:4]} vs {cfg.cadence_seconds}s",
-        )
-    report.add("grid_id recorded", bool(ds.attrs.get("grid_id")), str(ds.attrs.get("grid_id")))
+    group = zarr.open_group(gridded.zarr_path(root, cfg.store_id, layer=layer), mode="r")
+    attrs = dict(group.attrs)
+    names = [n for n, _ in group.arrays() if n not in gridded._NON_FIELD]
+    if not names:
+        report.add("has data arrays", False, "the store holds no fields")
+        return report
 
-    from meteopack.core.encoding import Encoding
+    shape = tuple(int(n) for n in group[names[0]].shape)
+    report.stats["dims"] = dict(zip(gridded.DIMS, shape, strict=True))
+    report.add("has a time axis", shape[0] > 0, f"{shape[0]} steps")
+
+    stamps = np.asarray(group[gridded.TIME_NAME][:]).astype("datetime64[ns]")
+    if stamps.size > 1:
+        deltas = np.unique(np.diff(stamps).astype("timedelta64[s]").astype(int))
+        uniform = bool(np.all(deltas == cfg.cadence_seconds))
+        report.add("time axis is regular at the configured cadence", uniform,
+                   f"steps seen: {sorted(deltas.tolist())[:4]} vs {cfg.cadence_seconds}s")
+    report.add("grid_id recorded", bool(attrs.get("grid_id")), str(attrs.get("grid_id")))
+    mapping = attrs.get(gridded.GRID_MAPPING_NAME)
+    report.add(
+        "georeferenced", bool(mapping),
+        # The detail is printed whether the check passes or fails, so it has to
+        # read correctly both ways; "no grid mapping" next to a `pass` is the
+        # kind of output that teaches you to stop reading it.
+        str((mapping or {}).get("proj4_params", "")) or "no grid mapping on the root group",
+    )
+    report.stats["time_start"] = str(stamps[0]) if stamps.size else "-"
+    report.stats["time_end"] = str(stamps[-1]) if stamps.size else "-"
+
+    _check_frame_provenance_arrays(report, group, shape[0])
 
     encodings = {v.name: Encoding.from_config(v.encoding, name=v.name) for v in cfg.variables}
     ranges = {v.name: (v.valid_min, v.valid_max) for v in cfg.variables}
+    picks = _sample_positions(group, shape[0], sample_frames)
+    report.stats["frames:sampled"] = len(picks)
     any_data = False
-    for name, arr in ds.data_vars.items():
-        if name in gridded.PROVENANCE:
-            continue
-        values = arr.values
-        encoding = encodings.get(str(name))
-        if encoding is not None:
-            # An integer array has no NaN, so counting non-NaN would report
-            # every sentinel as data and a store of pure fill as 100% full.
-            codes = values
-            real = ~np.isin(codes, np.asarray(sorted(encoding.reserved), dtype=codes.dtype))
-            report.stats[f"{name}:missing"] = int((codes == encoding.missing).sum())
-            report.stats[f"{name}:out_of_image"] = int((codes == encoding.out_of_image).sum())
-            physical = encoding.decode(codes[real]) if real.any() else np.empty(0, "float32")
-        else:
-            real = np.isfinite(values)
-            physical = values[real]
-        filled, total = int(real.sum()), int(arr.size)
+    for name in names:
+        array = group[name]
+        encoding = encodings.get(name)
+        filled = total = missing = out_of_image = 0
+        lo_seen = hi_seen = None
+        for i in picks:
+            frame = np.asarray(array[int(i)])
+            total += frame.size
+            if encoding is not None:
+                real = ~np.isin(frame, np.asarray(sorted(encoding.reserved), dtype=frame.dtype))
+                missing += int((frame == encoding.missing).sum())
+                out_of_image += int((frame == encoding.out_of_image).sum())
+                values = encoding.decode(frame[real]) if real.any() else None
+            else:
+                real = np.isfinite(frame)
+                values = frame[real] if real.any() else None
+            filled += int(real.sum())
+            if values is not None and values.size:
+                lo = float(np.nanmin(values))
+                hi = float(np.nanmax(values))
+                lo_seen = lo if lo_seen is None else min(lo_seen, lo)
+                hi_seen = hi if hi_seen is None else max(hi_seen, hi)
         any_data = any_data or filled > 0
-        report.stats[f"{name}:filled"] = f"{filled}/{total} ({100 * filled / max(total, 1):.1f}%)"
-        lo, hi = ranges.get(str(name), (None, None))
-        if physical.size and (lo is not None or hi is not None):
-            seen = (float(physical.min()), float(physical.max()))
-            ok = (lo is None or seen[0] >= lo) and (hi is None or seen[1] <= hi)
-            report.add(
-                f"{name} within valid range",
-                ok,
-                f"[{seen[0]:g}, {seen[1]:g}] vs [{lo}, {hi}]",
-            )
+        report.stats[f"{name}:filled"] = (
+            f"{filled}/{total} ({100 * filled / max(total, 1):.1f}% of sampled frames)"
+        )
+        if encoding is not None:
+            report.stats[f"{name}:missing"] = missing
+            report.stats[f"{name}:out_of_image"] = out_of_image
+        want_lo, want_hi = ranges.get(name, (None, None))
+        if lo_seen is not None and (want_lo is not None or want_hi is not None):
+            ok = ((want_lo is None or lo_seen >= want_lo)
+                  and (want_hi is None or hi_seen <= want_hi))
+            report.add(f"{name} within valid range", ok,
+                       f"[{lo_seen:g}, {hi_seen:g}] vs [{want_lo}, {want_hi}]")
 
     report.add("some data present", any_data)
-    _check_frame_provenance(report, ds)
     return report
 
 
-def _check_frame_provenance(report: Report, ds) -> None:
-    """Count the frames the store says it never got, and sanity-check them.
+def _sample_positions(group, n_times: int, wanted: int) -> list[int]:
+    """Frame indices to inspect: spread across the axis, skipping known gaps.
 
-    A missing frame and a corrupt one are different upstream failures and a
-    frame cannot be both: it either had no file or had one that would not read.
+    Sampling only written frames keeps the fill statistics meaningful - an
+    archive with a 0.3% gap would otherwise report that gap as missing data in
+    the variable rather than as an absent frame, which the provenance arrays
+    already say.
     """
+    import numpy as np
+
+    if n_times <= wanted:
+        candidates = np.arange(n_times)
+    else:
+        candidates = np.linspace(0, n_times - 1, wanted).astype(int)
+    if "is_missing_frame" in {n for n, _ in group.arrays()}:
+        flags = np.asarray(group["is_missing_frame"][:])
+        kept = [int(i) for i in candidates if not flags[i]]
+        if kept:
+            return kept
+    return [int(i) for i in candidates]
+
+
+def _check_frame_provenance_arrays(report: Report, group, n_times: int) -> None:
+    """Per-frame provenance, read in full: one value per time step is cheap."""
     import numpy as np
 
     from meteopack.core.store import gridded
 
-    present = [n for n in gridded.PROVENANCE if n in ds.variables]
-    if not present:
+    present = {n for n, _ in group.arrays()}
+    if not ({"is_missing_frame", "is_corrupt_frame"} & present):
         report.add("per-frame provenance recorded", False,
                    "no is_missing_frame / is_corrupt_frame arrays")
         return
-    missing = np.asarray(ds["is_missing_frame"].values) if "is_missing_frame" in ds.variables else None
-    corrupt = np.asarray(ds["is_corrupt_frame"].values) if "is_corrupt_frame" in ds.variables else None
+    missing = np.asarray(group["is_missing_frame"][:]) if "is_missing_frame" in present else None
+    corrupt = np.asarray(group["is_corrupt_frame"][:]) if "is_corrupt_frame" in present else None
     if missing is not None:
         report.stats["frames:missing"] = int(missing.sum())
+        report.stats["frames:written"] = int(n_times - missing.sum())
     if corrupt is not None:
         report.stats["frames:corrupt"] = int(corrupt.sum())
     if missing is not None and corrupt is not None:
         both = int((missing & corrupt).sum())
         report.add("no frame is both missing and corrupt", both == 0, f"{both} frames")
-    if "source_layout_id" in ds.variables:
-        layouts = np.asarray(ds["source_layout_id"].values)
-        seen = np.unique(layouts[~missing]) if missing is not None else np.unique(layouts)
-        report.stats["frames:layouts"] = sorted(int(v) for v in seen)
+    if "source_layout_id" in present:
+        layouts = np.asarray(group["source_layout_id"][:])
+        seen = layouts[~missing] if missing is not None else layouts
+        counts = {int(v): int(c) for v, c in zip(*np.unique(seen, return_counts=True),
+                                                 strict=True)}
+        report.stats["frames:layouts"] = counts
+    assert gridded.PROVENANCE
 
 
 def validate(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") -> Report:

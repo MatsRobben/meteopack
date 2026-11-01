@@ -755,6 +755,19 @@ class KnmiRadar:
                 try:
                     with h5py.File(BytesIO(data), "r") as frame:
                         specs = _image_specs(frame)
+                        if not specs:
+                            # A readable HDF5 file with no image groups at all.
+                            # Real: several 2019 tars contain them. That is a
+                            # corrupt frame, which the store records, and not
+                            # schema drift - treating it as drift failed the
+                            # whole tar and lost the other 287 good frames.
+                            logger.warning(
+                                "knmi_radar: %s has no image groups; recording it as corrupt",
+                                member.name,
+                            )
+                            corrupt[index] = True
+                            layout_ids[index] = LAYOUT_CORRUPT
+                            continue
                         if grid is not None:
                             _check_grid(frame, specs, grid, member.name, cfg)
                         layout = tuple(sorted(s.descriptor for s in specs.values()))
