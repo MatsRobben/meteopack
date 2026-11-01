@@ -393,6 +393,17 @@ def _pack_tasks(ctx: Context, files: list[Path], timeline=None) -> list:
     return out
 
 
+def _span_of(ctx: Context, path: Path):
+    """What one raw file covers, if the source can tell from the name alone."""
+    reader = getattr(ctx.src, "span_of", None)
+    if not callable(reader):
+        return None
+    try:
+        return reader(path)
+    except Exception:  # noqa: BLE001 - an unreadable name is just one less span
+        return None
+
+
 def _timeline_for(ctx: Context):
     """The store's time axis: the window if given, else what the catalog holds.
 
@@ -410,10 +421,19 @@ def _timeline_for(ctx: Context):
         rows = files.filter(files["product"] == ctx.cfg.product) if len(files) else files
         times = [t for t in rows["valid_time"].to_list() if t is not None] if len(rows) else []
         if not times:
-            raise SystemExit(
-                f"error: cannot size the time axis for {ctx.cfg.store_id}. Pass --window, or "
-                f"fetch first so the catalog records valid times."
-            )
+            # An archive copied in by hand has no catalog, and that is the
+            # normal case for a backfill. Most sources can read a file's span
+            # off its own name, which is enough to size the axis and is a
+            # filename parse, not a read. Typing the window instead is how the
+            # rtcor axis came to start one step after the archive's first
+            # frame, dropping it with no way to see which frame was gone.
+            spans = [s for s in (_span_of(ctx, f) for f in ctx.raw_files()) if s]
+            if not spans:
+                raise SystemExit(
+                    f"error: cannot size the time axis for {ctx.cfg.store_id}. Pass --window, "
+                    f"or fetch first so the catalog records valid times."
+                )
+            times = [t for span in spans for t in span]
         start, end = min(times), max(times) + step
         start = start.replace(tzinfo=UTC) if start.tzinfo is None else start
         end = end.replace(tzinfo=UTC) if end.tzinfo is None else end

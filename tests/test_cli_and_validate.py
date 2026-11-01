@@ -241,6 +241,38 @@ def test_gridded_timeline_can_be_derived_from_the_catalog(tmp_path):
     assert tl.end >= datetime(2024, 7, 3, 8, 5, tzinfo=UTC)
 
 
+def test_an_uncatalogued_archive_sizes_its_axis_from_the_filenames(tmp_path, monkeypatch):
+    """A backfill from an archive copied in by hand has no catalog.
+
+    The axis then has to come from the filenames, which KNMI's carry. Typing
+    the window instead is how the real rtcor axis came to begin one step after
+    the archive's first frame: the first three 2018 tars run 08:00->07:55 and
+    every later one runs 08:05->08:00, so a hand-typed 08:05 start dropped the
+    archive's very first frame.
+    """
+    from datetime import UTC, datetime
+
+    from meteopack.cli import Context, _timeline_for, build_parser
+
+    archive = tmp_path / "raw" / "knmi_radar" / "rtcor_5min"
+    archive.mkdir(parents=True)
+    for name in (
+        "RAD25_OPER_R___TARRRT__L2__20181219T080000_20181220T075500_0001.tar",
+        "RAD25_OPER_R___TARRRT__L2__20181220T080500_20181221T080000_0001.tar",
+    ):
+        (archive / name).write_bytes(b"")
+    monkeypatch.setenv("KNMI_RADAR_ARCHIVE", str(archive))
+
+    args = build_parser().parse_args(
+        ["pack", "knmi_radar", "--product", "rtcor_5min", "--data-root", str(tmp_path)])
+    tl = _timeline_for(Context(args))
+    # The 08:00 frame is inside the axis, not one step before it.
+    assert tl.start <= datetime(2018, 12, 19, 8, 0, tzinfo=UTC)
+    assert tl.end >= datetime(2018, 12, 21, 8, 0, tzinfo=UTC)
+    # Still snapped onto the shard grid, so one tar stays one shard.
+    assert tl.start.hour == 8 and tl.start.minute == 5
+
+
 def test_pack_without_a_window_or_catalog_says_what_to_do(tmp_path):
     from meteopack.cli import Context, _timeline_for, build_parser
 
