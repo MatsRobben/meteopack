@@ -194,3 +194,46 @@ def test_a_modern_rtcor_frame_re_encodes_to_itself():
     out = encode(codes, RTCOR, source_scale=0.01, source_offset=0.0,
                  source_missing={65534}, source_out_of_image={65535})
     np.testing.assert_array_equal(out, codes)
+
+
+def test_cf_standard_names_are_only_claimed_where_they_are_real():
+    """A standard_name the CF table does not define is worse than none.
+
+    Qualified variants - air_temperature_min, soil_temperature_10cm,
+    precipitation_amount_1h - are not CF standard names: CF expresses those
+    with cell methods and coordinates. They get no standard_name rather than an
+    invented one.
+    """
+    from meteopack.core.config import Variable
+
+    def var(name, **kw):
+        return Variable(name=name, source_key="x", units="1", **kw)
+
+    assert var("air_temperature").cf_standard_name == "air_temperature"
+    assert var("air_temperature_min").cf_standard_name is None
+    assert var("soil_temperature").cf_standard_name == "soil_temperature"
+    assert var("soil_temperature_10cm").cf_standard_name is None
+    assert var("ir108_brightness_temperature").cf_standard_name is None
+
+    # An alias: our shorter column name, CF's longer attribute.
+    flux = var("surface_downwelling_shortwave_flux")
+    assert flux.cf_standard_name == "surface_downwelling_shortwave_flux_in_air"
+
+    # An explicit one always wins.
+    assert var("anything", standard_name="toa_outgoing_shortwave_flux").cf_standard_name == (
+        "toa_outgoing_shortwave_flux")
+
+
+def test_every_configured_variable_names_its_units():
+    """Columns of numbers with no units is what the points stores were."""
+    import glob
+
+    import yaml
+
+    from meteopack.core.config import Variable
+
+    for path in sorted(glob.glob("configs/products/*/*.yaml")):
+        for spec in yaml.safe_load(open(path)).get("variables") or []:
+            var = Variable(**spec)
+            assert var.units is not None, f"{path}: {var.name} has no units"
+            assert var.cf_attrs["long_name"], f"{path}: {var.name} has no long_name"

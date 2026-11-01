@@ -509,6 +509,7 @@ def stage_pack(ctx: Context) -> int:
         df = pl.concat(frames, how="diagonal_relaxed")
         df = _coalesce_observations(df)
         paths = points.write(df, ctx.cfg, ctx.root)
+        points.write_schema(ctx.cfg, ctx.root)
         store = points.store_path(ctx.root, ctx.cfg.store_id)
         n_records = df.height
         print(f"packed {df.height} rows into {len(paths)} partition file(s) at {store}")

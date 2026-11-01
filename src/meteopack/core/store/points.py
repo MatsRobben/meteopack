@@ -30,6 +30,7 @@ station metadata joinable without a dtype negotiation.
 """
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import Iterable, Sequence
@@ -154,6 +155,61 @@ def _write_atomic(frame: pl.DataFrame, path: Path) -> None:
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     frame.write_parquet(tmp, statistics=True)
     os.replace(tmp, path)
+
+
+SCHEMA_NAME = "schema.json"
+
+
+def write_schema(cfg: ProductConfig, root: str | os.PathLike[str], *,
+                 layer: Layer = DEFAULT_LAYER) -> Path:
+    """Publish the dataset's metadata beside the parquet.
+
+    A gridded store carries CF attributes on its zarr group; parquet has no
+    equivalent place for them, so they go in a file. Without this the points
+    stores were columns of numbers with no units, no standard names and no
+    statement of what the dataset is - which is exactly what the previous
+    in-situ store got right, carrying KNMI's own title, institution, source,
+    history and references straight through.
+
+    Also records each variable's name in the source, so KNMI's `ta` and `dd`
+    stay greppable after the rename to CF names.
+    """
+    payload = {
+        "Conventions": "CF-1.10",
+        "featureType": "timeSeries",
+        "title": str(cfg.attrs.get("title") or cfg.description
+                     or f"{cfg.source} {cfg.product} v{cfg.version}"),
+        "store_id": cfg.store_id,
+        "source_name": cfg.source,
+        "product": cfg.product,
+        "version": cfg.version,
+        "cadence_seconds": cfg.cadence_seconds,
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        **{k: v for k, v in (cfg.attrs or {}).items() if k != "title"},
+        "variables": {
+            var.name: {
+                k: v for k, v in {
+                    "units": var.units,
+                    "long_name": var.long_name,
+                    "standard_name": var.cf_standard_name,
+                    "source_name": var.legacy_name or var.source_key,
+                    "valid_min": var.valid_min,
+                    "valid_max": var.valid_max,
+                }.items() if v is not None
+            }
+            for var in cfg.variables
+        },
+        "columns": {
+            "time": {"units": "UTC", "long_name": "observation time"},
+            "station_id": {"long_name": "station identifier", "dtype": "string"},
+        },
+    }
+    target = store_path(root, cfg.store_id, layer=layer) / SCHEMA_NAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    os.replace(tmp, target)
+    return target
 
 
 def write(

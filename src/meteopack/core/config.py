@@ -90,6 +90,48 @@ class RateLimit(BaseModel):
     backoff_seconds: float = Field(default=1.0, ge=0)
 
 
+#: Canonical names that are also CF standard names, verified individually
+#: against the CF standard-name table rather than assumed from the spelling.
+#: A variable whose name is in here gets `standard_name` for free; anything
+#: else must set it explicitly, because claiming CF compliance for a name the
+#: table does not define is worse than claiming nothing. Names ending in a
+#: qualifier (`_min`, `_1h`, `_10cm`) are deliberately absent: CF expresses
+#: those with cell methods and coordinates, not by inventing a name.
+CF_STANDARD_NAMES: frozenset[str] = frozenset({
+    "air_pressure",
+    "air_pressure_at_sea_level",
+    "air_temperature",
+    "cloud_area_fraction",
+    "cloud_base_height",
+    "dew_point_temperature",
+    "precipitation_amount",
+    "relative_humidity",
+    "soil_temperature",
+    "surface_diffuse_downwelling_shortwave_flux_in_air",
+    "surface_downwelling_longwave_flux_in_air",
+    "surface_downwelling_shortwave_flux_in_air",
+    "surface_snow_thickness",
+    "visibility_in_air",
+    "water_vapor_pressure",
+    "wet_bulb_temperature",
+    "wind_from_direction",
+    "wind_speed",
+    "wind_speed_of_gust",
+})
+
+#: Where our canonical name and the CF one differ, usually because CF appends
+#: `_in_air` to a flux. Keeping our shorter name as the column and the CF one
+#: as the attribute is the point of having both.
+CF_ALIASES: dict[str, str] = {
+    "surface_downwelling_shortwave_flux": "surface_downwelling_shortwave_flux_in_air",
+    "surface_downwelling_longwave_flux": "surface_downwelling_longwave_flux_in_air",
+    "surface_diffuse_downwelling_shortwave_flux":
+        "surface_diffuse_downwelling_shortwave_flux_in_air",
+    "sunshine_duration": "duration_of_sunshine",
+    "precipitation_duration": "duration_of_precipitation",
+}
+
+
 class Variable(BaseModel):
     """One canonical variable: the name we use, and how to get there."""
 
@@ -119,11 +161,20 @@ class Variable(BaseModel):
     encoding: dict | None = None
 
     @property
+    def cf_standard_name(self) -> str | None:
+        """The CF standard name, explicit or inferred from a verified list."""
+        if self.standard_name:
+            return self.standard_name
+        alias = CF_ALIASES.get(self.name, self.name)
+        return alias if alias in CF_STANDARD_NAMES or alias in CF_ALIASES.values() else None
+
+    @property
     def cf_attrs(self) -> dict[str, str]:
         """The CF attributes this variable contributes to its array."""
         out = {"units": self.units, "long_name": self.long_name or self.name}
-        if self.standard_name:
-            out["standard_name"] = self.standard_name
+        standard = self.cf_standard_name
+        if standard:
+            out["standard_name"] = standard
         if self.legacy_name:
             out["legacy_name"] = self.legacy_name
         return out
