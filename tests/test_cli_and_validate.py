@@ -239,3 +239,26 @@ def test_pack_without_a_window_or_catalog_says_what_to_do(tmp_path):
     args = build_parser().parse_args(["pack", "knmi_radar", "--data-root", str(tmp_path)])
     with pytest.raises(SystemExit, match="Pass --window"):
         _timeline_for(Context(args))
+
+
+def test_raw_files_skips_sidecars_that_are_not_observations(tmp_path):
+    """Pointing this pipeline at the previous one's archive made every source
+    try to parse `station_catalog.json` as data and report schema drift."""
+    import argparse
+
+    from meteopack.cli import Context
+
+    root = tmp_path / "raw" / "belgium" / "aws_10min"
+    root.mkdir(parents=True)
+    (root / "station_catalog.json").write_text("{}")
+    (root / "6414.csv").write_text("a,b\n1,2\n")
+    (root / "half.csv.part").write_text("x")
+
+    class FakeCtx:
+        raw_root = root
+        SIDECARS = Context.SIDECARS
+        raw_files = Context.raw_files
+
+    names = [p.name for p in FakeCtx.raw_files(FakeCtx())]
+    assert names == ["6414.csv"], names
+    assert isinstance(argparse.Namespace(), argparse.Namespace)

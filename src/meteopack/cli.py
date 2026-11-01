@@ -119,8 +119,19 @@ class Context:
     def raw_root(self) -> Path:
         return self.root / "raw" / self.cfg.source / self.cfg.product
 
+    #: Files that sit in a raw directory without being data. `.part` is our own
+    #: half-written download; `station_catalog.json` is a sidecar the previous
+    #: pipeline wrote beside the observations, and pointing this one at that
+    #: archive made every source try to parse it as a data file and report
+    #: schema drift. Skipped by name rather than by extension, so a real
+    #: `.json` observation file is still packed.
+    SIDECARS = frozenset({"station_catalog.json"})
+
     def raw_files(self) -> list[Path]:
-        return sorted(p for p in self.raw_root.rglob("*") if p.is_file() and p.suffix != ".part")
+        return sorted(
+            p for p in self.raw_root.rglob("*")
+            if p.is_file() and p.suffix != ".part" and p.name not in self.SIDECARS
+        )
 
     def plan(self, stage: str):
         from meteopack.jobs.plan import build_plan
