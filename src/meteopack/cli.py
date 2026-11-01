@@ -517,33 +517,114 @@ def _files_for_window(ctx, files: list[Path]) -> tuple[list[Path], int]:
     return keep, undated
 
 
+#: Filesystems a spill must never land on, whatever the free space says:
+#: these are RAM, so spilling there puts the data back in memory and undoes
+#: the reason for spilling at all.
+_MEMORY_FS = frozenset({"tmpfs", "ramfs", "devtmpfs"})
+
+#: Filesystems where a spill is worth moving off. The whole point of moving it
+#: is that reads of the raw archive and writes of the store already share one
+#: network filesystem, and spill traffic queues on the same spindles.
+_NETWORK_FS = frozenset({
+    "nfs", "nfs4", "cifs", "smb3", "lustre", "beegfs", "gpfs", "ceph",
+    "glusterfs", "fuse.sshfs", "afs", "9p",
+})
+
+#: Node-local places to try, in order, and only when the data root is on a
+#: network filesystem. Probed rather than assumed: /scratch is 1.6 TB free on
+#: one node of this cluster and 7.4 GB on another.
+_LOCAL_SPILL_DIRS: tuple[Path, ...] = (
+    Path("/scratch") / (os.environ.get("USER") or "meteopack"),
+    Path("/local") / (os.environ.get("USER") or "meteopack"),
+)
+
+
+def _filesystem_type(path: Path) -> str | None:
+    """The fstype `path` lives on, or None when it cannot be determined.
+
+    Read from /proc/mounts by longest matching mount point. Unavailable off
+    Linux, and None there means "assume ordinary local disk", which is the
+    conservative answer: it keeps the spill beside the data.
+    """
+    try:
+        entries = []
+        with open("/proc/mounts") as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) >= 3:
+                    entries.append((parts[1], parts[2]))
+    except OSError:
+        return None
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        resolved = str(path)
+    best = None
+    for mount, fstype in entries:
+        if (resolved == mount or resolved.startswith(mount.rstrip("/") + "/")) and (
+            best is None or len(mount) > len(best[0])
+        ):
+            best = (mount, fstype)
+    return best[1] if best else None
+
+
 def _spill_root(root: Path) -> Path:
     """Where a points pack spills its parsed rows between parse and write.
 
-    Must be **real disk with room for the whole dataset**, which rules out both
-    defaults you would reach for first:
+    The spill is written once, read once and deleted; it never reaches the
+    store. So moving it is not a copy - it removes that traffic entirely.
 
-    * `/tmp` is 16 GB here, shared between everyone on the node, and a DMI
-      backfill filled it - `OSError: No space left on device` partway through.
-    * `/dev/shm` is a tmpfs, which is to say RAM. Spilling there would put the
-      data straight back in memory and undo the reason for spilling at all.
+    It is only worth moving when the data root is on a *network* filesystem,
+    which is the situation it was written for: on this cluster the raw archive
+    and the packed store share one NFS export, so a pack already reads and
+    writes the same spindles, and ~17 GB of spill traffic queues behind the
+    reads it is competing with. Measured here, local disk is 276/442 MB/s
+    against NFS at 91/90.
 
-    So the default is inside the data root: it is the volume already sized for
-    this data, and a spill that outlives a crash is visible next to the store
-    rather than hidden in a system directory. `$METEOPACK_SPILL` overrides it
-    for a site with fast node-local disk, which would genuinely be better.
+    On an ordinary machine - data root on local disk - there is nothing to
+    gain and something to lose, so the spill stays beside the data exactly as
+    before. A tmpfs is never used however much space it reports, because it is
+    RAM and spilling to it defeats the purpose.
     """
     override = os.environ.get("METEOPACK_SPILL")
-    base = Path(override) if override else Path(root) / "_spill"
-    base.mkdir(parents=True, exist_ok=True)
-    free = shutil.disk_usage(base).free
+    if override:
+        base = Path(override)
+        base.mkdir(parents=True, exist_ok=True)
+        if _filesystem_type(base) in _MEMORY_FS:
+            logger.warning(
+                "$METEOPACK_SPILL points at %s, which is RAM; a large pack will "
+                "run the machine out of memory rather than spilling to disk", base,
+            )
+        return base
+
+    fallback = Path(root) / "_spill"
+    fallback.mkdir(parents=True, exist_ok=True)
+    if _filesystem_type(root) not in _NETWORK_FS:
+        # Ordinary machine: the data root is local, so this *is* local disk.
+        return fallback
+
+    for base in _LOCAL_SPILL_DIRS:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            fstype = _filesystem_type(base)
+            if fstype in _MEMORY_FS or fstype in _NETWORK_FS:
+                continue
+            free = shutil.disk_usage(base).free
+        except OSError:
+            continue
+        if free >= _MIN_SPILL_BYTES:
+            logger.info("spilling to local disk %s (%.0f GB free)", base, free / 1e9)
+            return base
+
+    logger.info(
+        "no node-local disk with %.0f GB free; spilling to %s, which is on the "
+        "same filesystem the pack reads from. $METEOPACK_SPILL overrides this.",
+        _MIN_SPILL_BYTES / 1e9, fallback,
+    )
+    free = shutil.disk_usage(fallback).free
     if free < _MIN_SPILL_BYTES:
-        logger.warning(
-            "only %.1f GB free at %s for pack spill; set $METEOPACK_SPILL to a "
-            "filesystem with room, and not to a tmpfs like /dev/shm, which is RAM",
-            free / 1e9, base,
-        )
-    return base
+        logger.warning("only %.1f GB free at %s", free / 1e9, fallback)
+    return fallback
 
 
 #: Below this, say so before the pack rather than after it has filled the disk.

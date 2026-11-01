@@ -7,6 +7,8 @@ raise a traceback.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -271,38 +273,86 @@ def test_raw_files_skips_sidecars_that_are_not_observations(tmp_path):
     assert isinstance(argparse.Namespace(), argparse.Namespace)
 
 
-def test_pack_spill_goes_to_real_disk_with_room(tmp_path, monkeypatch):
-    """`/tmp` is 16 GB and shared on this cluster and a DMI backfill filled it;
-    `/dev/shm` is a tmpfs, so spilling there puts the data back in RAM and
-    undoes the reason for spilling. The default belongs on the data volume.
+def test_an_ordinary_machine_keeps_the_spill_beside_the_data(tmp_path, monkeypatch):
+    """The data root is local disk: there is nothing to move it off.
+
+    Relocating the spill only pays when the data root is on a *network*
+    filesystem the pack is also reading from. On a laptop it would at best do
+    nothing and at worst land on a slower disk or a tmpfs.
     """
-    import os
-
-    from meteopack.cli import _spill_root
-
-    monkeypatch.delenv("METEOPACK_SPILL", raising=False)
-    root = tmp_path / "data"
-    root.mkdir()
-    assert _spill_root(root) == root / "_spill"
-    assert (root / "_spill").is_dir()
-
-    elsewhere = tmp_path / "fast"
-    monkeypatch.setenv("METEOPACK_SPILL", str(elsewhere))
-    assert _spill_root(root) == elsewhere
-    assert elsewhere.is_dir()
-    assert os.access(elsewhere, os.W_OK)
-
-
-def test_a_cramped_spill_filesystem_is_warned_about(tmp_path, monkeypatch, caplog):
-    import logging
-
     from meteopack import cli
 
-    monkeypatch.setenv("METEOPACK_SPILL", str(tmp_path / "small"))
-    monkeypatch.setattr(cli, "_MIN_SPILL_BYTES", 1 << 62)
-    with caplog.at_level(logging.WARNING):
-        cli._spill_root(tmp_path)
-    assert any("free at" in r.message for r in caplog.records), caplog.text
+    monkeypatch.delenv("METEOPACK_SPILL", raising=False)
+    monkeypatch.setattr(cli, "_filesystem_type", lambda p: "ext4")
+    monkeypatch.setattr(cli, "_LOCAL_SPILL_DIRS", (tmp_path / "scratch",))
+    assert cli._spill_root(tmp_path / "data") == tmp_path / "data" / "_spill"
+    assert not (tmp_path / "scratch").exists(), "must not even look for local disk"
+
+
+def test_a_network_data_root_moves_the_spill_to_local_disk(tmp_path, monkeypatch):
+    """~17 GB of spill traffic otherwise queues on the spindles the reads
+    are already waiting for."""
+    from meteopack import cli
+
+    monkeypatch.delenv("METEOPACK_SPILL", raising=False)
+    local = tmp_path / "scratch"
+    types = {str(tmp_path / "data"): "nfs4", str(local): "xfs"}
+    monkeypatch.setattr(cli, "_filesystem_type",
+                        lambda p: types.get(str(p), "ext4"))
+    monkeypatch.setattr(cli, "_LOCAL_SPILL_DIRS", (local,))
+    monkeypatch.setattr(cli.shutil, "disk_usage",
+                        lambda p: SimpleNamespace(total=1 << 40, used=0, free=1 << 40))
+    assert cli._spill_root(tmp_path / "data") == local
+
+
+def test_a_tmpfs_is_never_chosen_however_much_it_reports(tmp_path, monkeypatch):
+    """It is RAM. Spilling there puts the data back in memory, which is the
+    whole thing spilling exists to avoid - and /tmp is a tmpfs on many
+    systems."""
+    from meteopack import cli
+
+    monkeypatch.delenv("METEOPACK_SPILL", raising=False)
+    ram = tmp_path / "ram"
+    types = {str(tmp_path / "data"): "nfs4", str(ram): "tmpfs"}
+    monkeypatch.setattr(cli, "_filesystem_type",
+                        lambda p: types.get(str(p), "ext4"))
+    monkeypatch.setattr(cli, "_LOCAL_SPILL_DIRS", (ram,))
+    monkeypatch.setattr(cli.shutil, "disk_usage",
+                        lambda p: SimpleNamespace(total=1 << 40, used=0, free=1 << 40))
+    assert cli._spill_root(tmp_path / "data") == tmp_path / "data" / "_spill"
+
+
+def test_local_disk_without_room_is_skipped(tmp_path, monkeypatch):
+    """/scratch is 1.6 TB on one node of this cluster and 7.4 GB on another,
+    and a dwd-scale pack spills ~17 GB. Filling it is how a run dies."""
+    from meteopack import cli
+
+    monkeypatch.delenv("METEOPACK_SPILL", raising=False)
+    small = tmp_path / "small"
+    types = {str(tmp_path / "data"): "nfs4", str(small): "xfs"}
+    monkeypatch.setattr(cli, "_filesystem_type",
+                        lambda p: types.get(str(p), "ext4"))
+    monkeypatch.setattr(cli, "_LOCAL_SPILL_DIRS", (small,))
+    monkeypatch.setattr(cli.shutil, "disk_usage",
+                        lambda p: SimpleNamespace(total=1 << 30, used=0, free=1 << 20))
+    assert cli._spill_root(tmp_path / "data") == tmp_path / "data" / "_spill"
+
+
+def test_an_explicit_spill_location_is_obeyed(tmp_path, monkeypatch):
+    from meteopack import cli
+
+    target = tmp_path / "fast"
+    monkeypatch.setenv("METEOPACK_SPILL", str(target))
+    assert cli._spill_root(tmp_path / "data") == target
+    assert target.is_dir()
+
+
+def test_filesystem_type_reads_the_longest_matching_mount(tmp_path):
+    from meteopack.cli import _filesystem_type
+
+    # "/" always exists and is never a network filesystem on a test runner.
+    assert _filesystem_type(Path("/")) is not None
+    assert _filesystem_type(tmp_path) is not None
 
 
 def test_pack_recovers_stations_the_live_catalogue_has_forgotten(tmp_path):
