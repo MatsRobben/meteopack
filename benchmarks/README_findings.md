@@ -120,3 +120,52 @@ keeps the zeros and keeps the two sentinels apart - the same judgement the
 previous pipeline already made for rtcor's accumulation image, where it
 preserved 426,929 dry pixels. It is `extra.missing_data_policy`, one line per
 product, if the other reading is wanted.
+
+---
+
+# knmi_insitu was CPU-bound, not I/O-bound (2026-11-02)
+
+Radar is limited by the filesystem. This source was not, and the difference
+matters because the fix is the opposite one.
+
+Measured on one tar (23.9 MiB, 144 members, 9,503 rows):
+
+    before   6.6 s    3.6 MiB/s     17x BELOW the 60 MiB/s filesystem floor
+    after    1.5 s   15.5 MiB/s
+
+`cProfile` put 65% of the time in `h5netcdf`'s `File()` constructor - 36,864
+`h5py` group lookups and 33,264 attribute reads per tar - before a single
+value was read. h5netcdf builds a netCDF *view* of the whole hierarchy
+eagerly; we want fourteen variables out of ~256 objects.
+
+netCDF-4 is HDF5, so `h5py` reads the same bytes without the walk:
+
+| | before | after |
+|---|--------|-------|
+| per member | 49 ms | 13.4 ms |
+| per tar | 6.6 s | 1.5 s |
+| group lookups per tar | 36,864 | 2,736 |
+
+**4.4x.** Over 5,211 tars that is ~70 minutes down to ~22 at six workers, and
+it is *still* CPU-bound at 15.5 MiB/s, so unlike radar this one does scale
+with workers.
+
+Verified rather than assumed, because a faster reader that returns different
+numbers is worthless:
+
+* 432 arrays spread across the archive read byte-identical both ways
+* 292 values from six tars spanning 2018-2026 match the store that was built
+  with h5netcdf, exactly
+* the 55 in-situ unit tests pass
+
+Two h5py differences had to be handled: it returns strings as `bytes` where
+h5netcdf returns `str`, and scalars as 1-element arrays. The first comparison
+written here reported "every value differs" purely because of that - the data
+was identical and the test was wrong.
+
+## The general lesson
+
+Two sources, two opposite bottlenecks. Measure before optimising: adding
+workers to radar does nothing (it is at 87% of the filesystem ceiling), and
+adding workers to in-situ helps a lot. The per-stage profile is what
+distinguishes them, not intuition about "tabular data should be fast".
