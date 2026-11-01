@@ -161,7 +161,11 @@ def main() -> int:
     no_echo = no_echo_values(str(group.attrs["product"]))
     stamps = np.asarray(group["time"][:]).astype("datetime64[ns]")
     index = {t: i for i, t in enumerate(stamps)}
+    # Frames the store records as corrupt are withheld on purpose - a broken
+    # calibration, an unreadable image - so there is nothing to compare.
     written = ~np.asarray(group["is_missing_frame"][:])
+    if "is_corrupt_frame" in group:
+        written &= ~np.asarray(group["is_corrupt_frame"][:])
     present = {k for k, _ in group.arrays()}
 
     # Only tars that overlap what the store actually holds. Sampling the whole

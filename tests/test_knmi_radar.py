@@ -1074,3 +1074,36 @@ def test_echotop_and_reflectivity_frames_have_a_layout(parameter, code):
     spec = ImageSpec("image1", parameter, 0.5, -32.0, 0.0, 255.0, "uint8", (NY, NX))
     assert layout_id({parameter: spec}) == code
     assert LAYOUT_NAMES[code] != "unknown"
+
+
+def test_a_frame_with_a_calibration_listed_as_corrupt_is_withheld(tmp_path):
+    """692 echotop frames carry a placeholder calibration (scale 1, or the
+    reflectivity formula) over an image with no echo pixel at all, between
+    neighbours with tens of thousands. Decoded, they claimed "no echo top
+    anywhere"; they are failed products, and the store must say so.
+    """
+    from meteopack.sources.knmi_radar import (
+        LAYOUT_CORRUPT,
+        _image_specs,
+        product_fingerprint,
+    )
+
+    counts = np.full((NY, NX), 7, dtype="uint16")
+    good = frame_bytes(precip_frame(counts, legacy=True))
+    broken = frame_bytes([("image1", "PRECIP_[MM]", "GEO = 1.000000 * PV + 0.000000",
+                           0, OUT_OF_IMAGE, np.zeros((NY, NX), dtype="uint16"))])
+    with h5py.File(io.BytesIO(broken), "r") as f:
+        bad_fp = schema_fingerprint(sorted(s.descriptor for s in _image_specs(f).values()))
+    with h5py.File(io.BytesIO(good), "r") as f:
+        good_fp = schema_fingerprint(sorted(s.descriptor for s in _image_specs(f).values()))
+    path = write_tar(tmp_path / tar_name("20190601"), {
+        "RAD_NL25_RAC_RT_201906010805.h5": good, "RAD_NL25_RAC_RT_201906010810.h5": broken})
+
+    cfg = make_cfg(known_layouts=[good_fp], corrupt_layouts=[bad_fp])
+    cfg.schema_fingerprint = product_fingerprint([good_fp, bad_fp])
+    ds = KnmiRadar().parse(raw_of(path), cfg)
+    assert ds["is_corrupt_frame"].values.tolist() == [False, True]
+    assert ds["source_layout_id"].values[1] == LAYOUT_CORRUPT
+    assert np.isnan(ds["precipitation_amount"].values[1]).all()      # withheld, not "no echo"
+    assert ds["precipitation_amount"].values[0, 1, 1] == pytest.approx(0.07)
+    assert not ds.attrs.get("schema_drift"), "a layout listed as corrupt is not drift"

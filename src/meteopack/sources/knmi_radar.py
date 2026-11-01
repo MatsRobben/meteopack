@@ -908,6 +908,7 @@ class KnmiRadar:
         # Config consistency is checked once, up front, and raises: nothing
         # should be written against a config that disagrees with itself.
         self._check_pins(cfg)
+        rejected = {str(k) for k in (cfg.extra.get("corrupt_layouts") or [])}
 
         with tarfile.open(path, "r") as tar:
             for index, (_when, member) in enumerate(stamped):
@@ -963,11 +964,20 @@ class KnmiRadar:
                                            "example": member.name}
                         else:
                             entry["count"] += 1
-                        layout_ids[index] = layout_id(specs)
-                        matched = _fill_frame(
-                            frame, member.name, specs, wanted, frames, hits, index, policy,
-                            encodings,
-                        )
+                        if fp in rejected:
+                            # A calibration the config lists as broken: the
+                            # frame is recorded as corrupt and its data left
+                            # missing, rather than decoded into something
+                            # confident and wrong. See extra.corrupt_layouts.
+                            corrupt[index] = True
+                            layout_ids[index] = LAYOUT_CORRUPT
+                            matched = True
+                        else:
+                            layout_ids[index] = layout_id(specs)
+                            matched = _fill_frame(
+                                frame, member.name, specs, wanted, frames, hits, index,
+                                policy, encodings,
+                            )
                 except SchemaDriftError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - one bad frame is not a bad day
@@ -1045,13 +1055,18 @@ class KnmiRadar:
         catch, and no data should be written against it at all.
         """
         known = [str(k) for k in (cfg.extra.get("known_layouts") or [])]
+        # Layouts known to be broken are still known: they are pinned with the
+        # rest, so the hash covers every layout the archive holds, and a pack's
+        # scan_report fingerprint can be pasted in as it stands.
+        known += [str(k) for k in (cfg.extra.get("corrupt_layouts") or [])]
         pinned = cfg.schema_fingerprint
         if known and pinned:
             seen = product_fingerprint(known)
             if seen != pinned:
                 raise SchemaDriftError(
-                    f"config is inconsistent: extra.known_layouts hashes to {seen} but "
-                    f"schema_fingerprint pins {pinned}. Re-run `scan` and re-pin both together."
+                    f"config is inconsistent: extra.known_layouts + extra.corrupt_layouts hash "
+                    f"to {seen} but schema_fingerprint pins {pinned}. Re-run `scan` and re-pin "
+                    f"them together."
                 )
         return known
 
