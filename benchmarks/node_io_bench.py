@@ -19,6 +19,13 @@ PER_LEVEL = int(sys.argv[3]) if len(sys.argv) > 3 else 48
 OFFSET = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 
 def read_whole(path):
+    # Evict first: a re-run on the same node otherwise reads its own page
+    # cache - one did, at 10,292 MiB/s. This cannot reach the server's cache.
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    finally:
+        os.close(fd)
     n = 0
     with open(path, "rb", buffering=0) as fh:
         while chunk := fh.read(1 << 20):
