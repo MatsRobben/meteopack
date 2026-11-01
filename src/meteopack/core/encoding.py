@@ -142,12 +142,27 @@ def encode(
     table = _table(raw.dtype, float(source_scale), float(source_offset),
                    _codes(source_missing), _codes(source_out_of_image),
                    _codes(source_no_echo), no_echo, target)
+    return _apply(table, raw)
+
+
+def _apply(table: np.ndarray, raw: np.ndarray) -> np.ndarray:
+    """`table[raw]`, without fancy indexing's cost.
+
+    Fancy indexing widens every pixel to an 8-byte index before gathering. For
+    a byte-to-byte table CPython's `bytes.translate` is a dedicated C loop over
+    exactly this case, and for wider inputs `np.take` skips the index
+    machinery. Measured on a 765x700 frame: uint8 1.94 -> 0.60 ms, uint16 2.06
+    -> 0.97 ms. After caching the table this was the single largest line in an
+    echotop parse. Same table, same indices, so the same output.
+    """
     info = np.iinfo(raw.dtype)
+    if raw.dtype == np.uint8 and table.dtype == np.uint8:
+        # bytearray, so the result is writable like every other path's.
+        out = bytearray(np.ascontiguousarray(raw).tobytes().translate(table.tobytes()))
+        return np.frombuffer(out, dtype=np.uint8).reshape(raw.shape)
     if info.min == 0:
-        # Unsigned pixels are already table positions. Indexing with them
-        # directly skips an int64 copy of the whole image per frame.
-        return table[raw]
-    return table[raw.astype("int64") - int(info.min)]
+        return np.take(table, raw)
+    return np.take(table, raw.astype("int64") - int(info.min))
 
 
 def _codes(codes) -> frozenset[int]:

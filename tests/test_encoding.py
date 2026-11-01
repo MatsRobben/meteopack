@@ -287,3 +287,23 @@ def test_the_cached_table_agrees_with_the_per_pixel_path(dtype):
         got[...] = 0                             # a caller mutating its result ...
         again = encode(raw, target, source_scale=scale, source_offset=offset, **kwargs)
         np.testing.assert_array_equal(again, expected)   # ... cannot poison the cache
+
+
+@pytest.mark.parametrize(("raw_dtype", "out_dtype"),
+                         [("uint8", "uint8"), ("uint16", "uint16"), ("uint16", "uint8"),
+                          ("int16", "uint16"), ("uint8", "uint16")])
+def test_applying_the_table_matches_plain_indexing(raw_dtype, out_dtype):
+    """Each fast path (bytes.translate, np.take) is plain `table[codes]`."""
+    from meteopack.core.encoding import _apply
+
+    rng = np.random.default_rng(3)
+    info = np.iinfo(raw_dtype)
+    raw = rng.integers(int(info.min), int(info.max) + 1, size=(37, 41), dtype=raw_dtype)
+    span = int(info.max) - int(info.min) + 1
+    table = rng.integers(0, np.iinfo(out_dtype).max, size=span, dtype=out_dtype)
+    got = _apply(table, raw)
+    np.testing.assert_array_equal(got, table[raw.astype("int64") - int(info.min)])
+    assert got.dtype == np.dtype(out_dtype) and got.flags.writeable
+    view = raw[:, ::2]                                   # not contiguous
+    np.testing.assert_array_equal(_apply(table, view),
+                                  table[view.astype("int64") - int(info.min)])
