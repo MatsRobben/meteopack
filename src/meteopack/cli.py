@@ -425,7 +425,8 @@ def _report_trace(results: list[dict], workers: int, *, cli_started: float,
           f"{first - pool_started:.1f}s, pool ran {span:.1f}s; workers busy "
           f"{100 * busy / (workers * span):.0f}% (parse {100 * parse / max(busy, 1e-9):.0f}%, "
           f"write {100 * write / max(busy, 1e-9):.0f}% of busy), {used} worker process(es); "
-          f"last task started {end - max(t['start'] for t in timings):.1f}s before the end")
+          f"last task started {end - max(t['start'] for t in timings):.1f}s before the end; "
+          f"peak worker RSS {max(t.get('rss_mib', 0) for t in timings):,.0f} MiB")
 
 
 #: More files than this in one task means grouping has chained files together

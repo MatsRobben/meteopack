@@ -18,6 +18,7 @@ import functools
 import logging
 import multiprocessing
 import os
+import resource
 import time
 import uuid
 from dataclasses import dataclass
@@ -238,7 +239,9 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
             # Wall-clock, so tasks from different workers line up: where a
             # pack's time goes between start-up, work and waiting.
             "timing": {"pid": os.getpid(), "start": started, "end": time.time(),
-                       "parse_s": t_parse, "write_s": t_write}}
+                       "parse_s": t_parse, "write_s": t_write,
+                       # Peak so far for this worker process, in MiB (Linux: KiB).
+                       "rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024}}
 
 
 #: How long `run` waits for *any* task to finish before concluding the pool is
