@@ -33,6 +33,27 @@ def config_hash(cfg: BaseModel | dict[str, Any]) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
+#: Config fields that describe a store without changing a single stored value:
+#: prose, CF discovery metadata, and retention (which nothing enforces). Editing
+#: one of these made `validate` call the store stale and ask for a rebuild,
+#: although `gridded.refresh_attrs` exists to republish exactly these.
+_DESCRIPTIVE = frozenset({"description", "attrs", "retention"})
+_DESCRIPTIVE_VARIABLE = frozenset({"long_name", "legacy_name", "standard_name"})
+
+
+def content_hash(cfg: BaseModel | dict[str, Any]) -> str:
+    """`config_hash` over only the settings that change what the store holds."""
+    payload = cfg.model_dump(mode="json") if isinstance(cfg, BaseModel) else dict(cfg)
+    payload = {k: v for k, v in payload.items() if k not in _DESCRIPTIVE}
+    if isinstance(payload.get("variables"), list):
+        payload["variables"] = [
+            {k: v for k, v in var.items() if k not in _DESCRIPTIVE_VARIABLE}
+            if isinstance(var, dict) else var
+            for var in payload["variables"]
+        ]
+    return config_hash(payload)
+
+
 def code_version(repo_root: Path | None = None) -> str:
     """Short git describe of the building code, or 'unknown' outside a checkout.
 
@@ -67,6 +88,9 @@ class Manifest:
     time_max: str | None = None
     inputs: list[str] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
+    #: `content_hash` of the config at pack time. Optional: manifests written
+    #: before it existed are judged by `config_hash` instead.
+    content_hash: str | None = None
 
     @classmethod
     def new(cls, store_id: str, layer: str, kind: str, cfg: BaseModel | dict, **kw) -> Manifest:
@@ -75,7 +99,8 @@ class Manifest:
         return cls(
             store_id=store_id, layer=layer, kind=kind,
             description=kw.pop("description", None) or described.get("description"),
-            config_hash=config_hash(cfg), code_version=code_version(),
+            config_hash=config_hash(cfg), content_hash=content_hash(cfg),
+            code_version=code_version(),
             created_at=now, updated_at=now, **kw,
         )
 
@@ -104,6 +129,14 @@ def read(store_path: Path) -> Manifest | None:
 
 
 def is_stale(store_path: Path, cfg: BaseModel | dict) -> bool:
-    """True if the store was built from a different config (or has no manifest)."""
+    """True if the store was built from a config that changes what it holds.
+
+    Edits to descriptions, CF metadata or retention do not count. A manifest
+    from before `content_hash` existed is judged by the full config hash.
+    """
     m = read(store_path)
-    return m is None or m.config_hash != config_hash(cfg)
+    if m is None:
+        return True
+    if m.content_hash:
+        return m.content_hash != content_hash(cfg)
+    return m.config_hash != config_hash(cfg)
