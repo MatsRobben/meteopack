@@ -531,7 +531,7 @@ def _time_of_day(token: str, filename: str) -> timedelta | None:
         hour, minute, second = int(token[:2]), int(token[2:4]), int(token[4:6])
         if hour < 24 and minute < 60 and second < 60:
             return timedelta(hours=hour, minutes=minute, seconds=second)
-    logger.warning(
+    logger.debug(
         "knmi_radar: malformed time %r in %s; falling back to the configured day start",
         token,
         filename,

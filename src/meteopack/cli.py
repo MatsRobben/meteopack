@@ -1486,6 +1486,11 @@ def stage_credentials(ctx_args: argparse.Namespace) -> int:
     from meteopack.jobs.plan import config_dir, load_source_config
     from meteopack.sources import registry
 
+    # This reads every source's config, including ones whose archive variables
+    # this user never sets (KNMI_INSITU_ARCHIVE, ...); warning about each was
+    # noise in a command that is about keys, not archives.
+    logging.getLogger("meteopack.jobs.plan").setLevel(logging.ERROR)
+
     names = [p.stem for p in sorted((config_dir(ctx_args.configs) / "sources").glob("*.yaml"))]
     if getattr(ctx_args, "target", None):
         names = [n for n in names if n == ctx_args.target] or names

@@ -78,11 +78,11 @@ def test_one_bad_file_does_not_abort_the_rest_of_its_task(tmp_path, monkeypatch)
     """
     import numpy as np
     import xarray as xr
-    from tests.test_gridded_store import FRAMES_PER_DAY, NX, NY, TINY, make_cfg, make_timeline
 
     from meteopack.core import grids
     from meteopack.core.store import gridded
     from meteopack.jobs import packing
+    from test_gridded_store import FRAMES_PER_DAY, NX, NY, TINY, make_cfg, make_timeline
 
     monkeypatch.setattr(grids, "get", lambda grid_id, path=None: TINY)
     cfg, timeline = make_cfg(), make_timeline()
@@ -111,7 +111,11 @@ def _tiny_pack(tmp_path, monkeypatch, names):
     """write_gridded over `names` (day0, day1, ...) on the tiny test grid."""
     import numpy as np
     import xarray as xr
-    from tests.test_gridded_store import (
+
+    from meteopack.core import grids
+    from meteopack.core.store import gridded
+    from meteopack.jobs import packing
+    from test_gridded_store import (
         FRAMES_PER_DAY,
         NX,
         NY,
@@ -119,10 +123,6 @@ def _tiny_pack(tmp_path, monkeypatch, names):
         make_cfg,
         make_timeline,
     )
-
-    from meteopack.core import grids
-    from meteopack.core.store import gridded
-    from meteopack.jobs import packing
 
     monkeypatch.setattr(grids, "get", lambda grid_id, path=None: TINY)
     cfg, timeline = make_cfg(), make_timeline()

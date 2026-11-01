@@ -59,14 +59,21 @@ export METEOPACK_DATA_ROOT=/path/to/your/data
 ```
 
 **Station networks** are downloaded by meteopack. Most need no key (see
-[credentials](docs/runbooks/credentials.md)):
+[credentials](docs/runbooks/credentials.md)). A small first run, with England's
+rain gauges - each file is one gauge's year:
 
 ```bash
-uv run meteopack list dwd                     # what exists upstream (default: the last 24 h)
-uv run meteopack fetch dwd --limit 5          # download 5 files - drop --limit for all of them
-uv run meteopack pack dwd                     # build packed/dwd/stations_10min/v1
-uv run meteopack validate dwd                 # is it usable?
+uv run meteopack list ea                      # what exists upstream (default: the last 24 h)
+uv run meteopack fetch ea --limit 5           # download 5 files - drop --limit for all of them
+uv run meteopack pack ea                      # build packed/ea/rainfall_15min/v1
+uv run meteopack validate ea                  # is it usable?
+uv run meteopack catalog ea                   # what is fetched and packed
 ```
+
+The same commands work for `dwd`, `dmi`, `belgium`, `meteofrance` and `midas`.
+With `--limit` on a network that reports several variables in separate files
+(DWD), `validate` will say the variables you did not fetch are missing - it
+checks the store against everything the product config promises.
 
 **KNMI radar** is read from a local archive of KNMI's daily tars (from the KNMI
 Data Platform). Point meteopack at it and link it into the raw layer - a link,
@@ -126,7 +133,7 @@ flowchart LR
 | `pack` | parses and writes the store | `packed/` |
 | `validate` | asks whether the store is *usable*, not merely present | nothing |
 | `derive` | builds training bricks, station matrices and splits | `training/` |
-| `catalog` | what is in the data root | nothing |
+| `catalog <source>` | what is fetched and packed for a source | nothing |
 | `credentials` | which keys this machine has, and which are missing | nothing |
 
 `fetch` skips what it already has, and downloads again only what is still

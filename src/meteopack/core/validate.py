@@ -116,7 +116,9 @@ def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") 
     # publishes.
     for var in cfg.variables:
         if var.name not in columns:
-            report.add(f"{var.name} has values", False, "configured but not in the store")
+            report.add(f"{var.name} has values", False,
+                       "configured but not in the store - no raw file that carries it was "
+                       "packed (was its group fetched?)")
         elif not int(summary.get(f"filled__{var.name}") or 0):
             report.add(f"{var.name} has values", False, f"0/{rows} rows filled")
 
