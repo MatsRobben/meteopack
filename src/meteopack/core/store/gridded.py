@@ -291,6 +291,13 @@ def initialise(
                 "calibration_missing_data": encoding.missing,
                 "calibration_out_of_image": encoding.out_of_image,
                 "_FillValue": encoding.missing,
+                # CF allows one _FillValue but a vector missing_value, and
+                # xarray's mask_and_scale honours both. Without this, a plain
+                # `xr.open_zarr(...)` decodes out_of_image as a real value:
+                # 65535 * 0.01 = 655.35 mm of rain over the whole footprint
+                # mask. The two codes stay distinguishable in the raw array and
+                # in the two named attributes above.
+                "missing_value": [encoding.missing, encoding.out_of_image],
             })
         group.create_array(
             name,
@@ -569,6 +576,33 @@ def _classify_misses(
     return outside, int(missed.sum()) - outside
 
 
+def refresh_attrs(
+    cfg: ProductConfig,
+    root: str | os.PathLike[str],
+    *,
+    layer: Layer = DEFAULT_LAYER,
+) -> None:
+    """Re-publish the root metadata from the current config.
+
+    The root attributes used to be written once, when the store was created,
+    so editing the config afterwards - adding a title, an institution, a
+    reference - changed nothing on disk and the store kept describing itself
+    with the fallback. The time bounds are left alone: those belong to the
+    store, not to the config, and `extend` maintains them.
+    """
+    group = _open(cfg.store_id, root, layer, "r+")
+    grid = grids.get(cfg.grid_id) if cfg.grid_id else None
+    if grid is None:
+        return
+    keep = {k: group.attrs[k] for k in ("time_start", "time_end", "n_times", "created_at")
+            if k in group.attrs}
+    timeline = _timeline_of(group)
+    fresh = _root_attrs(cfg, grid, timeline, int(keep.get("n_times", len(timeline))))
+    fresh.update(keep)
+    fresh["updated_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+    group.attrs.update(fresh)
+
+
 def extend(
     cfg: ProductConfig,
     root: str | os.PathLike[str],
@@ -677,10 +711,26 @@ def read(
     if missing:
         raise ValueError(f"{store_id} has no array for {missing}; present: {available}")
 
-    data = {
+    data: dict = {
         name: (DIMS, np.asarray(group[name][lo:hi]), dict(group[name].attrs)) for name in names
     }
-    return xr.Dataset(data, coords={TIME_NAME: times[lo:hi]}, attrs=dict(group.attrs))
+    present = {n for n, _ in group.arrays()}
+    coords: dict = {TIME_NAME: times[lo:hi]}
+    # Provenance rides along as coordinates, not as data variables. It is
+    # per-frame metadata, and a consumer asked for `data_vars` means the
+    # fields - putting four bookkeeping arrays in there made `derive` try to
+    # build training bricks out of is_corrupt_frame.
+    for name in PROVENANCE:
+        if name in present:
+            coords[name] = ((TIME_NAME,), np.asarray(group[name][lo:hi]),
+                            dict(group[name].attrs))
+    for name in ("y", "x"):
+        if name in present:
+            coords[name] = ((name,), np.asarray(group[name][:]), dict(group[name].attrs))
+    for name in ("lat", "lon"):
+        if name in present:
+            coords[name] = (("y", "x"), np.asarray(group[name][:]), dict(group[name].attrs))
+    return xr.Dataset(data, coords=coords, attrs=dict(group.attrs))
 
 
 def info(store_id: str, root: str | os.PathLike[str], *, layer: Layer = DEFAULT_LAYER) -> dict:

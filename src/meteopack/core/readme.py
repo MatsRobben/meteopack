@@ -144,6 +144,90 @@ _LAYERS: dict[str, str] = {
 }
 
 
+def store_readme(cfg, store_path: Path | str, info: dict | None = None) -> Path | None:
+    """Write a README into one store directory.
+
+    The data root README explains the layers; this explains one dataset, and it
+    is the file somebody reads when the store has been copied somewhere else
+    with no config beside it. Regenerated on every pack.
+    """
+    path = Path(store_path) / README
+    kind = cfg.store.kind
+    lines = [
+        f"# {cfg.store_id}",
+        "",
+        (cfg.description or "").strip() or f"{cfg.source} {cfg.product}.",
+        "",
+        f"- source: `{cfg.source}`   product: `{cfg.product}`   version: {cfg.version}",
+        f"- cadence: {cfg.cadence_seconds} s",
+    ]
+    if cfg.grid_id:
+        lines.append(f"- grid: `{cfg.grid_id}`")
+    if info:
+        if info.get("time_start"):
+            lines.append(f"- covers: {info['time_start']} .. {info['time_end']}")
+        if info.get("shape"):
+            lines.append(f"- shape: {tuple(info['shape'])} (time, y, x)")
+    lines += ["", "## Variables", ""]
+    if kind == "gridded":
+        lines += ["| name | units | stored as | decode | was called |",
+                  "|---|---|---|---|---|"]
+        for var in cfg.variables:
+            enc = var.encoding or {}
+            stored = enc.get("dtype", "float32")
+            decode = (f"`{enc['scale']} * v + {enc.get('offset', 0.0)}`"
+                      if enc.get("scale") is not None else "as stored")
+            lines.append(
+                f"| `{var.name}` | {var.units} | {stored} | {decode} | "
+                f"{('`' + var.legacy_name + '`') if var.legacy_name else '-'} |"
+            )
+        lines += [
+            "",
+            "Integer fields reserve two codes, on each array's attributes as",
+            "`calibration_missing_data` and `calibration_out_of_image`: the first means",
+            "the instrument measured nothing there, the second that the pixel is outside",
+            "the product footprint. They are different facts; do not merge them.",
+            "",
+            "## Per-frame provenance",
+            "",
+            "`is_missing_frame` - no source file covered this time step.",
+            "`is_corrupt_frame` - a file existed but could not be read.",
+            "`source_layout_id` - which upstream generation produced the frame.",
+            "",
+            "Both read as missing imagery, so only these arrays tell them apart.",
+            "",
+            "## Reading it",
+            "",
+            "```python",
+            "import xarray as xr",
+            f"ds = xr.open_zarr('{Path(store_path).name}/dataset.zarr', consolidated=False)",
+            "```",
+        ]
+    else:
+        lines += ["| name | units | standard name |", "|---|---|---|"]
+        for var in cfg.variables:
+            lines.append(f"| `{var.name}` | {var.units} | {var.standard_name or '-'} |")
+        lines += [
+            "",
+            "## Reading it",
+            "",
+            "```python",
+            "import duckdb",
+            "duckdb.sql(\"select * from read_parquet('observations/**/*.parquet')\")",
+            "```",
+            "",
+            "Station coordinates are in `stations/`, joined on `station_id` (text).",
+        ]
+    text = "\n".join(lines) + "\n"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    except OSError as exc:
+        logger.debug("could not write %s: %s", path, exc)
+        return None
+    return path
+
+
 def write(root: Path | str) -> list[Path]:
     """Refresh the README in `root` and in each layer directory that exists.
 

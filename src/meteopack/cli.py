@@ -388,6 +388,7 @@ def _files_for_window(ctx, files: list[Path]) -> tuple[list[Path], int]:
 
 
 def stage_pack(ctx: Context) -> int:
+    from meteopack.core import readme
     from meteopack.core.store import manifest
     from meteopack.jobs import packing
 
@@ -422,6 +423,7 @@ def stage_pack(ctx: Context) -> int:
             # The axis is fixed at creation, so an operational run that packs
             # one day at a time would otherwise write every day after the first
             # into nothing at all.
+            gridded.refresh_attrs(ctx.cfg, ctx.root)
             added = gridded.extend(ctx.cfg, ctx.root, timeline)
             if added:
                 print(f"extended the time axis by {added} steps "
@@ -463,6 +465,17 @@ def stage_pack(ctx: Context) -> int:
 
     manifest.write(store, manifest.Manifest.new(
         ctx.cfg.store_id, "packed", ctx.cfg.store.kind, ctx.cfg, n_records=n_records))
+    # A store gets copied elsewhere without its config; the README is what
+    # somebody reads then.
+    info = None
+    if ctx.cfg.store.kind == "gridded":
+        try:
+            from meteopack.core.store import gridded as _g
+
+            info = _g.info(ctx.cfg.store_id, ctx.root)
+        except Exception:  # noqa: BLE001 - a README must never fail a pack
+            info = None
+    readme.store_readme(ctx.cfg, store, info)
     ctx.catalog.record_store(store_id=ctx.cfg.store_id, layer="packed",
                              kind=ctx.cfg.store.kind, path=str(store), version=ctx.cfg.version,
                              n_records=n_records, config_hash=manifest.config_hash(ctx.cfg))

@@ -52,6 +52,25 @@ retention:
   derived:
     keep: true
 
+# CF discovery metadata, written onto the store's root group so it describes
+# itself on a machine that has never seen this repository.
+attrs:
+  title: >-
+    KNMI real-time corrected 5-minute radar precipitation accumulation over the
+    Netherlands (RAD_NL25_RAC_RT)
+  institution: Royal Netherlands Meteorological Institute (KNMI)
+  source: >-
+    Composite of the Herwijnen and Den Helder C-band Doppler weather radars,
+    gauge-adjusted against the KNMI automatic and manual rain gauge networks.
+  references: https://dataplatform.knmi.nl/dataset/radar-reflectivity-composites-2-0
+  comment: >-
+    Fields are integer codes; decode with value = scale_factor * stored +
+    add_offset. calibration_missing_data marks pixels the radar did not
+    measure and calibration_out_of_image marks pixels outside the composite
+    footprint - they are different facts and are kept apart. KNMI publishes a
+    quality value only where there is an echo, so radar_quality_index is
+    missing over dry pixels by design.
+
 variables:
   # Encodings are the product's own. Sampled across the archive on 2026-11-01,
   # the 2023-and-later generation writes exactly these dtypes, scales and
