@@ -599,12 +599,43 @@ def test_a_config_wanting_nothing_yields_a_correctly_typed_empty_frame(tmp_path)
     assert frame.columns == ["time", "station_id"]
 
 
-def test_a_variable_the_config_wants_but_the_file_lacks_is_a_loud_failure(tmp_path):
+def test_a_partial_member_is_read_for_what_it_has(tmp_path, caplog):
+    """KNMI disseminates members carrying only some of the variables.
+
+    Real: 2018-07-27 09:20 has the wind and pressure variables and none of the
+    temperature ones. Refusing it discarded the whole day - 144 members for the
+    sake of one. The variables that are present are real observations, so they
+    are read and the rest are null, which is what null means.
+    """
+    import logging
+
     archive = tmp_path / "archive"
     tar_path = write_day(
         archive, datetime(2020, 6, 1, tzinfo=UTC), values={"ta": [1.0, 2.0]}
     )
-    with pytest.raises(SchemaDriftError, match="missing variable"):
+    with caplog.at_level(logging.WARNING):
+        frame = source(archive).parse(raw_of(tar_path), product())
+
+    # Three members in the tar, two stations each: every partial member is read.
+    assert frame.height == 6, "every partial member's observations must survive"
+    assert sorted(set(frame["air_temperature"].drop_nulls().to_list())) == [1.0, 2.0]
+    missing_column = next(
+        v.name for v in product().variables if v.name != "air_temperature"
+    )
+    assert frame[missing_column].null_count() == frame.height, (
+        "a variable the member lacks is null, not zero"
+    )
+    assert any("reading the" in r.message for r in caplog.records), caplog.text
+
+
+def test_a_member_with_nothing_we_want_is_still_a_loud_failure(tmp_path):
+    """A member with none of the configured variables is not a partial member,
+    it is a different kind of file, and reading it would be guessing."""
+    archive = tmp_path / "archive"
+    tar_path = write_day(
+        archive, datetime(2020, 6, 1, tzinfo=UTC), values={}
+    )
+    with pytest.raises(SchemaDriftError, match="none of the configured variables"):
         source(archive).parse(raw_of(tar_path), product())
 
 

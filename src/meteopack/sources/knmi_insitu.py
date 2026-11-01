@@ -550,7 +550,14 @@ class KnmiInsitu:
                 times.append(np.full(n, record.time, dtype="datetime64[ns]"))
                 ids.append(record.station_ids[keep])
                 for key, var in wanted:
-                    columns[var.name].append(record.values[key][keep])
+                    values = record.values.get(key)
+                    # A partial member has no array for a variable it lacks.
+                    # Null for those rows, which is what the absence means -
+                    # not zero, and not a reason to drop the member.
+                    columns[var.name].append(
+                        np.full(n, np.nan, dtype="float32")
+                        if values is None else values[keep]
+                    )
 
         if not wanted or not times:
             return _empty_frame(wanted)
@@ -811,10 +818,22 @@ def _read_member(data: bytes, wanted: Sequence[str], name: str):
     with h5netcdf.File(io.BytesIO(data), "r") as ds:
         variables = tuple(str(v) for v in ds.variables)
         missing = [key for key in wanted if key not in ds.variables]
-        if missing:
+        if missing and len(missing) == len(wanted):
+            # Nothing we want at all: this is not a partial member, it is a
+            # different kind of file, and reading it would be guessing.
             raise SchemaDriftError(
-                f"{name}: missing variable(s) {missing}; present: "
-                f"{sorted(set(variables) - STRUCTURAL)}"
+                f"{name}: none of the configured variables {sorted(wanted)} are "
+                f"present; it holds {sorted(set(variables) - STRUCTURAL)}"
+            )
+        if missing:
+            # A partial member. KNMI disseminates these: 2018-07-27 09:20
+            # carries the wind and pressure variables and not the temperature
+            # ones. Refusing it cost the entire day's tar - 144 members - for
+            # the sake of one. The variables that are there are real, so they
+            # are read and the rest are null, which is what null means.
+            logger.warning(
+                "knmi_insitu: %s has no %s; reading the %d variable(s) it does have",
+                name, ", ".join(missing), len(wanted) - len(missing),
             )
         when = _decode_time(ds.variables["time"], ds.variables["time"].attrs, name)
         if when.size != 1:
@@ -827,7 +846,11 @@ def _read_member(data: bytes, wanted: Sequence[str], name: str):
         )
         lat = np.asarray(ds.variables["lat"], dtype="float64").reshape(-1)
         lon = np.asarray(ds.variables["lon"], dtype="float64").reshape(-1)
-        values = {key: _values(ds.variables[key], name, key) for key in wanted}
+        values = {
+            key: _values(ds.variables[key], name, key)
+            for key in wanted
+            if key in ds.variables
+        }
     return Member(
         time=when[0],
         station_ids=sids,

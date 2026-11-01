@@ -722,10 +722,40 @@ def test_fingerprint_ignores_the_image_group_index() -> None:
     assert schema_fingerprint([a.descriptor]) == schema_fingerprint([b.descriptor])
 
 
-def test_an_unpinned_layout_is_refused(tmp_path: Path) -> None:
+def test_an_unpinned_layout_is_reported_without_losing_the_day(tmp_path: Path) -> None:
+    """Drift must be loud, and must not cost the data.
+
+    Raising here used to discard the whole tar - 287 good frames for one odd
+    one. On the real archive that lost 5,508 frames across 19 days, and the
+    layouts involved were legitimate product generations: a uint8
+    `PRECIP_[MM]` and a uint16 `QUALITY_[-]` at a different scale. Images are
+    addressed by `image_geo_parameter`, so an unpinned layout still reads
+    correctly; what is unknown is whether something else moved. So the frames
+    are packed, the drift is recorded on the dataset, and `pack` fails on it.
+    """
     path = day_tar(tmp_path, "20190601")
-    with pytest.raises(SchemaDriftError, match="not in the pinned set"):
-        KnmiRadar().parse(raw_of(path), make_cfg(known_layouts=["0000000000000000"]))
+    ds = KnmiRadar().parse(raw_of(path), make_cfg(known_layouts=["0000000000000000"]))
+
+    assert ds.sizes["time"] > 0, "the frames must survive the drift report"
+    drift = ds.attrs.get("schema_drift")
+    assert drift, "drift must be recorded on the dataset"
+    assert any("not in the pinned set" in d for d in drift), drift
+
+
+def test_a_config_that_disagrees_with_itself_still_raises(tmp_path: Path) -> None:
+    """A different kind of failure, and it keeps the old treatment.
+
+    An unpinned layout is a fact about the data. A `known_layouts` list that
+    does not hash to `schema_fingerprint` is a fact about the config - somebody
+    widened the allow-list without re-pinning - and nothing should be written
+    against it.
+    """
+    path = day_tar(tmp_path, "20190601")
+    cfg = make_cfg(known_layouts=["0000000000000000"]).model_copy(
+        update={"schema_fingerprint": "deadbeefdeadbeef"}
+    )
+    with pytest.raises(SchemaDriftError, match="config is inconsistent"):
+        KnmiRadar().parse(raw_of(path), cfg)
 
 
 def test_a_pinned_layout_passes(tmp_path: Path) -> None:

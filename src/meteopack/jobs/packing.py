@@ -119,17 +119,22 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
 
     src, cfg = _load(task)
     frames = outside = off_cadence = 0
+    # Schema drift is reported, not raised: a frame whose layout is not pinned
+    # still reads correctly, and discarding its whole tar lost 5,508 frames on
+    # the real archive. `pack` fails at the end on anything collected here.
+    drift: set[str] = set()
     for raw_path in task.paths:
         ds = src.parse(_raw_file(raw_path), cfg)
         if ds is None or not ds.sizes.get("time"):
             continue
+        drift.update(ds.attrs.get("schema_drift") or ())
         result = gridded.write(ds, cfg, Path(task.root))
         del ds
         frames += result.written
         outside += result.outside
         off_cadence += result.off_cadence
-    return {"path": task.raw_path, "frames": frames,
-            "outside": outside, "off_cadence": off_cadence}
+    return {"path": task.raw_path, "frames": frames, "outside": outside,
+            "off_cadence": off_cadence, "drift": sorted(drift)}
 
 
 #: How long `run` waits for *any* task to finish before concluding the pool is

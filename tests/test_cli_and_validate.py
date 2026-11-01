@@ -164,6 +164,10 @@ def test_pack_writes_station_metadata_when_the_source_offers_it(tmp_path, monkey
     class Ctx:
         cfg = _cfg()
         root = tmp_path
+        # The real Context has one, and `_write_station_metadata` reads any
+        # archived catalogue under it. A double without it is looser than the
+        # thing it stands in for, which is how the attribute went unnoticed.
+        raw_root = tmp_path / "raw" / "knmi" / "obs"
 
         class src:
             @staticmethod
@@ -296,3 +300,47 @@ def test_a_cramped_spill_filesystem_is_warned_about(tmp_path, monkeypatch, caplo
     with caplog.at_level(logging.WARNING):
         cli._spill_root(tmp_path)
     assert any("free at" in r.message for r in caplog.records), caplog.text
+
+
+def test_pack_recovers_stations_the_live_catalogue_has_forgotten(tmp_path):
+    """A provider lists the stations reporting *now*.
+
+    Backfilling 2012 in 2026 therefore gets coordinates for the stations that
+    still exist and nothing for the ones that have closed - half of DWD's 1,030
+    and three quarters of DMI's 110 - and a station with no position silently
+    drops out of anything spatial. A catalogue archived beside the data was
+    written while they were alive.
+    """
+    import json
+
+    from meteopack import cli
+
+    raw = tmp_path / "raw" / "dwd" / "stations_10min"
+    raw.mkdir(parents=True)
+    (raw / "station_catalog.json").write_text(json.dumps({
+        "00044": {"station_id": "00044", "lat": 52.1, "lon": 5.2,
+                  "height": 2.0, "name": "De Bilt"},
+        "00099": {"station_id": "00099", "lat": 51.0, "lon": 4.0,
+                  "height": 10.0, "name": "Closed Long Ago"},
+    }))
+
+    class Ctx:
+        cfg = _cfg()
+        root = tmp_path
+        raw_root = raw
+
+        class src:
+            @staticmethod
+            def stations(cfg):
+                # Only the station still operating today.
+                return pl.DataFrame({"station_id": ["00044"], "lat": [52.1],
+                                     "lon": [5.2], "height_m": [2.0],
+                                     "name": ["De Bilt"]})
+
+    n = cli._write_station_metadata(Ctx())
+    assert n == 2, "the closed station must be recovered from the archive"
+    back = points.read_stations(_cfg().store_id, tmp_path)
+    assert set(back["station_id"].to_list()) == {"00044", "00099"}
+    closed = back.filter(pl.col("station_id") == "00099")
+    assert closed["lat"][0] == 51.0 and closed["lon"][0] == 4.0
+    assert closed["name"][0] == "Closed Long Ago"

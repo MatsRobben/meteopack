@@ -251,18 +251,43 @@ def _write_station_metadata(ctx: Context) -> int:
     stations = getattr(ctx.src, "stations", None)
     if stations is None:
         return 0
+    import polars as pl
+
+    from meteopack.core.stations import archived_stations
+
     table = stations(ctx.cfg)
     if table is None or not len(table):
         logger.warning("source %s returned no station metadata", ctx.cfg.source)
         return 0
-
-    import polars as pl
 
     # Sources name the elevation column differently; the store has one name.
     renames = {"height_m": "height", "altitude": "height", "elevation": "height"}
     table = table.rename({k: v for k, v in renames.items() if k in table.columns})
     keep = [c for c in ("station_id", "lat", "lon", "height", "name") if c in table.columns]
     table = table.select(keep).unique(subset=["station_id"], keep="first")
+    # A provider's catalogue lists the stations reporting *now*, so a backfill
+    # gets nothing for the ones that have since closed - half of DWD's 1,030
+    # and three quarters of DMI's 110. A catalogue archived beside the data was
+    # written when they were alive, so it fills the gap. Merged *after* the
+    # column names are normalised: the live tables call it `height_m` and the
+    # archives call it `height`, and concatenating first made the rename
+    # collide.
+    archived = archived_stations(ctx.raw_root)
+    if archived:
+        extra = pl.DataFrame(archived, schema={
+            "station_id": pl.String, "lat": pl.Float64,
+            "lon": pl.Float64, "height": pl.Float64, "name": pl.String,
+        }).select(keep)
+        new_rows = extra.filter(
+            ~pl.col("station_id").is_in(table["station_id"].to_list())
+        )
+        if len(new_rows):
+            logger.info(
+                "%s: %d station(s) recovered from an archived catalogue that the "
+                "live one no longer lists", ctx.cfg.source, len(new_rows),
+            )
+            table = pl.concat([table, new_rows], how="diagonal_relaxed")
+
     if "height" not in table.columns:
         table = table.with_columns(pl.lit(None, dtype=pl.Float64).alias("height"))
     points.write_stations(table, ctx.cfg.store_id, ctx.root)
@@ -576,6 +601,13 @@ def stage_pack(ctx: Context) -> int:
         if off_cadence:
             print(f"  {off_cadence} frame(s) were not on the "
                   f"{ctx.cfg.cadence_seconds}s cadence and were dropped")
+        drift = sorted({d for r in results for d in (r.get("drift") or ())})
+        if drift:
+            print(f"  ERROR {len(drift)} unpinned schema layout(s); the frames were "
+                  f"packed, but re-run `scan` and re-pin before trusting the store:")
+            for message in drift[:5]:
+                print(f"    {message}")
+            errors.append({"path": str(store), "error": f"{len(drift)} unpinned layouts"})
         if outside:
             print(f"  ERROR {outside} frame(s) fall outside the store's time axis "
                   f"and were NOT written. The store covers "

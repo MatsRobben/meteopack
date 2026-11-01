@@ -744,6 +744,11 @@ class KnmiRadar:
         seen_layout: tuple[str, ...] | None = None
         layout_ids = np.full(len(stamped), LAYOUT_UNKNOWN, dtype="int16")
         corrupt = np.zeros(len(stamped), dtype=bool)
+        #: message -> first member that showed it. Reported once per tar.
+        drifted: dict[str, str] = {}
+        # Config consistency is checked once, up front, and raises: nothing
+        # should be written against a config that disagrees with itself.
+        self._check_pins(cfg)
 
         with tarfile.open(path, "r") as tar:
             for index, (_when, member) in enumerate(stamped):
@@ -772,7 +777,19 @@ class KnmiRadar:
                             _check_grid(frame, specs, grid, member.name, cfg)
                         layout = tuple(sorted(s.descriptor for s in specs.values()))
                         if layout != seen_layout:
-                            self._check_layout(layout, cfg, member.name)
+                            # Record drift, do not raise on it. Raising here
+                            # cost the whole tar - 287 good frames for one odd
+                            # one - and on the real archive that lost 5,508
+                            # frames across 19 days. The images are addressed
+                            # by `image_geo_parameter`, so an unpinned layout
+                            # still reads correctly for every variable it has;
+                            # what is unknown is whether something *else*
+                            # moved. So: pack it, mark it, and let `pack` fail
+                            # at the end with the whole list.
+                            try:
+                                self._check_layout(layout, cfg, member.name)
+                            except SchemaDriftError as exc:
+                                drifted.setdefault(str(exc), member.name)
                             seen_layout = layout
                         layout_ids[index] = layout_id(specs)
                         matched = _fill_frame(
@@ -816,6 +833,11 @@ class KnmiRadar:
         data_vars["is_corrupt_frame"] = (("time",), corrupt)
         data_vars["is_missing_frame"] = (("time",), np.zeros(len(stamped), dtype=bool))
         data_vars["source_layout_id"] = (("time",), layout_ids)
+        if drifted:
+            # Loud, but after the data is safe. `pack` turns this into a
+            # non-zero exit; it must never be silent.
+            for message, member_name in drifted.items():
+                logger.error("knmi_radar: %s (first seen in %s)", message, member_name)
         times = np.array([np.datetime64(w.replace(tzinfo=None), "ns") for w, _ in stamped])
         return xr.Dataset(
             data_vars,
@@ -826,8 +848,32 @@ class KnmiRadar:
                 "grid_id": cfg.grid_id or "",
                 "unit_key": raw.unit_key,
                 "raw_sha256": raw.sha256,
+                "schema_drift": sorted(drifted),
             },
         )
+
+    @staticmethod
+    def _check_pins(cfg: ProductConfig) -> list[str]:
+        """The pinned layout set, after checking the config agrees with itself.
+
+        Separate from the per-frame check and raised on unconditionally,
+        because the two failures are different in kind. An unpinned layout is
+        a fact about the *data* - recorded, reported, and not a reason to throw
+        away the frames. A `known_layouts` list that does not hash to
+        `schema_fingerprint` is a fact about the *config*: somebody widened the
+        allow-list without re-pinning, which is exactly what the hash exists to
+        catch, and no data should be written against it at all.
+        """
+        known = [str(k) for k in (cfg.extra.get("known_layouts") or [])]
+        pinned = cfg.schema_fingerprint
+        if known and pinned:
+            seen = product_fingerprint(known)
+            if seen != pinned:
+                raise SchemaDriftError(
+                    f"config is inconsistent: extra.known_layouts hashes to {seen} but "
+                    f"schema_fingerprint pins {pinned}. Re-run `scan` and re-pin both together."
+                )
+        return known
 
     def _check_layout(self, layout: Sequence[str], cfg: ProductConfig, name: str) -> None:
         """Refuse a frame whose image layout the config has never seen.
@@ -840,17 +886,9 @@ class KnmiRadar:
         the list without re-pinning the hash fails loudly rather than quietly
         widening what counts as known.
         """
-        known = [str(k) for k in (cfg.extra.get("known_layouts") or [])]
+        known = self._check_pins(cfg)
         if not known:
             return
-        pinned = cfg.schema_fingerprint
-        if pinned:
-            seen = product_fingerprint(known)
-            if seen != pinned:
-                raise SchemaDriftError(
-                    f"config is inconsistent: extra.known_layouts hashes to {seen} but "
-                    f"schema_fingerprint pins {pinned}. Re-run `scan` and re-pin both together."
-                )
         fingerprint = schema_fingerprint(layout)
         if fingerprint not in set(known):
             raise SchemaDriftError(
