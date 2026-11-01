@@ -10,8 +10,11 @@ Updated as work lands; newest state at the top of each section.
   scoped to this repo**: `~/.ssh/id_ed25519_meteopack`, found via
   `core.sshCommand` in `.git/config` — no `~/.ssh/config` entry. `gh` is NOT
   installed on this cluster.
-- **Data root**: `/vol/knmimo-nobackup/users/mrobben/data` (setgid, group
-  `knmimo`). Set `METEOPACK_DATA_ROOT` or pass `--data-root`.
+- **Data root**: `/vol/knmimo-nobackup/users/mrobben/meteopack_data` (since
+  2026-11-01; every earlier meteopack root - `data`, `data_v2`, `data_full`,
+  ... - was deleted at the user's request). Set `METEOPACK_DATA_ROOT` or pass
+  `--data-root`. Raw archives are not in it: they stay under
+  `data_raw/data/raw/` and are symlinked in under `raw/`.
 - **Old repo** (reference only, do not modify):
   `/vol/knmimo-nobackup/users/mrobben/data_raw`, with ~294 GB of raw KNMI and
   ~18 GB of other raw station data under `data_raw/data/raw/`.
@@ -325,3 +328,77 @@ with nothing running. Kill the workers, not just the parent.
   edit per variable flips that too.
 * `midas list` takes 28 s walking CEDA's catalogue over HTTP - small, and
   trivially cacheable if it becomes annoying.
+
+## Session 2026-11-01 (evening): an external review, its fixes, and the radar rebuild
+
+Everything heavy now runs as Slurm jobs from a pinned commit
+(`benchmarks/slurm/radar_at.slurm <commit> <script>`), never on the
+interactive node. The "Performance, measured" notes above are cn84-specific
+(1 GbE); `benchmarks/README_findings.md` has the compute-node numbers.
+
+### State on disk
+
+`meteopack_data/packed/knmi_radar/` holds all three radar products, packed
+from the full archives with no hand-typed window, validated, and checked
+pixel by pixel against the raw HDF5 (80-81 sampled frames each, 0 failures).
+rtcor: 770,116 frames, including the archive's first frame that the old
+08:05-start axis dropped. echotop and refl: ~1.92 M frames each; their
+placeholder-calibration frames (see `extra.corrupt_layouts`) are recorded
+corrupt. One refl tar (2014-03-13) is a truncated download, exactly 1 MiB:
+its 8 readable frames are packed and `pack` reports it - re-fetch that file.
+
+No station store exists yet. Rebuild them only after re-fetching: EA dropped
+1 January and 31 December of every station-year, and DWD never listed
+closed stations (both fixed in code).
+
+### What the review found, and what was done
+
+The review (fresh clone, ran everything) was accurate. Fixed, each with a test
+that fails on the previous code:
+
+* day-by-day packing wrote the time axis in seconds and left the provenance
+  arrays short - grown stores read as 1970 and would not open
+* `gridded.read` returned integer codes, so training bricks held codes and
+  sentinels; it now decodes with xarray's CF decoder like `xr.open_zarr`
+* `derive` opened the store directory, not `dataset.zarr`; `parse` crashed on
+  gridded sources
+* shard grouping read exclusive end tokens as inclusive (echotop/refl packed
+  as 16 serial tasks, two killed part-way); SEVIRI's padded spans did the same
+* `pack --shards` was ignored (now refused); a failed file deleted rows on a
+  points re-pack (now: nothing rewritten unless `--allow-partial`)
+* volatile units were planned as "always refreshed" and then skipped; DMI and
+  meteofrance deleted the last good copy before re-downloading; E-SOH lost
+  the tail of an hour harvested mid-hour
+* EA requested each year with exclusive bounds; DWD read only `recent/`
+  station catalogues; MIDAS station metadata needed a live token
+* `source_record_id` pointed at a table that did not exist (now:
+  `provenance.parquet` beside each gridded store, checked by `validate`)
+* echotop/refl had no pins and no layout codes; no-echo pixels decoded to
+  -0.102 km / split -31.5 vs -32 dBZ across generations
+
+Left open on purpose:
+
+* E-SOH: DWD publishes 10-minute wind as `point:PT10M`, which the config's
+  `mean:PT10M` selectors do not match - a judgement about DWD's labelling.
+* Catalog bookkeeping columns (`n_records`, `time_min/max`, `code_version`,
+  the radar `sha256` column holding `size:N:mtime:T`).
+* Refactors: application logic in `cli.py`, duplicated source helpers,
+  catalog autoflush scaling for SEVIRI's scene counts.
+* SEVIRI design: 1 km radar grid, 4 of 11 channels, slot labelled by scan
+  start while radar labels by interval end.
+
+### To resume
+
+```bash
+cd /vol/knmimo-nobackup/users/mrobben/meteopack
+export METEOPACK_DATA_ROOT=/vol/knmimo-nobackup/users/mrobben/meteopack_data
+# one product per job; refuses to overwrite an existing store
+sbatch --account=icis --partition=icis --qos=icis-normal --cpus-per-task=48 \
+  --mem=110G --time=01:30:00 benchmarks/slurm/radar_at.slurm <commit> \
+  scripts/radar_rebuild.sh echotop_5min
+# rtcor is read-bound: PACK_WORKERS=24 and 48 CPUs (each worker reaches 2.2 GB)
+```
+
+To test a change to the radar path, `benchmarks/radar_ab.sh <old> <new>` on
+the fixed sample; it fails if the store differs from the reference.
+
