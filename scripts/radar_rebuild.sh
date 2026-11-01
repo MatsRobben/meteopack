@@ -10,6 +10,10 @@
 #     --mem=120G --time=02:00:00 benchmarks/slurm/radar_at.slurm <commit> \
 #     scripts/radar_rebuild.sh echotop_5min refl_5min
 #
+# PACK_WORKERS sets --workers (default: every CPU in the allocation). rtcor is
+# read-bound by ~24 workers per node and its 2023 tars make each worker large,
+# so it gains nothing from more and risks the memory limit.
+#
 # For each product: a full pack with no --window (the axis comes from the
 # archive's own filenames), `validate`, and an independent per-pixel check of
 # sampled frames against the raw HDF5. It refuses to write over an existing
@@ -32,7 +36,7 @@ for p in "$@"; do
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
   log=$logs/rebuild_${p}_$stamp.log
   export METEOPACK_TRACE=$logs/rebuild_${p}_$stamp.trace.json
-  /usr/bin/time -f "  PACK %e s wall" python -m meteopack.cli pack knmi_radar --product "$p" \
+  /usr/bin/time -f "  PACK %e s wall" python -m meteopack.cli pack knmi_radar --product "$p" ${PACK_WORKERS:+--workers $PACK_WORKERS} \
     > "$log" 2>&1 || status=1
   grep -vE "no image groups|unreadable frame|^INFO" "$log" | tail -12
   python -m meteopack.cli validate knmi_radar --product "$p" > "$log.validate" 2>&1 || status=1
