@@ -4,7 +4,10 @@ Latency-bound reads scale with concurrency; bandwidth-bound ones do not. Each
 concurrency level uses a DISJOINT set of tars so nothing is served from this
 node's page cache by an earlier level.
 """
-import os, socket, sys, time
+import os
+import socket
+import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -21,11 +24,11 @@ def read_whole(path):
 
 tars = sorted(ARCHIVE.glob("*.tar"))
 # Spread across the years rather than taking a contiguous run.
-step = max(1, len(tars) // (sum(LEVELS and [PER_LEVEL * len(LEVELS)]) or 1))
+step = max(1, len(tars) // (PER_LEVEL * len(LEVELS) or 1))
 pool = tars[::step]
 print(f"{socket.gethostname()}: {len(tars)} tars, sampling {len(pool)}", flush=True)
 try:
-    speed = open("/sys/class/net/eno1/speed").read().strip() + " Mbit/s"
+    speed = Path("/sys/class/net/eno1/speed").read_text().strip() + " Mbit/s"
 except OSError:
     speed = "?"
 print(f"  cores={os.cpu_count()} eno1={speed}", flush=True)
