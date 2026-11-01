@@ -1,8 +1,10 @@
 """meteopack {scan,list,fetch,parse,pack,derive,validate,catalog} <target>
 
-Every stage is re-runnable and shardable. The ledger decides what is left to do,
-so running the same command twice is cheap and a preempted Slurm task costs at
-most its in-flight unit.
+Every stage is re-runnable. For `fetch` the ledger decides what is left to do,
+so running it twice is cheap and a preempted Slurm task costs at most its
+in-flight unit; content still changing upstream is downloaded again. `pack`
+rebuilds the stores it is given from the raw files, in parallel across one
+allocation's cores, and refuses --shard/--shards.
 """
 from __future__ import annotations
 

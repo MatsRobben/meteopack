@@ -32,8 +32,12 @@ what exists so any stage can be re-run, resumed, or skipped.
 
 ## The pipeline
 
-Every stage is re-runnable and shardable. Run the same command twice and the
-ledger makes the second run nearly free.
+Every stage is re-runnable. For `fetch`, the ledger makes a second run cheap:
+finished units are skipped, and only content that is still changing upstream
+(DWD's recent/ and now/, a year or slot not yet closed) is downloaded again -
+over the old copy, which survives a failed download. `pack` always rebuilds the
+stores it is asked for from the raw files; it is not incremental, and it is
+parallel across the cores of one allocation rather than across array tasks.
 
 ```mermaid
 flowchart LR
@@ -196,7 +200,10 @@ sbatch --array=0-29 slurm/meteopack.slurm fetch dwd --window 2012/2013
 
 `SLURM_ARRAY_TASK_ID` becomes `--shard/--shards`, so array tasks split the unit
 list with no coordination. Units are assigned by stride, not by block, because
-file size correlates with station index.
+file size correlates with station index. This is for `fetch`, `list` and
+`derive`; `pack` refuses `--shards`, because concurrent packs of one gridded
+store would race on the same shard files. Give one pack job the cores instead
+(`--cpus-per-task`; it uses them all by default).
 
 > **cn79 is excluded from every wrapper.** It is a 2012 Sandy Bridge with no
 > AVX2, and the `duckdb` and `polars` wheels fault at import there — it looks
