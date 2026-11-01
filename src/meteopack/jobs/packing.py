@@ -231,9 +231,15 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
 
 
 #: How long `run` waits for *any* task to finish before concluding the pool is
-#: wedged. Generous on purpose: the slowest unit measured here is a SEVIRI
-#: scene at ~20 s and a radar tar at ~13 s, so half an hour with nothing at all
-#: completing is not slowness.
+#: wedged - per file in the largest task in flight. Generous on purpose: the
+#: slowest unit measured here is a SEVIRI scene at ~20 s and a radar tar at
+#: ~13 s, so half an hour with nothing at all completing is not slowness.
+#:
+#: Per file, because a task can legitimately hold many files (everything that
+#: shares a shard), and such a task makes progress without reporting any. A
+#: flat limit killed two ~2,000-tar echotop tasks part-way through: the pool
+#: was working, the store was left half-written, and the frames those tasks had
+#: already written were missing from the reported total.
 DEFAULT_STALL_TIMEOUT = 1800.0
 
 
@@ -319,11 +325,13 @@ def run(tasks: list[PackTask], fn, *, workers: int | None = None,
 
         submit_more()
         while pending:
-            done, _ = cf.wait(pending, timeout=stall_timeout,
-                              return_when=cf.FIRST_COMPLETED)
+            limit = None
+            if stall_timeout is not None:
+                limit = stall_timeout * max(_n_files(t) for t in pending.values())
+            done, _ = cf.wait(pending, timeout=limit, return_when=cf.FIRST_COMPLETED)
             if not done:
                 broken = (
-                    f"no task finished in {stall_timeout:.0f}s with {len(pending)} in "
+                    f"no task finished in {limit:.0f}s with {len(pending)} in "
                     f"flight; the worker pool is not making progress"
                 )
                 break
@@ -358,6 +366,11 @@ def run(tasks: list[PackTask], fn, *, workers: int | None = None,
     finally:
         _shutdown(pool, force=broken is not None)
     return out
+
+
+def _n_files(task) -> int:
+    """How many raw files a task covers; 1 for tasks that are not per-file."""
+    return len(getattr(task, "paths", ())) or 1
 
 
 def _shutdown(pool, *, force: bool) -> None:

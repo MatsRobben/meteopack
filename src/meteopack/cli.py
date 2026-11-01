@@ -313,8 +313,8 @@ def _pack_tasks(ctx: Context, files: list[Path], timeline=None) -> list:
                         raw_path=str(first), root=str(ctx.root),
                         configs=ctx.args.configs, also=tuple(str(p) for p in rest))
 
-    span_of = getattr(ctx.src, "span_of", None)
-    if timeline is None or ctx.cfg.store.kind != "gridded" or span_of is None:
+    if timeline is None or ctx.cfg.store.kind != "gridded" \
+            or not callable(getattr(ctx.src, "span_of", None)):
         return [task(p) for p in files]
 
     import numpy as np
@@ -346,12 +346,9 @@ def _pack_tasks(ctx: Context, files: list[Path], timeline=None) -> list:
         the cadence and a file that starts half a step early still writes into
         the shard it overlaps.
         """
-        try:
-            span = span_of(path)
-        except Exception:  # noqa: BLE001 - an undatable file gets its own task
-            return None
+        span = _span_of(ctx, path)
         if span is None:
-            return None
+            return None              # an undatable file gets its own task
         edges = []
         for when in span:
             ns = int(np.datetime64(when.replace(tzinfo=None), "ns").astype("int64"))
@@ -393,15 +390,62 @@ def _pack_tasks(ctx: Context, files: list[Path], timeline=None) -> list:
     return out
 
 
+#: More files than this in one task means grouping has chained files together
+#: rather than paired a few boundary-straddlers. Legitimate groups here are 1
+#: file, or 2-3 at an archive's irregular start.
+_LARGE_GROUP = 8
+
+
+def _report_grouping(files: list, tasks: list, workers: int) -> None:
+    """Say how the files became tasks, and warn if parallelism was lost.
+
+    Grouping by shard is never wrong - files that share a shard must share a
+    writer - but it can be catastrophically slow, and nothing else shows it:
+    6,668 echotop tars once became 16 tasks, the pack ran at a fraction of its
+    worker count, and the only symptom was a long wall time.
+    """
+    if len(tasks) == len(files):
+        return
+    largest = max(len(t.paths) for t in tasks)
+    print(f"  grouped into {len(tasks)} task(s) so no shard has two writers; "
+          f"the largest holds {largest} file(s)")
+    if largest > _LARGE_GROUP:
+        logger.warning(
+            "%d file(s) collapsed into %d task(s) for %d worker(s): most of the pack will "
+            "run serially. Files that share a shard must share a task, so this is correct "
+            "but slow. It usually means the source's span_of over-reports (each file "
+            "appears to touch its neighbour's shard), or extra.timeline_origin does not "
+            "line up with where the archive's files begin.",
+            len(files), len(tasks), workers,
+        )
+
+
 def _span_of(ctx: Context, path: Path):
-    """What one raw file covers, if the source can tell from the name alone."""
+    """First and last frame one raw file holds, if the source can tell from its name.
+
+    Every caller goes through here so all of them get the exact span. A source
+    that takes the product config gets it: without it, KNMI's exclusive end
+    tokens and SEVIRI's padded stamps both over-report by a frame, which is
+    harmless for skipping files and ruinous for shard grouping - each file
+    appears to write its neighbour's shard and the whole archive chains into a
+    handful of serial tasks.
+    """
     reader = getattr(ctx.src, "span_of", None)
     if not callable(reader):
         return None
     try:
-        return reader(path)
+        return reader(path, cfg=ctx.cfg) if _takes_cfg(reader) else reader(path)
     except Exception:  # noqa: BLE001 - an unreadable name is just one less span
         return None
+
+
+def _takes_cfg(fn) -> bool:
+    import inspect
+
+    try:
+        return "cfg" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def _timeline_for(ctx: Context):
@@ -515,18 +559,14 @@ def _files_for_window(ctx, files: list[Path]) -> tuple[list[Path], int]:
     if not ctx.args.window or ctx.cfg.store.kind != "gridded":
         return files, 0
 
-    span_of = getattr(ctx.src, "span_of", None)
-    if span_of is None:
+    if not callable(getattr(ctx.src, "span_of", None)):
         return files, 0
 
     start, end = ctx.window.start, ctx.window.end
     keep: list[Path] = []
     undated = 0
     for path in files:
-        try:
-            span = span_of(path)
-        except Exception:  # noqa: BLE001 - an undatable file is kept, not fatal
-            span = None
+        span = _span_of(ctx, path)       # an undatable file is kept, not fatal
         if span is None:
             undated += 1
             keep.append(path)
@@ -752,6 +792,7 @@ def stage_pack(ctx: Context) -> int:
                 print(f"extended the time axis by {added} steps "
                       f"to cover {timeline.end:%Y-%m-%dT%H:%M}")
         tasks = _pack_tasks(ctx, files, timeline)
+        _report_grouping(files, tasks, workers)
         results = packing.run(tasks, packing.write_gridded, workers=workers)
         frames = sum(r.get("frames", 0) for r in results)
         outside = sum(r.get("outside", 0) for r in results)

@@ -1144,3 +1144,15 @@ def test_real_scene_parses_onto_the_radar_grid_and_is_written() -> None:
         gridded.write(ds, cfg, tmp)
         back = gridded.read(cfg.store_id, tmp)
         np.testing.assert_allclose(back["ir108_brightness_temperature"].values[0], window_bt)
+
+
+def test_span_of_with_the_config_is_the_exact_slot() -> None:
+    """Padded spans are fine for skipping files and wrong for shard grouping.
+
+    The +/-15 minutes made the scenes either side of midnight share a shard, so
+    every day chained into one task and a whole archive packed serially.
+    """
+    cfg = ProductConfig(**yaml.safe_load(PRODUCT_YAML.read_text()))
+    name = "MSG4-SEVI-MSG15-0100-NA-20261025235918.069000000Z-NA.nat"
+    first, last = EumetsatSeviri().span_of(Path(name), cfg=cfg)
+    assert first == last == datetime(2026, 10, 25, 23, 55, tzinfo=UTC)

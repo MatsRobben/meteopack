@@ -273,6 +273,57 @@ def test_an_uncatalogued_archive_sizes_its_axis_from_the_filenames(tmp_path, mon
     assert tl.start.hour == 8 and tl.start.minute == 5
 
 
+@pytest.mark.parametrize(("product", "env", "token", "prefix_day"), [
+    ("echotop_5min", "KNMI_ECHOTOP_ARCHIVE", "TARETH", "T000000"),
+    ("refl_5min", "KNMI_REFL_ARCHIVE", "TARPCP", "T000000"),
+])
+def test_exclusive_end_daily_tars_get_one_task_each(tmp_path, monkeypatch, product, env,
+                                                    token, prefix_day):
+    """Each daily tar owns exactly one shard, so it must be its own task.
+
+    Their end token is exclusive (`..._20080102T000000` stops at 23:55). Read
+    as the last frame, it is the first slot of the next day's shard, every tar
+    appeared to write two shards, and union-by-shard chained the archive: 6,668
+    echotop tars became 16 tasks.
+    """
+    from meteopack.cli import Context, _pack_tasks, _timeline_for, build_parser
+
+    archive = tmp_path / "raw" / "knmi_radar" / product
+    archive.mkdir(parents=True)
+    for day in range(1, 11):
+        a, b = f"200801{day:02d}", f"200801{day + 1:02d}"
+        (archive / f"RAD25_OPER_R___{token}__L2__{a}{prefix_day}_{b}{prefix_day}_0001.tar"
+         ).write_bytes(b"")
+    monkeypatch.setenv(env, str(archive))
+    args = build_parser().parse_args(
+        ["pack", "knmi_radar", "--product", product, "--data-root", str(tmp_path)])
+    ctx = Context(args)
+    files = ctx.raw_files()
+    tasks = _pack_tasks(ctx, files, _timeline_for(ctx))
+    assert len(tasks) == len(files) == 10, [len(t.paths) for t in tasks]
+
+
+def test_a_window_does_not_pull_in_the_day_before(tmp_path, monkeypatch):
+    """The day before a window ends at the window's first instant, exclusively.
+
+    Over-reporting its span by one frame made `--window 2015-01-01/...` pack the
+    2014-12-31 tar too, and all 288 of its frames were refused as outside the axis.
+    """
+    from meteopack.cli import Context, _files_for_window, build_parser
+
+    archive = tmp_path / "raw" / "knmi_radar" / "echotop_5min"
+    archive.mkdir(parents=True)
+    for a, b in (("20141231", "20150101"), ("20150101", "20150102")):
+        (archive / f"RAD25_OPER_R___TARETH__L2__{a}T000000_{b}T000000_0001.tar").write_bytes(b"")
+    monkeypatch.setenv("KNMI_ECHOTOP_ARCHIVE", str(archive))
+    args = build_parser().parse_args(
+        ["pack", "knmi_radar", "--product", "echotop_5min", "--data-root", str(tmp_path),
+         "--window", "2015-01-01/2015-01-02"])
+    ctx = Context(args)
+    kept, _ = _files_for_window(ctx, ctx.raw_files())
+    assert [p.name[27:35] for p in kept] == ["20150101"]
+
+
 def test_pack_without_a_window_or_catalog_says_what_to_do(tmp_path):
     from meteopack.cli import Context, _timeline_for, build_parser
 

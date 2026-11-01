@@ -929,18 +929,29 @@ class EumetsatSeviri:
 
     # --------------------------------------------------------------------- scan
 
-    def span_of(self, path: Path | str) -> tuple[datetime, datetime] | None:
+    def span_of(
+        self, path: Path | str, cfg: ProductConfig | None = None
+    ) -> tuple[datetime, datetime] | None:
         """The slot one scene file covers, read off its own filename.
 
         Lets `pack --window` skip scenes it cannot need: packing a single day
-        used to decompress and reproject every scene on disk. The stamp is the
-        end of the repeat cycle rather than the slot, so the span is widened by
-        one cycle on each side instead of trusting it to the second - the point
-        is to skip the other 99%, not to be exact at the boundary.
+        used to decompress and reproject every scene on disk, and tells `pack`
+        which shard a scene writes.
+
+        With `cfg` it is exact: the slot is the filename stamp floored to the
+        cadence, the same rule `list` uses and `parse` cross-checks against the
+        header. Without it the stamp - the end of the repeat cycle - is widened
+        by one cycle on each side. That is fine for skipping files but not for
+        assigning shards: the padding made the scenes either side of midnight
+        share a shard, so every day chained into one task and a whole archive
+        packed serially.
         """
         when = scene_time(Path(path).name)
         if when is None:
             return None
+        if cfg is not None:
+            slot = nominal_slot(when, cfg.cadence)
+            return (slot, slot)
         pad = timedelta(minutes=15)
         return (when - pad, when + pad)
 

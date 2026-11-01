@@ -691,12 +691,23 @@ class KnmiRadar:
         logger.info("knmi_radar: %d daily tar(s) overlap %s..%s", len(out), start, end)
         return out
 
-    def span_of(self, path: Path | str) -> tuple[datetime, datetime] | None:
-        """The time range one tar covers, read off its own filename.
+    def span_of(
+        self, path: Path | str, cfg: ProductConfig | None = None
+    ) -> tuple[datetime, datetime] | None:
+        """The first and last frame one tar holds, inclusive, off its filename.
 
         Lets `pack --window` skip tars it cannot need instead of untarring the
-        whole archive for one day. `None` means "cannot tell", and the caller
-        packs the file rather than risk dropping it.
+        whole archive for one day, and tells `pack` which shards a tar writes so
+        that no shard has two writers. `None` means "cannot tell", and the
+        caller packs the file rather than risk dropping it.
+
+        With `cfg`, the span is exact. Without it the end token is taken as the
+        last frame, which for echotop and reflectivity is one frame too far:
+        their `..._20080102T000000` names the exclusive end. That one frame is
+        the first slot of the NEXT day's shard, so every tar appeared to write
+        two shards, grouping chained every consecutive day into one task, and a
+        6,668-tar pack ran as 16 tasks - two of them ~2,000 tars long, which the
+        stall timeout then killed part-way through.
         """
         m = ANY_ARCHIVE_RE.match(Path(path).name)
         if not m:
@@ -708,6 +719,8 @@ class KnmiRadar:
         end_offset = _time_of_day(m.group("to_time"), Path(path).name)
         last = _yyyymmdd(m.group("to_date"))
         last += end_offset if end_offset is not None else timedelta(days=1)
+        if cfg is not None and self._end_is_exclusive(cfg):
+            last -= cfg.cadence
         return (first, max(last, first))
 
     def _unit_for(
