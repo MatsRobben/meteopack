@@ -40,8 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
                                              "validate/catalog) or dataset name (derive); "
                                              "optional for `credentials`")
     p.add_argument("--product", help="product within the source; required if it has several")
-    p.add_argument("--window", help="ISO interval START/END, e.g. 2012-01-01/2013-01-01 "
-                                    "(default: the last 24 hours)")
+    p.add_argument("--window", help="START/END. Dates and times are half-open: "
+                                    "2012-01-01/2013-01-01 is the year 2012. A bare year or "
+                                    "year-month is the whole period, both ends included: "
+                                    "2012/2013 is two years, 2012-06/2012-06 is June. "
+                                    "Default: the last 24 hours")
     p.add_argument("--data-root", help="overrides $METEOPACK_DATA_ROOT, which overrides the config")
     p.add_argument("--configs", help="config directory (default: <repo>/configs)")
     p.add_argument("--workers", type=int, default=None, help="default: all available cores")
@@ -70,11 +73,22 @@ def parse_window(spec: str | None) -> TimeWindow:
         raise SystemExit(f"--window needs START/END, got {spec!r}")
 
     def one(text: str, *, upper: bool) -> datetime:
+        # A bare year or year-month names a whole period, so as an END it means
+        # the end of that period: 2012/2013 is two years. A date or time is an
+        # instant, and the window is half-open on it.
         text = text.strip()
-        if len(text) == 4:                      # a bare year
-            year = int(text) + (1 if upper else 0)
-            return datetime(year, 1, 1, tzinfo=UTC)
-        value = datetime.fromisoformat(text)
+        try:
+            if len(text) == 4:                      # YYYY
+                return datetime(int(text) + (1 if upper else 0), 1, 1, tzinfo=UTC)
+            if len(text) == 7 and text[4] == "-":   # YYYY-MM
+                year, month = int(text[:4]), int(text[5:])
+                if upper:
+                    year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+                return datetime(year, month, 1, tzinfo=UTC)
+            value = datetime.fromisoformat(text)
+        except ValueError:
+            raise SystemExit(f"--window: cannot read {text!r}; use YYYY, YYYY-MM, a date or "
+                             f"an ISO time, e.g. 2012-01-01/2013-01-01") from None
         return value if value.tzinfo else value.replace(tzinfo=UTC)
 
     return TimeWindow(one(start, upper=False), one(end, upper=True))
@@ -531,7 +545,11 @@ def _timeline_for(ctx: Context):
     start, end = ctx.window.start, ctx.window.end
     if not ctx.args.window:
         files = ctx.catalog.files()
-        rows = files.filter(files["product"] == ctx.cfg.product) if len(files) else files
+        # Source AND product: product names repeat across sources (dwd and dmi
+        # both have stations_10min), and one's valid times would size the
+        # other's axis.
+        rows = files.filter((files["source"] == ctx.cfg.source)
+                            & (files["product"] == ctx.cfg.product)) if len(files) else files
         times = [t for t in rows["valid_time"].to_list() if t is not None] if len(rows) else []
         if not times:
             # An archive copied in by hand has no catalog, and that is the

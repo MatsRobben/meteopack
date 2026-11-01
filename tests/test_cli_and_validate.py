@@ -517,3 +517,37 @@ def test_a_failed_file_leaves_points_partitions_untouched(tmp_path, monkeypatch,
     assert "store is unchanged" in out and "truncated.zip" in out
     assert calls == ["parse_points"], "no partition write may be attempted"
     assert not points.store_path(tmp_path, "dwd/stations_10min/v1").exists()
+
+
+@pytest.mark.parametrize(("spec", "start", "end"), [
+    ("2012-01-01/2013-01-01", datetime(2012, 1, 1), datetime(2013, 1, 1)),   # half-open
+    ("2012/2013", datetime(2012, 1, 1), datetime(2014, 1, 1)),               # whole years
+    ("2012/2012", datetime(2012, 1, 1), datetime(2013, 1, 1)),
+    ("2012-06/2012-06", datetime(2012, 6, 1), datetime(2012, 7, 1)),         # whole month
+    ("2012-12/2012-12", datetime(2012, 12, 1), datetime(2013, 1, 1)),
+])
+def test_window_periods_and_instants(spec, start, end):
+    w = parse_window(spec)
+    assert (w.start, w.end) == (start.replace(tzinfo=UTC), end.replace(tzinfo=UTC))
+
+
+def test_an_unreadable_window_explains_itself():
+    with pytest.raises(SystemExit, match="cannot read"):
+        parse_window("June/2012")
+
+
+def test_another_sources_product_of_the_same_name_does_not_size_the_axis(tmp_path):
+    """dwd and dmi both have `stations_10min`; the axis filter matched on product alone."""
+    from meteopack.cli import Context, _timeline_for, build_parser
+    from meteopack.core.catalog import Catalog
+    from meteopack.sources.base import RawFile
+
+    cat = Catalog(tmp_path)
+    for source, year in (("dmi", 2020), ("dwd", 2024)):
+        cat.record_file(RawFile(tmp_path / f"{source}.zip", "0" * 64, 1, f"{source}-u"),
+                        source=source, product="stations_10min", url="file:///x",
+                        valid_time=datetime(year, 7, 2, tzinfo=UTC))
+    cat.flush()
+    args = build_parser().parse_args(["pack", "dwd", "--data-root", str(tmp_path)])
+    tl = _timeline_for(Context(args))
+    assert tl.start.year == 2024, tl

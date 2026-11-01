@@ -422,6 +422,7 @@ def test_unknown_missing_policy_is_rejected() -> None:
     [
         (65535.0, "uint16", 65535.0),   # representable: left alone
         (65535.0, "uint8", 255.0),      # the real case: clamped to the dtype maximum
+        (65534.0, "uint8", 254.0),      # keeps its distance from the top, not folded onto 255
         (254.0, "uint8", 254.0),
         (None, "uint8", None),
         (-1.0, "uint8", None),          # no pixel can carry it, so there is no mask
@@ -1063,3 +1064,13 @@ def test_parse_stage_summarises_gridded_files_instead_of_concatenating(tmp_path,
     assert _parse_gridded(ctx, paths) == 0
     out = capsys.readouterr().out
     assert out.count("2 frame(s)") == 2, out
+
+
+@pytest.mark.parametrize(("parameter", "code"), [("HEIGHT_[KM]", 6), ("REFLECTIVITY_[DBZ]", 7)])
+def test_echotop_and_reflectivity_frames_have_a_layout(parameter, code):
+    """Every echotop frame in the store used to be 2, 'unknown'."""
+    from meteopack.sources.knmi_radar import LAYOUT_NAMES, layout_id
+
+    spec = ImageSpec("image1", parameter, 0.5, -32.0, 0.0, 255.0, "uint8", (NY, NX))
+    assert layout_id({parameter: spec}) == code
+    assert LAYOUT_NAMES[code] != "unknown"

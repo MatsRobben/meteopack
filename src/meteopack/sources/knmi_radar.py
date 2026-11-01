@@ -352,6 +352,11 @@ LAYOUTS: dict[frozenset[str], int] = {
     **{frozenset({p}): 4 for p in _PRECIP},
     **{frozenset({p, _ADJUST}): 3 for p in _PRECIP},
     **{frozenset({p, _QUALITY, _ADJUST}): 5 for p in _PRECIP},
+    # The echo top and reflectivity products hold one image each. Without
+    # these every frame of both stores was 2, "unknown" - true, and useless.
+    # 6 and 7 are new: radar_v3 only catalogued the accumulation product.
+    frozenset({"HEIGHT_[KM]"}): 6,
+    frozenset({"REFLECTIVITY_[DBZ]"}): 7,
 }
 
 #: What each code means, written onto the store so the integers are readable
@@ -363,6 +368,8 @@ LAYOUT_NAMES: dict[int, str] = {
     3: "precipitation and adjustment factor",
     4: "precipitation only",
     5: "precipitation, quality and adjustment factor",
+    6: "echo top height",
+    7: "reflectivity",
 }
 
 
@@ -399,6 +406,13 @@ def representable_sentinel(sentinel: float | None, dtype: np.dtype) -> float | N
     explicitly for its uint8 images. It costs the top code point of a uint8
     frame, which is unambiguous in practice — the value histogram of such a
     frame runs 0..223 and then jumps straight to the 255 mask.
+
+    The clamp keeps the code's distance from the top of the range it was
+    written for: 65535 -> 255 and 65534 -> 254. Clamping both to 255 would fold
+    a narrowed frame's missing code onto its out-of-image code, which is the
+    distinction the store exists to keep. (No frame in the three archives
+    declares an out-of-range missing code - they all declare 0 - so this has
+    not fired; it is here so it never silently does.)
     """
     if sentinel is None or dtype.kind not in "ui":
         return sentinel
@@ -408,8 +422,11 @@ def representable_sentinel(sentinel: float | None, dtype: np.dtype) -> float | N
     if sentinel < info.min:
         logger.debug("sentinel %s is below %s; no pixel can carry it", sentinel, dtype)
         return None
-    logger.debug("sentinel %s does not fit %s; reading it as %s", sentinel, dtype, info.max)
-    return float(info.max)
+    wide = next((m for m in (2**8 - 1, 2**16 - 1, 2**32 - 1, 2**64 - 1) if sentinel <= m), None)
+    below_top = int(wide - sentinel) if wide is not None else 0
+    clamped = info.max - below_top if below_top < int(info.max) - int(info.min) else info.max
+    logger.debug("sentinel %s does not fit %s; reading it as %s", sentinel, dtype, clamped)
+    return float(clamped)
 
 
 def _sentinel_means_no_echo(declared_missing: float | None, policy: str) -> bool:
