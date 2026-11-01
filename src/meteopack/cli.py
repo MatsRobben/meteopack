@@ -665,7 +665,7 @@ def _write_pack_scan_report(ctx: Context, store, results: list[dict]) -> None:
         "n_layouts": len(ordered),
         "layouts": ordered,
         "known_layouts": sorted(layouts),
-        "schema_fingerprint": _product_fingerprint(sorted(layouts)),
+        "schema_fingerprint": _product_fingerprint(ctx, sorted(layouts)),
     }
     target = Path(store) / "scan_report.json"
     try:
@@ -676,11 +676,18 @@ def _write_pack_scan_report(ctx: Context, store, results: list[dict]) -> None:
     print(f"  saw {len(ordered)} layout(s); report at {target}")
 
 
-def _product_fingerprint(fingerprints: list[str]) -> str:
-    """The hash `schema_fingerprint` pins, computed the way the source does."""
+def _product_fingerprint(ctx: Context, fingerprints: list[str]) -> str:
+    """The hash `schema_fingerprint` pins, computed the way the source does.
+
+    Asked of the source rather than recomputed here. The generic helper joins
+    names on a NUL and knmi_radar joins layouts on a "|", so computing it
+    locally produced a pin that the source's own consistency check rejected -
+    in a report whose whole purpose is to be pasted into the config.
+    """
     from meteopack.sources.common import fingerprint
 
-    return fingerprint(fingerprints)
+    own = getattr(ctx.src, "product_fingerprint", None)
+    return own(fingerprints) if callable(own) else fingerprint(fingerprints)
 
 
 def stage_pack(ctx: Context) -> int:
@@ -747,9 +754,16 @@ def stage_pack(ctx: Context) -> int:
                 print(f"    {message}")
             errors.append({"path": str(store), "error": f"{len(drift)} unpinned layouts"})
         if outside:
+            spans = [r["outside_span"] for r in results if r.get("outside_span")]
+            where = ""
+            if spans:
+                lo = min(s[0] for s in spans)
+                hi = max(s[1] for s in spans)
+                where = f" The dropped frames run {lo}..{hi}." if lo != hi \
+                    else f" The dropped frame is {lo}."
             print(f"  ERROR {outside} frame(s) fall outside the store's time axis "
                   f"and were NOT written. The store covers "
-                  f"{timeline.start:%Y-%m-%dT%H:%M}..{timeline.end:%Y-%m-%dT%H:%M}.")
+                  f"{timeline.start:%Y-%m-%dT%H:%M}..{timeline.end:%Y-%m-%dT%H:%M}.{where}")
             errors.append({"path": str(store), "error": f"{outside} frames outside the axis"})
         n_records = frames
     else:

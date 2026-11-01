@@ -449,6 +449,11 @@ class WriteResult:
     written: int = 0
     outside: int = 0
     off_cadence: int = 0
+    #: The first and last frame that fell outside the axis, ISO-8601. A bare
+    #: count says a frame was dropped but not which end of the axis is wrong,
+    #: and hunting for it means re-reading the archive by hand.
+    outside_first: str | None = None
+    outside_last: str | None = None
 
     def __fspath__(self) -> str:
         return str(self.path)
@@ -488,9 +493,9 @@ def write(
     stamps = ds[TIME_NAME].values
     rows = timeline.index_of(stamps)
     keep = rows >= 0
-    n_outside, n_off = _classify_misses(stamps, rows, timeline)
+    n_outside, n_off, lost = _classify_misses(stamps, rows, timeline)
     if not keep.any():
-        return WriteResult(path, 0, n_outside, n_off)
+        return WriteResult(path, 0, n_outside, n_off, *lost)
 
     # Sorting makes the kept rows contiguous however the input was ordered, so a
     # day of frames is one region write rather than 288. Stable, so a timestamp
@@ -526,7 +531,7 @@ def write(
             array[int(run[0]) : int(run[-1]) + 1] = block[picks]
 
     _write_provenance(group, ds, rows, keep, hit, order, breaks)
-    return WriteResult(path, int(np.unique(hit).size), n_outside, n_off)
+    return WriteResult(path, int(np.unique(hit).size), n_outside, n_off, *lost)
 
 
 def _write_provenance(group, ds, rows, keep, hit, order, breaks) -> None:
@@ -559,21 +564,30 @@ def _write_provenance(group, ds, rows, keep, hit, order, breaks) -> None:
 
 def _classify_misses(
     stamps: np.ndarray, rows: np.ndarray, timeline: Timeline
-) -> tuple[int, int]:
+) -> tuple[int, int, tuple[str | None, str | None]]:
     """Split the rejected frames into "past the end of the axis" and "off grid".
 
     They are different problems with different fixes - one needs a bigger
     store, the other means the data is not on the cadence it claims - and a
     single "dropped" count would send you looking in the wrong place.
+
+    Also returns the first and last frame that missed the axis. One dropped
+    frame out of 770,115 took a manual walk through the archive to place; the
+    two timestamps say immediately which end of the axis is short.
     """
     missed = rows < 0
     if not missed.any():
-        return 0, 0
+        return 0, 0, (None, None)
     when = np.asarray(stamps, dtype="datetime64[ns]").astype("int64")[missed]
     start = timeline.start_ns
     end = start + timeline.step_ns * len(timeline)
-    outside = int(((when < start) | (when >= end)).sum())
-    return outside, int(missed.sum()) - outside
+    off_axis = (when < start) | (when >= end)
+    outside = int(off_axis.sum())
+    span: tuple[str | None, str | None] = (None, None)
+    if outside:
+        lost = when[off_axis].astype("datetime64[ns]")
+        span = (str(lost.min()), str(lost.max()))
+    return outside, int(missed.sum()) - outside, span
 
 
 def refresh_attrs(

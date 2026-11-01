@@ -967,6 +967,13 @@ class KnmiRadar:
             },
         )
 
+    #: How `schema_fingerprint` is computed for this product. `pack` writes a
+    #: refreshed set of pins to scan_report.json, and the hash it writes there
+    #: has to be the one `_check_pins` recomputes - the generic helper joins on
+    #: a NUL and this one joins on a "|", so a pin copied out of the report
+    #: failed the very consistency check it was meant to satisfy.
+    product_fingerprint = staticmethod(product_fingerprint)
+
     @staticmethod
     def _check_pins(cfg: ProductConfig) -> list[str]:
         """The pinned layout set, after checking the config agrees with itself.

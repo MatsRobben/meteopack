@@ -221,8 +221,19 @@ def test_pinned_fingerprint_matches_the_pinned_layouts() -> None:
     """Editing extra.known_layouts without re-pinning the hash must fail loudly."""
     product = ProductConfig(**yaml.safe_load(PRODUCT_YAML.read_text()))
     layouts = product.extra["known_layouts"]
-    assert len(layouts) == len(set(layouts)) == 5
+    # 11 layouts, from a census over the whole archive rather than a sample.
+    assert len(layouts) == len(set(layouts)) == 11
     assert product_fingerprint(layouts) == product.schema_fingerprint
+
+
+def test_the_source_exposes_the_hash_the_pins_are_checked_against() -> None:
+    """`pack` writes refreshed pins; they have to hash the way the check does.
+
+    The report used a generic helper that joins names on a NUL while this
+    source joins layouts on a "|", so a fingerprint copied out of the report
+    failed the consistency check it existed to satisfy.
+    """
+    assert KnmiRadar.product_fingerprint(["b", "a"]) == product_fingerprint(["a", "b"])
 
 
 # -------------------------------------------------------------------- calibration

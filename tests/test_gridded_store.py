@@ -374,6 +374,31 @@ def test_write_reports_frames_the_store_refused(tmp_path: Path):
     assert (ragged.written, ragged.outside, ragged.off_cadence) == (0, 0, 1)
 
 
+def test_a_refused_frame_says_which_frame_it_was(tmp_path: Path):
+    """A count alone does not say which end of the axis is short.
+
+    One frame out of 770,115 was dropped on the real radar archive and placing
+    it meant re-reading tars by hand: the axis had been started one step late,
+    so the archive's very first frame fell before it. The timestamps say that
+    in the error itself.
+    """
+    cfg, timeline = make_cfg(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    step = np.timedelta64(CADENCE_SECONDS, "s")
+
+    early = timeline.values()[0] - step
+    before = gridded.write(dataset(np.array([early]), block(np.arange(1))), cfg, tmp_path)
+    assert before.outside == 1
+    assert before.outside_first == before.outside_last == str(early)
+
+    beyond = timeline.values()[-1] + step * np.arange(1, 4)
+    after = gridded.write(dataset(beyond, block(np.arange(3))), cfg, tmp_path)
+    assert (after.outside_first, after.outside_last) == (str(beyond[0]), str(beyond[-1]))
+
+    kept = gridded.write(day_dataset(timeline, 1), cfg, tmp_path)
+    assert (kept.outside, kept.outside_first, kept.outside_last) == (0, None, None)
+
+
 def test_extending_the_axis_keeps_every_frame_already_written(tmp_path: Path):
     """Day-by-day packing must equal packing the whole window at once.
 

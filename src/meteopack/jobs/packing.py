@@ -200,6 +200,7 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
 
     src, cfg = _load(task)
     frames = outside = off_cadence = 0
+    lost: list[str] = []
     # Schema drift is reported, not raised: a frame whose layout is not pinned
     # still reads correctly, and discarding its whole tar lost 5,508 frames on
     # the real archive. `pack` fails at the end on anything collected here.
@@ -222,8 +223,10 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
         frames += result.written
         outside += result.outside
         off_cadence += result.off_cadence
+        lost += [t for t in (result.outside_first, result.outside_last) if t]
     return {"path": task.raw_path, "frames": frames, "outside": outside,
             "off_cadence": off_cadence, "drift": sorted(drift),
+            "outside_span": [min(lost), max(lost)] if lost else None,
             "layouts": list(layouts.values())}
 
 

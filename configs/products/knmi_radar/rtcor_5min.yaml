@@ -132,7 +132,7 @@ variables:
 # Hash of extra.known_layouts below, as `scan` reports it (product_fingerprint).
 # Editing that list without re-pinning this makes `parse` fail loudly rather
 # than quietly widening what counts as known.
-schema_fingerprint: 3f1957ea87723157
+schema_fingerprint: 4601c33369cd37b3
 
 extra:
   # Where the daily tars live. Overrides the source config's base_url.
@@ -189,17 +189,27 @@ extra:
   # because reading it literally leaves the footprint mask unmasked and turns
   # ~104 000 out-of-image pixels into 2.55 mm of rain.
   #
-  # Captured on 2026-10-31 by scanning EVERY frame of every 134th tar, i.e.
-  # 5760 frames out of ~770 000. That is a sample: a variant confined to days
-  # it did not touch is not in this list, and `parse` will refuse those days
-  # loudly rather than mis-read them. Run `scan` over the whole archive before a
-  # full backfill and re-pin this and schema_fingerprint together.
+  # Captured on 2026-11-01 from a pack over the WHOLE archive (2680 tars,
+  # 770 115 frames), not a sample: `pack` writes the layout census it saw to
+  # scan_report.json beside the store, and these are its fingerprints with the
+  # frame counts it recorded. The first scan sampled every 134th tar and found
+  # 5 of these 11; the six it missed are the rare ones below, 1 to 14 frames
+  # each. Nothing was mis-read either way -- images are addressed by
+  # image_geo_parameter and each carries its own calibration -- but an unpinned
+  # layout is a loud error, which is the point: re-pin from scan_report.json
+  # after a backfill, and re-pin schema_fingerprint with it.
   known_layouts:
-    - 9ad3a06bbce5d4fc
-    - 4fd1994af350b24b
-    - 22575bf4da70e1ae
-    - 3b0d9e40660f02f0
-    - ceecc00358aaec88
+    - 22575bf4da70e1ae    # 370099 frames, e.g. RAD_NL25_RAC_RT_201907221340.h5
+    - ceecc00358aaec88    # 215376 frames, e.g. RAD_NL25_RAC_RT_202404060805.h5
+    - 3b0d9e40660f02f0    # 123182 frames, e.g. RAD_NL25_RAC_RT_202302010805.h5
+    - 9ad3a06bbce5d4fc    #  57939 frames, e.g. RAD_NL25_RAC_RT_201812280805.h5
+    - 4fd1994af350b24b    #   3457 frames, e.g. RAD_NL25_RAC_RT_201902082200.h5
+    - 668e6dc217d173cb    #     14 frames, e.g. RAD_NL25_RAC_RT_202405221650.h5
+    - e0928e5076291fb2    #      4 frames, e.g. RAD_NL25_RAC_RT_202601292230.h5
+    - aefabc03aeff1794    #      3 frames, e.g. RAD_NL25_RAC_RT_202302220050.h5
+    - 1cc47bbb0b7f6520    #      3 frames, e.g. RAD_NL25_RAC_RT_202311040200.h5
+    - 827cd86d4fb0aa4a    #      2 frames, e.g. RAD_NL25_RAC_RT_201905151520.h5
+    - 4d91f25f08fe2b48    #      1 frame,  e.g. RAD_NL25_RAC_RT_201907191945.h5
   # A daily tar runs 08:05 -> 08:00, so the store's time axis must start on an
   # 08:05 instant. On a midnight-origin axis every tar straddles two shards, two
   # adjacent tars share the middle one, and the tasks holding them lose whole
