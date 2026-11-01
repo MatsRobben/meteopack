@@ -18,6 +18,7 @@ import functools
 import logging
 import multiprocessing
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -198,16 +199,20 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
     """
     from meteopack.core.store import gridded
 
+    started = time.time()
     src, cfg = _load(task)
     frames = outside = off_cadence = 0
     lost: list[str] = []
+    t_parse = t_write = 0.0
     # Schema drift is reported, not raised: a frame whose layout is not pinned
     # still reads correctly, and discarding its whole tar lost 5,508 frames on
     # the real archive. `pack` fails at the end on anything collected here.
     drift: set[str] = set()
     layouts: dict[str, dict] = {}
     for raw_path in task.paths:
+        t = time.perf_counter()
         ds = src.parse(_raw_file(raw_path), cfg)
+        t_parse += time.perf_counter() - t
         if ds is None or not ds.sizes.get("time"):
             continue
         drift.update(ds.attrs.get("schema_drift") or ())
@@ -218,7 +223,9 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
                 layouts[fp] = dict(entry)
             else:
                 seen["count"] += int(entry.get("count", 0))
+        t = time.perf_counter()
         result = gridded.write(ds, cfg, Path(task.root))
+        t_write += time.perf_counter() - t
         del ds
         frames += result.written
         outside += result.outside
@@ -227,7 +234,11 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
     return {"path": task.raw_path, "frames": frames, "outside": outside,
             "off_cadence": off_cadence, "drift": sorted(drift),
             "outside_span": [min(lost), max(lost)] if lost else None,
-            "layouts": list(layouts.values())}
+            "layouts": list(layouts.values()),
+            # Wall-clock, so tasks from different workers line up: where a
+            # pack's time goes between start-up, work and waiting.
+            "timing": {"pid": os.getpid(), "start": started, "end": time.time(),
+                       "parse_s": t_parse, "write_s": t_write}}
 
 
 #: How long `run` waits for *any* task to finish before concluding the pool is

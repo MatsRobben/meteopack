@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import sys
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,9 @@ if TYPE_CHECKING:
     from meteopack.sources.base import RawFile, TimeWindow
 
 logger = logging.getLogger("meteopack")
+
+#: When this process got as far as importing the CLI: the zero for METEOPACK_TRACE.
+_STARTED = time.time()
 
 STAGES = ("scan", "list", "fetch", "parse", "pack", "derive", "validate", "catalog",
           "credentials")
@@ -83,6 +87,7 @@ class Context:
         from meteopack.jobs import plan as planning
 
         self.args = args
+        self.started = _STARTED
         self.root = data_root(args.data_root, default=str(Path.cwd() / "data"))
         self.cfg = planning.load_product_config(args.target, args.product, configs=args.configs)
         self.source_cfg = planning.load_source_config(args.target, configs=args.configs)
@@ -388,6 +393,39 @@ def _pack_tasks(ctx: Context, files: list[Path], timeline=None) -> list:
         if group:
             out.append(task(group[0], tuple(group[1:])))
     return out
+
+
+def _report_trace(results: list[dict], workers: int, *, cli_started: float,
+                  pool_started: float) -> None:
+    """With METEOPACK_TRACE=<file>: where the pack's wall time went.
+
+    Writes every task's timing to the file and prints the split: set-up before
+    the pool, the wait for the first worker to start, how busy the workers were
+    once going, and the tail after the last task began. A pack that stops
+    speeding up with more workers is losing time in one of these, and the
+    numbers say which.
+    """
+    target = os.environ.get("METEOPACK_TRACE")
+    timings = [r["timing"] for r in results if r.get("timing")]
+    if not target or not timings:
+        return
+    import json
+
+    end = max(t["end"] for t in timings)
+    first = min(t["start"] for t in timings)
+    busy = sum(t["end"] - t["start"] for t in timings)
+    parse = sum(t["parse_s"] for t in timings)
+    write = sum(t["write_s"] for t in timings)
+    span = end - pool_started
+    used = len({t["pid"] for t in timings})
+    Path(target).write_text(json.dumps({
+        "workers": workers, "cli_started": cli_started, "pool_started": pool_started,
+        "tasks": timings}, indent=1))
+    print(f"  trace: set-up {pool_started - cli_started:.1f}s, first worker started after "
+          f"{first - pool_started:.1f}s, pool ran {span:.1f}s; workers busy "
+          f"{100 * busy / (workers * span):.0f}% (parse {100 * parse / max(busy, 1e-9):.0f}%, "
+          f"write {100 * write / max(busy, 1e-9):.0f}% of busy), {used} worker process(es); "
+          f"last task started {end - max(t['start'] for t in timings):.1f}s before the end")
 
 
 #: More files than this in one task means grouping has chained files together
@@ -793,7 +831,9 @@ def stage_pack(ctx: Context) -> int:
                       f"to cover {timeline.end:%Y-%m-%dT%H:%M}")
         tasks = _pack_tasks(ctx, files, timeline)
         _report_grouping(files, tasks, workers)
+        pool_started = time.time()
         results = packing.run(tasks, packing.write_gridded, workers=workers)
+        _report_trace(results, workers, cli_started=ctx.started, pool_started=pool_started)
         frames = sum(r.get("frames", 0) for r in results)
         outside = sum(r.get("outside", 0) for r in results)
         off_cadence = sum(r.get("off_cadence", 0) for r in results)
