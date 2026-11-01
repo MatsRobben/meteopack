@@ -18,7 +18,10 @@ NFS client drops that file's cached pages. The first tar is used to check
 that it works on this machine (cold, warm, evicted reads), and the result is
 printed: if "evicted" looks like "warm", every io number below is a lie.
 
-`--cprofile N` also runs cProfile over the parse and write of the first N tars.
+`--cprofile N` also runs cProfile over the parse and write of N tars spread
+evenly across the sample (so every generation is in it), after one untimed
+warm-up parse: the first parse in a process pays ~12 s of imports from the
+venv on NFS, which otherwise buries everything else in the profile.
 """
 from __future__ import annotations
 
@@ -100,14 +103,21 @@ def main() -> int:
           f"{ev['warm_mib_s']:.0f}, evicted {ev['evicted_mib_s']:.0f} MiB/s -> "
           f"{'works' if ev['eviction_works'] else 'DOES NOT WORK: io numbers are cached reads'}")
 
+    # Warm-up: pay the imports and first-call costs outside every measurement.
+    warm = tars[0]
+    src.parse(RawFile(path=warm, sha256="", n_bytes=warm.resolve().stat().st_size,
+                      unit_key=warm.name), cfg)
+
     prof = cProfile.Profile() if args.cprofile else None
+    stride = max(len(tars) // max(args.cprofile, 1), 1)
+    profiled = set(range(0, len(tars), stride)[: args.cprofile]) if args.cprofile else set()
     rows = []
     for k, tar in enumerate(tars):
         real = tar.resolve()
         evict(real)
         t_io = read_all(real)
         raw = RawFile(path=tar, sha256="", n_bytes=real.stat().st_size, unit_key=tar.name)
-        profiling = prof is not None and k < args.cprofile
+        profiling = prof is not None and k in profiled
         if profiling:
             prof.enable()
         t = time.perf_counter()
@@ -140,9 +150,9 @@ def main() -> int:
     if prof is not None:
         buf = io.StringIO()
         stats = pstats.Stats(prof, stream=buf).strip_dirs()
-        stats.sort_stats("tottime").print_stats(22)
+        stats.sort_stats("tottime").print_stats(30)
         print("\n--- cProfile, by own time ---")
-        print("\n".join(buf.getvalue().splitlines()[4:34]))
+        print("\n".join(buf.getvalue().splitlines()[4:42]))
 
     results = Path(__file__).resolve().parent / "results"
     results.mkdir(exist_ok=True)
