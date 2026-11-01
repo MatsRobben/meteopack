@@ -400,6 +400,10 @@ def summarise(store_id: str, root: str | os.PathLike[str], cfg: ProductConfig, *
     row = con.execute(f"SELECT {', '.join(pieces)} FROM {src}").fetchone()
     names = [p.rsplit(" AS ", 1)[1] for p in pieces]
     out = dict(zip(names, row, strict=True))
+    # Which stations reported, not just how many: a station table can hold the
+    # right number of rows for the wrong stations.
+    out["station_ids"] = sorted(
+        str(r[0]) for r in con.execute(f"SELECT DISTINCT station_id FROM {src}").fetchall())
 
     # Duplicates are counted one partition at a time, not across the store. A
     # (time, station_id) pair belongs to exactly one partition - the partition

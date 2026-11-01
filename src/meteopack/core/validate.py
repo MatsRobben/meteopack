@@ -107,7 +107,18 @@ def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") 
 
     # Observations without positions are unusable for anything spatial, and the
     # failure is silent downstream: a dense matrix just drops those stations.
-    _check_station_metadata(report, cfg, root, layer, int(summary["stations"]))
+    _check_station_metadata(report, cfg, root, layer, summary.get("station_ids") or [])
+
+    # Every configured variable must be in the store and have at least one
+    # value. A selector that matches nothing upstream produces a column of
+    # nulls, or no column, and passed silently: air_pressure was 0 of 237,600
+    # rows in one quickstart, and E-SOH's wind selectors match nothing DWD
+    # publishes.
+    for var in cfg.variables:
+        if var.name not in columns:
+            report.add(f"{var.name} has values", False, "configured but not in the store")
+        elif not int(summary.get(f"filled__{var.name}") or 0):
+            report.add(f"{var.name} has values", False, f"0/{rows} rows filled")
 
     for name in summary["value_columns"]:
         filled = int(summary.get(f"filled__{name}") or 0)
@@ -126,12 +137,12 @@ def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") 
 
 
 def _check_station_metadata(report: Report, cfg: ProductConfig, root: Path,
-                            layer: Layer, n_observed: int) -> None:
-    """How many of the stations that reported have a position.
+                            layer: Layer, observed: list[str]) -> None:
+    """Whether every station that reported has a position - by id, not by count.
 
-    Counted against the station table rather than against the observation
-    column, so the whole check is two small reads: the station table is one row
-    per station, and the observation count came from an aggregate.
+    This compared counts, so a table with the right number of rows for the
+    wrong stations passed. The reporting ids come from a streaming DISTINCT,
+    so the check is still two small reads.
     """
     from meteopack.core.store import points
 
@@ -139,15 +150,17 @@ def _check_station_metadata(report: Report, cfg: ProductConfig, root: Path,
         meta = points.read_stations(cfg.store_id, root, layer=layer)
     except Exception:  # noqa: BLE001 - absence is the thing being reported
         meta = None
-    known = 0 if meta is None else int(
-        meta.filter(meta["lat"].is_not_null() & meta["lon"].is_not_null()).height
+    placed = set() if meta is None else set(
+        meta.filter(meta["lat"].is_not_null() & meta["lon"].is_not_null())["station_id"]
+        .cast(str).to_list()
     )
-    report.add(
-        "stations have metadata",
-        n_observed > 0 and known >= n_observed,
-        f"{known} stations with lat/lon for {n_observed} that reported"
-        + ("" if known else " (station table is empty - did pack write it?)"),
-    )
+    unplaced = sorted(set(observed) - placed)
+    detail = f"{len(observed) - len(unplaced)} of {len(observed)} reporting stations have lat/lon"
+    if unplaced:
+        detail += f"; without: {', '.join(unplaced[:8])}" + (" ..." if len(unplaced) > 8 else "")
+    if not placed:
+        detail += " (station table is empty - did pack write it?)"
+    report.add("stations have metadata", bool(observed) and not unplaced, detail)
 
 
 def validate_gridded(cfg: ProductConfig, root: Path, *, layer: Layer = "packed",

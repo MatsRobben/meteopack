@@ -638,3 +638,42 @@ def test_station_metadata_comes_from_the_archive_when_the_live_catalogue_fails(t
 
     assert cli._write_station_metadata(Ctx()) == 1
     assert points.read_stations(_cfg().store_id, tmp_path)["station_id"].to_list() == ["00044"]
+
+
+def _healthy_points_store(tmp_path, cfg=None):
+    cfg = cfg or _cfg()
+    times = pl.datetime_range(datetime(2012, 1, 1), datetime(2012, 1, 1, 1),
+                              interval="10m", eager=True, closed="left")
+    points.write(_frame(times, [5.0] * len(times)), cfg, tmp_path)
+    manifest.write(points.store_path(tmp_path, cfg.store_id),
+                   manifest.Manifest.new(cfg.store_id, "packed", "points", cfg))
+    return cfg
+
+
+def test_station_metadata_is_checked_by_id_not_by_count(tmp_path):
+    """One row for the wrong station passed: the check compared counts."""
+    cfg = _healthy_points_store(tmp_path)
+    points.write_stations(_stations().with_columns(pl.lit("99999").alias("station_id")),
+                          cfg.store_id, tmp_path)
+    report = validate(cfg, tmp_path)
+    check = next(c for c in report.checks if c.name == "stations have metadata")
+    assert not check.ok and "00044" in check.detail
+
+
+@pytest.mark.parametrize("extra", ["empty", "absent"])
+def test_a_configured_variable_with_no_values_fails(tmp_path, extra):
+    """air_pressure was 0 of 237,600 rows in a quickstart, and validate passed."""
+    cfg = _cfg()
+    cfg.variables.append(Variable(name="air_pressure", source_key="PP_10", units="hPa"))
+    times = pl.datetime_range(datetime(2012, 1, 1), datetime(2012, 1, 1, 1),
+                              interval="10m", eager=True, closed="left")
+    frame = _frame(times, [5.0] * len(times))
+    if extra == "empty":
+        frame = frame.with_columns(pl.lit(None, dtype=pl.Float64).alias("air_pressure"))
+    points.write(frame, cfg, tmp_path)
+    points.write_stations(_stations(), cfg.store_id, tmp_path)
+    manifest.write(points.store_path(tmp_path, cfg.store_id),
+                   manifest.Manifest.new(cfg.store_id, "packed", "points", cfg))
+    report = validate(cfg, tmp_path)
+    check = next(c for c in report.checks if c.name == "air_pressure has values")
+    assert not check.ok, report.text()
