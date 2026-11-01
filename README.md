@@ -194,18 +194,23 @@ partitioned stores, validation — you get for free.
 ## Running on the cluster
 
 ```bash
-sbatch slurm/meteopack.slurm pack dwd
-sbatch --array=0-29 slurm/meteopack.slurm fetch dwd --window 2012/2013
+# one pack, using every core it is given
+sbatch --account=<yours> --exclude=cn79 --cpus-per-task=48 --mem=110G --time=02:00:00 \
+  --wrap ".venv/bin/python -m meteopack.cli pack knmi_radar --product echotop_5min"
+
+# a fetch split across an array: pass the task index through yourself
+sbatch --account=<yours> --exclude=cn79 --array=0-29 --cpus-per-task=4 --time=04:00:00 \
+  --wrap '.venv/bin/python -m meteopack.cli fetch dwd --window 2012/2013 \
+          --shard $SLURM_ARRAY_TASK_ID --shards $SLURM_ARRAY_TASK_COUNT'
 ```
 
-`SLURM_ARRAY_TASK_ID` becomes `--shard/--shards`, so array tasks split the unit
-list with no coordination. Units are assigned by stride, not by block, because
+With `--shard/--shards`, array tasks split the unit list with no coordination. Units are assigned by stride, not by block, because
 file size correlates with station index. This is for `fetch`, `list` and
 `derive`; `pack` refuses `--shards`, because concurrent packs of one gridded
 store would race on the same shard files. Give one pack job the cores instead
 (`--cpus-per-task`; it uses them all by default).
 
-> **cn79 is excluded from every wrapper.** It is a 2012 Sandy Bridge with no
+> **Always pass `--exclude=cn79`.** It is a 2012 Sandy Bridge with no
 > AVX2, and the `duckdb` and `polars` wheels fault at import there — it looks
 > like a mysterious job failure, not a CPU mismatch. See
 > [docs/runbooks/cluster.md](docs/runbooks/cluster.md).

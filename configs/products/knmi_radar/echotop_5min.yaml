@@ -89,7 +89,7 @@ extra:
     - f6018d1f97c4c012    #   192342 frames  scale=0.062992 offset=-0.062992
   # Placeholder calibrations over empty images: failed products, recorded as
   # corrupt frames with their data left missing. Checked frame by frame
-  # (benchmarks/odd_calibration_census.py): 691 + 1 frames on 140 days, 2008-03-11 to 2026-01-26,
+  # in a census of the whole archive: 691 + 1 frames on 140 days, 2008-03-11 to 2026-01-26,
   # and not one holds an echo pixel; where checked, the frames 5 minutes
   # either side hold tens of thousands. Decoded, they claimed no echo anywhere.
   corrupt_layouts:

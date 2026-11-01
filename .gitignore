@@ -35,3 +35,14 @@ slurm-*.out
 # secrets: tokens live outside the tree (see docs/runbooks)
 *.token
 .ceda_token
+
+# Personal tooling, not shared: benchmarks, Slurm wrappers and helper scripts
+# hard-code one user's paths and account, and the handoff is working notes.
+# Tests mention local archive paths only for optional real-data checks, which
+# skip when the path is absent, so they stay.
+benchmarks/
+slurm/
+scripts/e2e_smoke.py
+scripts/radar_rebuild.sh
+docs/HANDOFF.md
+logs/
