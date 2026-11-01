@@ -162,3 +162,60 @@ config has a one-line `description` that reaches the store manifest, and
   in-situ) - explicitly not satellite.
 - Source de-duplication: `_requests_session` x7, `station_id` x7,
   `StationRecord` x7, `unit_key` x6 still live in each source.
+
+## Session 2026-11-01: the output revision
+
+The user pushed back, correctly, on the radar store: it had three fields and I
+was writing two, as float32, with no provenance and no projection. I read the
+radar_v3 store and the code behind it before changing anything. The comparison,
+the layout census and the verification are in
+`docs/architecture/output_revision.md`; this is the operational summary.
+
+### Store schema, now
+
+```
+packed/<source>/<product>/v<n>/
+    dataset.zarr/      gridded      (or)  observations/ + stations/  points
+    manifest.json                         schema.json
+    README.md
+```
+
+Gridded fields are **integer codes with a calibration fixed by config**, not
+float32. `missing` and `out_of_image` are distinct codes. Per-frame provenance
+(`is_missing_frame`, `is_corrupt_frame`, `source_layout_id`,
+`source_record_id`) rides along as coordinates. `x`/`y` are projected cell
+centres, `lat`/`lon` are per-cell. Time is nanoseconds.
+
+### Layer names
+
+`canonical` -> `packed`, `derived` -> `training`, `catalog` -> `_bookkeeping`.
+Old roots keep working: `layer_path` and `catalog_path` fall back when only the
+old directory exists. Verified against the real 600 GB root.
+
+### Things that would have lost data at scale
+
+- A zarr shard has one writer. 2 of 2,680 radar tars start at 08:00 not 08:05
+  and straddle a shard, so `_pack_tasks` unions files by **every shard their
+  span touches**. Keying on the first frame - my first attempt - still raced.
+- `pack --window` read the whole archive; gridded sources now expose `span_of`.
+- The gridded time axis never grew, so day-by-day packing kept 1 day in 3.
+
+### Measured
+
+- one day (2 tars, 576 frames), 1 worker: **26.7 s, 2.1 GB peak RSS**
+- 576 frames occupy **28 MB** -> ~37 GB for the 772,129-frame archive
+  (radar_v3: 34 GB; float32 would have been ~68 GB)
+- `fetch` of the archive is dominated by **sha256 of 127 GB over NFS**, not by
+  the hardlinking. On a contended node (load 15) it ran at 3-50 tars/min.
+  Worth revisiting: a hardlink moves no bytes, so the digest buys integrity
+  rather than transfer safety, and a re-run re-hashes everything.
+
+### Still open
+
+- the full run itself: fetch was at ~1,720 of 2,680 tars when this was written
+- the station archives in `data_raw` (dwd 7.3G, dmi 2.4G, meteofrance 2.5G,
+  ea 4.0G, midas 750M, belgium 1.0G) - script ready at
+  `scratchpad/fullrun_stations.sh`, symlinks the existing raw instead of
+  re-downloading
+- knmi_insitu (26G), echotop (38G) and refl_composites (104G) have no product
+  configs yet; radar_v3 shows they are the same reader family
