@@ -11,7 +11,7 @@
 set -uo pipefail
 offset=${1:-0}
 K=/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi
-echo "== $(hostname): load $(cut -d' ' -f1-3 /proc/loadavg), $(nproc) cpus in this job"
+echo "== $(hostname): load $(cut -d' ' -f1-3 /proc/loadavg), $(python -c "import os; print(len(os.sched_getaffinity(0)))") cpus in this job"
 echo "== co-tenants: $(squeue -w $(hostname) -h -o '%u:%j:%C' | tr '\n' ' ')"
 python - <<'PY'
 import os, time
