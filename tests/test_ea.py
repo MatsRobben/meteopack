@@ -831,3 +831,71 @@ def test_live_catalogue_and_one_station_year():
     assert units
     resp = src._requests_session().get(units[0].url, timeout=120)
     assert resp.status_code == 200
+
+
+# ------------------------------------------------- integrity and loud listings
+
+FULL_YEAR = (
+    '"measure","dateTime","date","value","completeness","quality","qcode"\n'
+    f'"{_M}","2023-01-01T00:00:00","2023-01-01","0.0","Complete","Good",""\n'
+    f'"{_M}","2023-07-01T12:00:00","2023-07-01","0.2","Complete","Good",""\n'
+    f'"{_M}","2023-12-31T23:45:00","2023-12-31","0.0","Complete","Good",""\n'
+)
+
+
+def test_the_check_reads_the_span_a_station_year_holds(tmp_path):
+    """What lets the gap report see a year running 01-02..12-30 the day it lands."""
+    path = tmp_path / "2023.csv"
+    path.write_text(FULL_YEAR)
+    content = EaRainfall.check_raw(path)
+    assert content.n_records == 3
+    assert content.time_min == datetime(2023, 1, 1, tzinfo=UTC)
+    assert content.time_max == datetime(2023, 12, 31, 23, 45, tzinfo=UTC)
+
+
+def test_the_check_calls_zero_bytes_empty_not_broken(tmp_path):
+    path = tmp_path / "2009.csv"
+    path.write_text(EMPTY)
+    assert EaRainfall.check_raw(path).n_records == 0
+
+
+@pytest.mark.parametrize("body", [
+    FULL_YEAR[:-40],                                  # cut mid-row, no final newline
+    FULL_YEAR + f'"{_M}","2024-01-01T00:00:00"\n',   # a last row short of fields
+    "<html><body>Service Unavailable</body></html>\n",  # an error page served with 200
+])
+def test_the_check_rejects_a_body_that_is_not_a_whole_readings_csv(tmp_path, body):
+    path = tmp_path / "2023.csv"
+    path.write_text(body)
+    with pytest.raises(http.IntegrityError):
+        EaRainfall.check_raw(path)
+
+
+def test_fetch_hands_its_check_to_fetch_file(monkeypatch, tmp_path):
+    seen = {}
+
+    def capture(url, dest, **kwargs):
+        seen.update(kwargs)
+        return RawFile(Path(dest), "0" * 64, 0, kwargs["unit_key"])
+
+    monkeypatch.setattr(http, "fetch_file", capture)
+    src = FakeEa()
+    src.fetch(src.list(window(2020, 2021), product())[0], tmp_path)
+    assert seen["check"] == EaRainfall.check_raw
+
+
+def test_a_catalogue_that_cannot_be_read_is_an_error_not_an_empty_network():
+    """It was logged and read as zero gauges: `fetch` said "0 to do" and exited 0."""
+    from meteopack.sources.common import ListingError
+
+    class Down(EaRainfall):
+        def _get_json(self, url):
+            raise http.FetchError(url, "HTTP 503", 503, attempts=6)
+
+    with pytest.raises(ListingError, match="503"):
+        Down().list(window(2020, 2021), product())
+
+
+def test_units_carry_the_calendar_year_they_stand_for():
+    unit = FakeEa().list(window(2020, 2021), product())[0]
+    assert (unit.meta["period_start"], unit.meta["period_end"]) == ("2020-01-01", "2020-12-31")

@@ -59,9 +59,9 @@ from urllib.parse import urlencode
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
-from meteopack.sources.base import RawFile, TimeWindow, Unit
+from meteopack.sources.base import Content, RawFile, TimeWindow, Unit
+from meteopack.sources.common import ListingError, refresh
 from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
-from meteopack.sources.common import refresh
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
     import polars as pl
@@ -321,9 +321,16 @@ class EaRainfall:
     # ------------------------------------------------------------- remote reads
 
     def _get_json(self, url: str) -> Any:
-        """One plain GET, decoded as JSON. Overridable seam for tests."""
-        resp = self._requests_session().get(url, timeout=self.timeout)
-        resp.raise_for_status()
+        """One GET, retried like a download and rate limited, decoded as JSON.
+
+        Overridable seam for tests.
+        """
+        from meteopack.core.http import get_with_retry
+
+        rl = self.rate_limit
+        resp = get_with_retry(url, session=self._requests_session(), limiter=self._limiter,
+                              retries=rl.max_retries, backoff=rl.backoff_seconds,
+                              timeout=self.timeout, retry_status=rl.retry_status)
         return resp.json()
 
     def stations_url(self, *, limit: int = 10000) -> str:
@@ -345,18 +352,24 @@ class EaRainfall:
         return f"{self.base_url}{_MEASURE_PATH}{measure_id}/readings.csv?{urlencode(query)}"
 
     def catalogue(self, cfg: ProductConfig | None = None) -> list[StationRecord]:
-        """Every rainfall gauge with a 15-minute measure (cached per instance)."""
+        """Every rainfall gauge with a 15-minute measure (cached per instance).
+
+        A catalogue that cannot be read raises `ListingError` after retries.
+        It used to be logged and read as an empty network, so `fetch` said
+        "0 to do" and exited 0 - indistinguishable from being up to date.
+        """
         limit = int((cfg.extra.get("catalogue_limit") if cfg else None) or 10000)
         url = self.stations_url(limit=limit)
         if url in self._catalogue_cache:
             return self._catalogue_cache[url]
         try:
             payload = self._get_json(url)
-        except Exception as exc:  # noqa: BLE001 - a failed listing is not fatal
-            logger.warning("EA station catalogue fetch failed for %s: %s", url, exc)
-            self._catalogue_cache[url] = []
-            return []
+        except Exception as exc:
+            raise ListingError(f"EA station catalogue failed for {url}: "
+                               f"{type(exc).__name__}: {exc}") from exc
         records = parse_stations(payload, period=PERIOD_SECONDS)
+        if not records:
+            raise ListingError(f"EA station catalogue {url} lists no 15-minute rainfall gauge")
         self._catalogue_cache[url] = records
         return records
 
@@ -458,6 +471,10 @@ class EaRainfall:
                             "measure_id": rec.measure_id,
                             "year": str(year),
                             "filename": f"{year}.csv",
+                            # The whole calendar year, both ends: the gap report
+                            # calls a file that does not span it partial.
+                            "period_start": f"{year:04d}-01-01",
+                            "period_end": f"{year:04d}-12-31",
                             # Quality control rewrites the recent tail in place
                             # under the same URL. Without this the ledger would
                             # freeze the provisional version of the last months.
@@ -518,10 +535,63 @@ class EaRainfall:
                 backoff=rl.backoff_seconds,
                 timeout=self.timeout,
                 overwrite=refresh(unit),
+                check=self.check_raw,
+                retry_status=rl.retry_status,
             )
         except NotFoundError:
             logger.info("ea: no such measure for %s (404)", unit.key)
             return None
+
+    @staticmethod
+    def check_raw(path: Path) -> Content:
+        """Integrity check for one station-year CSV, run before it is published.
+
+        Zero bytes is EA's answer for a year with nothing in it and is an
+        empty Content, not an error. Anything else must be a readings CSV (a
+        `dateTime` header - an HTML error page served with 200 is not) whose
+        last row is whole: EA always ends the file with a newline, and a row
+        without one, or with fewer fields than the header, is a body cut short.
+        The response is usually chunked, with no Content-Length to compare.
+        Row count and first/last `dateTime` go into the `files` table: a
+        station-year running 01-02..12-30 is then visible the day it lands.
+        """
+        from meteopack.core.http import IntegrityError
+
+        data = Path(path).read_bytes()
+        if not data.strip():
+            return Content(0)
+        name = Path(path).name
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise IntegrityError(f"{name}: not UTF-8 text ({exc})") from exc
+        if not text.endswith("\n"):
+            raise IntegrityError(f"{name}: no final newline - the body was cut short")
+        rows = list(csv.reader(io.StringIO(text)))
+        header = [c.strip() for c in rows[0]] if rows else []
+        if _TIME_COL not in header:
+            raise IntegrityError(f"{name}: not a readings CSV; header {text[:120]!r}")
+        if len(rows[-1]) != len(header):
+            raise IntegrityError(f"{name}: last row has {len(rows[-1])} fields, header "
+                                 f"{len(header)}")
+        col = header.index(_TIME_COL)
+        # ISO timestamps order as strings, so only the two ends are parsed:
+        # strptime on every row cost a third of a second per file.
+        stamps = [row[col].strip() for row in rows[1:] if len(row) > col]
+        times = []
+        for stamp in (min(stamps, default=""), max(stamps, default="")):
+            try:
+                times.append(datetime.strptime(stamp, _TIME_FORMAT))
+            except ValueError:
+                continue
+        if len(rows) - 1 >= CSV_ROW_CAP:
+            logger.warning("ea: %s has %d rows, the endpoint's cap; the year may be truncated",
+                           name, len(rows) - 1)
+        return Content(
+            n_records=len(rows) - 1,
+            time_min=min(times).replace(tzinfo=UTC) if times else None,
+            time_max=max(times).replace(tzinfo=UTC) if times else None,
+        )
 
     # -------------------------------------------------------------------- parse
 

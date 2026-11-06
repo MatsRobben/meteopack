@@ -32,6 +32,15 @@ class SchemaDriftError(SourceError):
     """
 
 
+class ListingError(SourceError):
+    """What exists upstream could not be read: a directory listing or station
+    catalogue failed after retries.
+
+    Raised rather than returned as an empty list. An empty listing plans no
+    work, and "nothing to do" is indistinguishable from "could not look".
+    """
+
+
 class CredentialError(SourceError):
     """A credential is missing, expired or rejected. Must name the file or var."""
 

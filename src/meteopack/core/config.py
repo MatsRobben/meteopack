@@ -88,6 +88,11 @@ class RateLimit(BaseModel):
     max_workers: int = Field(default=8, ge=1)
     max_retries: int = Field(default=5, ge=0)
     backoff_seconds: float = Field(default=1.0, ge=0)
+    #: Extra HTTP statuses this upstream uses to mean "slow down" rather than
+    #: "no". 408, 429 and 5xx are always retried; EA's server also answers a
+    #: share of requests with 403 under load, and the same URL succeeds a
+    #: moment later (measured 2026-11-06: 1,084 of 6,580 at 8 workers).
+    retry_status: list[int] = Field(default_factory=list)
 
 
 #: Canonical names that are also CF standard names, verified individually

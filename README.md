@@ -16,12 +16,12 @@ it); storage, scheduling, validation and bookkeeping are shared.
 | `knmi_radar/echotop_5min` | radar echo top height, 2008- | **packed and verified** |
 | `knmi_radar/refl_5min` | radar reflectivity composite, 2008- | **packed and verified** |
 | `knmi_insitu/obs_10min` | KNMI automatic weather stations, 2012- | **packed and validated** (2026-11-05): 49.0 M rows, 73 stations |
-| `dwd/stations_10min` | German stations, 10 min, 2010- | **packed and validated**: 762 M rows, 1,117 stations; raw lacks closed stations (DWD listing bug, fixed in code, not re-fetched) |
+| `dwd/stations_10min` | German stations inside the radar footprint, 10 min, 2010- | **re-fetched, packed and validated** (2026-11-06): 390 M rows, 539 reporting stations (568 with metadata), closed stations included, to 2026-11-06 |
 | `dmi/stations_10min` | Danish stations, 10 min, 2012- | **packed and validated**: 75.0 M rows, 115 stations |
 | `belgium/aws_10min` | Belgian AWS, 10 min, 2012- | **packed and validated**: 9.97 M rows, 14 stations |
 | `meteofrance/hourly_all` | French stations near NL, hourly, 2010- | **packed**: 12.2 M rows, 237 stations; direct/diffuse/longwave/UV radiation are empty because no in-domain station measures them |
 | `midas/hourly_weather` | UK stations, hourly, 2012- | **packed and validated**: 14.0 M rows, 185 stations (positions from the raw file headers when CEDA's token has expired) |
-| `ea/rainfall_15min` | English rain gauges, 15 min, 2012- | **packed and validated**: 305 M rows, 628 reporting gauges; raw lacks 1 Jan and 31 Dec of each gauge-year (fetch bug, fixed in code, not re-fetched) |
+| `ea/rainfall_15min` | England & Wales rain gauges, 15 min, 2012- | **re-fetched, packed and validated** (2026-11-06): 490 M rows, 993 reporting gauges (995 with metadata), every gauge-year 1 Jan - 31 Dec, to 2026-11-06 |
 | `eumetsat_seviri/msg15_rss` | MSG SEVIRI rapid scan | works; resampled onto the radar grid, 4 of 11 channels |
 
 On the ICIS/DAS cluster every store above lives under
@@ -132,18 +132,32 @@ flowchart LR
 |---|---|---|
 | `scan` | reports every schema variant in `raw/` and compares it with the pinned one | nothing |
 | `list` | what exists upstream and what is still to do | nothing |
-| `fetch` | downloads, in parallel, atomically, rate-limited | `raw/`, `_bookkeeping/` |
+| `fetch` | downloads, in parallel, atomically, rate-limited, retried, integrity-checked; records why each unit ended | `raw/`, `_bookkeeping/` |
 | `parse` | parses raw files and reports what they hold | nothing |
 | `pack` | parses and writes the store | `packed/` |
 | `validate` | asks whether the store is *usable*, not merely present | nothing |
 | `derive` | builds training bricks, station matrices and splits | `training/` |
-| `catalog <source>` | what is fetched and packed for a source | nothing |
+| `catalog <source>` | what is fetched and packed for a source; `--gaps`: what is missing and why | nothing |
 | `credentials` | which keys this machine has, and which are missing | nothing |
 
 `fetch` skips what it already has, and downloads again only what is still
 changing upstream (the current year, an open hour, DWD's `recent/`) - over the
 old copy, which survives a failed download. `pack` rebuilds a store from all
 the raw files it is given; it is not incremental.
+
+**Every unit ends with a reason.** Transient errors (timeouts, resets, 5xx,
+429 with its Retry-After) are retried with exponential backoff; a file is
+checked before it is published (EA: a whole CSV; DWD: a ZIP whose CRC and
+last row are intact). The ledger then records `done`, `empty` (upstream had
+nothing), `absent` (404) or `failed` - with the error class, HTTP status,
+message and number of attempts. Only `done` is skipped next time, so running
+`fetch` again retries the failures. A listing that cannot be read fails the
+run instead of planning nothing. To see what is missing from the raw layer:
+
+```bash
+uv run meteopack catalog ea --gaps              # per file and per station x year, with the reason
+uv run meteopack catalog ea --gaps --out gaps/  # ... and the full tables as CSV
+```
 
 **Schema drift fails loudly.** Upstream formats change without notice. Each
 product config pins the layouts it has been checked against; a frame in any
@@ -164,7 +178,8 @@ sbatch --account=<yours> --exclude=cn79 --array=0-29 --cpus-per-task=4 --time=04
 ```
 
 `--shard/--shards` split `fetch`, `list` and `derive` across array tasks with
-no coordination. `pack` refuses them - two packs of one store would race on
+no coordination; the source's configured request rate is shared between the
+tasks, so an array is no harder on upstream than one job. `pack` refuses them - two packs of one store would race on
 the same files - so give one pack job the cores instead; it uses all of them.
 
 Worth knowing (details in [docs/runbooks/cluster.md](docs/runbooks/cluster.md)):

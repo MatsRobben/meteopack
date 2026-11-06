@@ -58,7 +58,25 @@ sbatch --account=<yours> --exclude=cn79 --array=0-29 --cpus-per-task=4 --time=04
 
 Passing `--shard`/`--shards` from the array variables splits the unit list
 without any coordination between tasks (fetch, list and derive; `pack` refuses
-them - give one pack job the cores instead).
+them - give one pack job the cores instead). Each task takes `1/shards` of the
+source's configured `requests_per_second`, so the array as a whole stays at the
+configured rate; more tasks buy parallel checking and disk I/O, not a faster
+upstream. For the station networks one job is usually enough (EA's ~14,400
+station-years take about an hour at 5 requests/s; DWD's ~3,600 ZIPs minutes).
+
+A fetch that is preempted (SIGTERM) writes its ledger before exiting; files
+already on disk pass their check on the next run and are not downloaded again.
+That needs the SIGTERM to reach Python. In an `sbatch` script that runs fetch
+as a plain foreground command, bash dies on the signal first and Slurm then
+SIGKILLs the rest of the step (seen 2026-11-06: the last 16 s of outcomes were
+lost - harmless, the files were re-recorded on the next run, but avoidable).
+Run it in the background and forward the signal:
+
+```bash
+.venv/bin/python -m meteopack.cli fetch ea --window 2012/2026 &
+pid=$!; trap 'kill -TERM $pid' TERM
+wait $pid; while kill -0 $pid 2>/dev/null; do wait $pid; done
+```
 
 ## Conventions that matter
 

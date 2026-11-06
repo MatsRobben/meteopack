@@ -75,6 +75,11 @@ SCHEMAS: dict[str, dict[str, pl.DataType]] = {
         "n_bytes": pl.Int64,
         "valid_time": pl.Datetime("us"),
         "fetched_at": pl.Datetime("us"),
+        # What the file holds, from the source's integrity check at fetch time
+        # (null when the source has none). See `sources.base.Content`.
+        "n_records": pl.Int64,
+        "time_min": pl.Datetime("us"),
+        "time_max": pl.Datetime("us"),
     },
     "stores": {
         "store_id": pl.String,
@@ -99,8 +104,24 @@ SCHEMAS: dict[str, dict[str, pl.DataType]] = {
         "attempts": pl.Int64,
         "error": pl.String,
         "updated_at": pl.Datetime("us"),
+        # Why a unit ended where it did - `status` says only whether to redo it.
+        # One of OUTCOMES; null on rows written before the column existed.
+        "outcome": pl.String,
+        "http_status": pl.Int64,
+        "error_class": pl.String,
     },
 }
+
+#: `jobs.outcome` values. `status` decides whether a re-run redoes the unit
+#: (only `done` is skipped); `outcome` records what actually happened:
+#:
+#: * ``done``   - downloaded (or already on disk) and passed its check
+#: * ``empty``  - upstream answered, with nothing in it (EA's pre-opening years)
+#: * ``absent`` - upstream says it does not exist (HTTP 404)
+#: * ``failed`` - gave up; `error_class`, `http_status`, `error`, `attempts` say why
+#:
+#: A `done` or `empty` unit still changing upstream keeps `status = pending`.
+OUTCOMES = ("done", "empty", "absent", "failed")
 
 #: (key column, ordering column) per table — the "latest row wins" rule.
 _DEDUP: dict[str, tuple[str, str]] = {
@@ -320,6 +341,7 @@ class Catalog:
     ) -> None:
         """Record a fetched unit. Takes the :class:`RawFile` the fetch returned
         so the checksum recorded here is the one computed at fetch time."""
+        content = getattr(raw, "content", None)
         self._append(
             "files",
             {
@@ -332,6 +354,9 @@ class Catalog:
                 "n_bytes": int(raw.n_bytes),
                 "valid_time": _naive_utc(valid_time),
                 "fetched_at": _naive_utc(fetched_at) or _now(),
+                "n_records": None if content is None else int(content.n_records),
+                "time_min": None if content is None else _naive_utc(content.time_min),
+                "time_max": None if content is None else _naive_utc(content.time_max),
             },
         )
 
@@ -381,13 +406,19 @@ class Catalog:
         attempts: int | None = None,
         error: str | None = None,
         updated_at: datetime | None = None,
+        outcome: str | None = None,
+        http_status: int | None = None,
+        error_class: str | None = None,
     ) -> None:
         """Append a ledger row for ``key``.
 
         ``attempts`` defaults to this process's count for the key, which is the
         number a retry loop actually cares about; pass it explicitly to carry a
-        count across processes.
+        count across processes. `fetch` passes the number of HTTP requests
+        the unit took. ``outcome`` is one of :data:`OUTCOMES`.
         """
+        if outcome is not None and outcome not in OUTCOMES:
+            raise ValueError(f"outcome must be one of {OUTCOMES}, got {outcome!r}")
         with self._lock:
             self._attempts[key] = self._attempts.get(key, 0) + 1
             counted = self._attempts[key]
@@ -404,6 +435,9 @@ class Catalog:
                 "attempts": int(counted if attempts is None else attempts),
                 "error": error,
                 "updated_at": _naive_utc(updated_at) or _now(),
+                "outcome": outcome,
+                "http_status": None if http_status is None else int(http_status),
+                "error_class": error_class,
             },
         )
 
@@ -522,6 +556,7 @@ def catalog_path(root: str | os.PathLike[str]) -> Path:
 
 __all__ = [
     "CATALOG_DIRNAME",
+    "OUTCOMES",
     "SCHEMAS",
     "Catalog",
     "Status",

@@ -115,9 +115,19 @@ Three tables, each a *directory* of Parquet files rather than one file:
 
 | table     | one row per | used for |
 |-----------|-------------|----------|
-| `jobs/`   | unit of work at one stage | skipping what is already done on a re-run |
-| `files/`  | raw file fetched | finding which file covers which time |
+| `jobs/`   | unit of work at one stage | skipping what is already done on a re-run, and why each unit ended |
+| `files/`  | raw file fetched | finding which file covers which time (rows and first/last time, from the fetch-time check) |
 | `stores/` | store built | what exists, from which config, how many records |
+
+A fetch's `jobs` row says what happened in `outcome`: `done`, `empty` (upstream
+answered with nothing), `absent` (404) or `failed` - with `error_class`,
+`http_status`, `error` and `attempts` (requests made). Only `status = done` is
+skipped by the next run, so failures are retried by running fetch again.
+
+`listings/<source>/<product>/` holds, per fetch run, the listing it planned
+from: every unit upstream offered and, where the source can say, what its
+station catalogue claims should exist. Set against `jobs` and `files`, that is
+what `meteopack catalog <source> --gaps` reports as missing, and why.
 
 **Why the odd filenames.** Each writing process owns one file, named
 `<when>-<host>-<pid>-t<task>-<nonce>.parquet`: the time it was first written,
@@ -130,6 +140,7 @@ the newest row per key, so duplicates across files are expected and harmless.
 Do not edit these by hand. To read them:
 
     meteopack catalog <source>          # a summary
+    meteopack catalog <source> --gaps   # what is missing from raw/, and why
     duckdb -c "select * from read_parquet('_bookkeeping/jobs/*.parquet')"
 
 Deleting `_bookkeeping/` loses no observations. The pipeline simply forgets what it

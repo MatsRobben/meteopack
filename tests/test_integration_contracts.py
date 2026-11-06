@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import inspect
 import pathlib
-import sys
 import tempfile
 from pathlib import Path
 from typing import ClassVar
@@ -338,7 +337,11 @@ def test_derive_cli_calls_its_builders_the_way_they_are_declared():
     assert "task" in bricks_params and "n_tasks" in bricks_params
     assert "shard" not in bricks_params
 
-    src = inspect.getsource(sys.modules["meteopack.cli"].stage_derive)
+    # Imported here rather than looked up in sys.modules: that relied on some
+    # earlier test having imported the CLI, and failed when run on its own.
+    import meteopack.cli
+
+    src = inspect.getsource(meteopack.cli.stage_derive)
     assert "builder.build(spec, root, task=" in src, "bricks must get task=/n_tasks="
     assert "DeriveSpec(cfg, timeline)" in src, "builders take a DeriveSpec, not a DeriveConfig"
     assert "splits_mod.write(spec, root)" in src, "a brick store needs its split index"

@@ -63,6 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--refresh", action="store_true", help="ignore the ledger and redo everything")
     p.add_argument("--limit", type=int, default=None, help="stop after N units (for smoke runs)")
     p.add_argument("--dry-run", action="store_true", help="plan only; touch nothing")
+    p.add_argument("--gaps", action="store_true",
+                   help="catalog: what the source's raw layer is missing and why, per file "
+                        "and per station x year, from the last fetch's listing and the ledger")
+    p.add_argument("--out", help="catalog --gaps: directory to write the full tables to (CSV)")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -143,7 +147,11 @@ class Context:
                 self.args.target,
                 self.source_cfg,
                 session=requests.Session(),
-                limiter=RateLimiter.from_config(self.source_cfg.rate_limit),
+                # The configured rate is what upstream should see in total; an
+                # array's tasks run at once, so each takes its share. With 30
+                # tasks at the full rate DWD would have seen 240 requests/s.
+                limiter=RateLimiter(self.source_cfg.rate_limit.requests_per_second
+                                    / max(1, self.args.shards)),
                 raw_root=self.raw_root,
             )
         return self._src
@@ -188,12 +196,74 @@ def stage_list(ctx: Context) -> int:
     return 0
 
 
+#: How often `fetch` writes its ledger shard. Every unit used to rewrite the
+#: whole shard - O(n^2) over a 15,000-unit run. A preempted task loses at most
+#: this much bookkeeping, and the files it covers are on disk and pass their
+#: check, so the next run re-records them without downloading.
+_LEDGER_FLUSH_SECONDS = 30.0
+
+
+def _outcome_of(raw) -> str:
+    """`done` or `empty` for a unit `fetch` returned."""
+    content = getattr(raw, "content", None)
+    if raw.n_bytes == 0 or (content is not None and content.n_records == 0):
+        return "empty"
+    return "done"
+
+
+def _failure_fields(exc: BaseException) -> dict:
+    """What the ledger records about a failed unit: never just "failed"."""
+    from meteopack.core.http import FetchError
+
+    if isinstance(exc, FetchError):
+        return {"error_class": exc.error_class, "http_status": exc.status,
+                "attempts": exc.attempts, "error": exc.message[:500]}
+    return {"error_class": type(exc).__name__, "http_status": None, "attempts": None,
+            "error": f"{type(exc).__name__}: {exc}"[:500]}
+
+
+class _Terminated(Exception):
+    """SIGTERM arrived (Slurm preemption or time limit)."""
+
+
+def _on_sigterm(signum, frame):  # pragma: no cover - exercised by Slurm, not tests
+    raise _Terminated()
+
+
 def stage_fetch(ctx: Context) -> int:
+    """Download what the ledger says is not done, and record why each unit ended.
+
+    Every unit leaves a ledger row with an outcome: done, empty (upstream had
+    nothing), absent (404) or failed - with the error class, HTTP status,
+    message and number of requests. Only `done` units are skipped next time,
+    so failures are retried by simply running again. The listing the run
+    planned from is written beside the ledger, which is what lets
+    `meteopack catalog <source> --gaps` say what is missing rather than only
+    what went wrong.
+    """
+    import signal
+
     from meteopack.core.catalog import job_key
 
-    p = ctx.plan("fetch")
+    try:
+        p = ctx.plan("fetch")
+    except Exception as exc:                              # noqa: BLE001 - reported, exit 1
+        # A listing that cannot be read is not "nothing to do".
+        logger.error("listing %s failed: %s: %s", ctx.cfg.store_id, type(exc).__name__, exc)
+        print(f"fetch {ctx.cfg.source}/{ctx.cfg.product}: listing failed - "
+              f"{type(exc).__name__}: {exc}")
+        return 1
     print(p.summary())
-    if ctx.args.dry_run or not p.units:
+    if ctx.args.dry_run:
+        return 0
+    if ctx.args.shard == 0:
+        _record_listing(ctx, p)
+        from meteopack.core.http import remove_stale_parts
+
+        stale = remove_stale_parts(ctx.raw_root)
+        if stale:
+            print(f"  removed {stale} .part file(s) left by killed downloads")
+    if not p.units:
         return 0
 
     from dataclasses import replace as _replace
@@ -201,7 +271,10 @@ def stage_fetch(ctx: Context) -> int:
     from meteopack.jobs.plan import is_volatile
 
     workers = ctx.args.workers or min(ctx.source_cfg.rate_limit.max_workers, 32)
-    ok = skipped = failed = still_filling = 0
+    counts = {"done": 0, "empty": 0, "absent": 0, "failed": 0}
+    still_filling = downloaded = n_bytes = 0
+    failures: dict[str, int] = {}
+    started = time.monotonic()
 
     # One decision about re-downloading, made here and handed to every source as
     # meta["volatile"] (read by sources.common.refresh). The planner and the
@@ -215,7 +288,18 @@ def stage_fetch(ctx: Context) -> int:
         refresh = changing or job_key("fetch", u.key) in partial
         units.append((_replace(u, meta={**(u.meta or {}), "volatile": refresh}), changing))
 
-    with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+    who = {"source": ctx.cfg.source, "product": ctx.cfg.product}
+    ctx.catalog.autoflush = False
+    last_flush = time.monotonic()
+    # Slurm preempts with SIGTERM and kills ~30 s later. Turning it into an
+    # exception lets the ledger be written before that, instead of losing the
+    # last half-minute of outcomes. (Only the main thread may set a handler.)
+    try:
+        previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    except ValueError:
+        previous = None
+    pool = cf.ThreadPoolExecutor(max_workers=workers)
+    try:
         futures = {pool.submit(ctx.src.fetch, u, ctx.raw_root): (u, changing)
                    for u, changing in units}
         for future in cf.as_completed(futures):
@@ -223,31 +307,78 @@ def stage_fetch(ctx: Context) -> int:
             key = job_key("fetch", unit.key)
             try:
                 raw = future.result()
-            except Exception as exc:                      # noqa: BLE001 - reported, not swallowed
-                # Recorded against its own unit: the failure path used to lose
-                # which unit failed, and the ledger's `failed` status was unused.
-                failed += 1
-                logger.error("fetch failed for %s: %s", unit.key, exc)
-                ctx.catalog.mark(key, "failed", source=ctx.cfg.source, product=ctx.cfg.product,
-                                 error=f"{type(exc).__name__}: {exc}"[:500])
-                continue
-            if raw is None:
-                skipped += 1
-                ctx.catalog.mark(key, "done", error="absent upstream")
-                continue
-            ok += 1
-            ctx.catalog.record_file(raw, source=ctx.cfg.source, product=ctx.cfg.product,
-                                    url=unit.url, valid_time=unit.valid_time)
-            # Still changing upstream: fetched, not finished. The next run
-            # fetches it again, and only a fetch after it stops marks it done.
-            if changing:
-                still_filling += 1
-            ctx.catalog.mark(key, "pending" if changing else "done")
-    ctx.catalog.flush()
-    note = f", {still_filling} still filling upstream (fetched again next run)" \
+            except Exception as exc:                      # noqa: BLE001 - recorded, not swallowed
+                # Recorded against its own unit, with the reason; `failed` is
+                # not `done`, so the next run tries it again.
+                counts["failed"] += 1
+                why = _failure_fields(exc)
+                failures[why["error_class"]] = failures.get(why["error_class"], 0) + 1
+                logger.error("fetch failed for %s: %s", unit.key, why["error"])
+                ctx.catalog.mark(key, "failed", outcome="failed", **who, **why)
+            else:
+                if raw is None:
+                    counts["absent"] += 1
+                    ctx.catalog.mark(key, "done", outcome="absent", http_status=404,
+                                     error="absent upstream (HTTP 404)", **who)
+                else:
+                    outcome = _outcome_of(raw)
+                    counts[outcome] += 1
+                    downloaded += 1 if raw.attempts else 0
+                    n_bytes += raw.n_bytes
+                    ctx.catalog.record_file(raw, url=unit.url, valid_time=unit.valid_time,
+                                            **who)
+                    # Still changing upstream: fetched, not finished. The next
+                    # run fetches it again, and only a fetch after it stops
+                    # marks it done.
+                    if changing:
+                        still_filling += 1
+                    ctx.catalog.mark(key, "pending" if changing else "done", outcome=outcome,
+                                     attempts=raw.attempts, **who)
+            if time.monotonic() - last_flush > _LEDGER_FLUSH_SECONDS:
+                ctx.catalog.flush()
+                last_flush = time.monotonic()
+    except (KeyboardInterrupt, _Terminated):
+        print("fetch interrupted; the ledger keeps what finished, re-run to continue")
+        pool.shutdown(wait=False, cancel_futures=True)
+        ctx.catalog.flush()
+        return 130
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+        ctx.catalog.flush()
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+    elapsed = time.monotonic() - started
+    note = f", {still_filling} still changing upstream (fetched again next run)" \
         if still_filling else ""
-    print(f"fetched {ok}{note}, absent upstream {skipped}, failed {failed}")
-    return 1 if failed else 0
+    print(f"fetched {counts['done']}, empty upstream {counts['empty']}, absent upstream "
+          f"{counts['absent']}, failed {counts['failed']}{note}")
+    print(f"  {downloaded} downloaded, {n_bytes / 1e9:.2f} GB on disk for these units, "
+          f"{elapsed / 60:.1f} min")
+    if failures:
+        print("  failed by error: " + ", ".join(f"{k} {v}" for k, v in sorted(failures.items())))
+        print(f"  re-run the same command to retry them; `meteopack catalog {ctx.cfg.source} "
+              f"--gaps` says what is missing and why")
+    return 1 if counts["failed"] else 0
+
+
+def _record_listing(ctx: Context, plan) -> None:
+    """Write what this run was asked to fetch, for the gap report.
+
+    Shard 0 only: every task of an array lists the same thing. Best effort - a
+    report that cannot be written must not stop a download.
+    """
+    from meteopack.core import coverage
+
+    expected_of = getattr(ctx.src, "expected", None)
+    try:
+        expected = expected_of(ctx.window, ctx.cfg) if expected_of is not None else []
+        frame = coverage.listing_frame(plan.listed_units, expected, ctx.window)
+        coverage.write_listing(ctx.catalog.root, ctx.cfg.source, ctx.cfg.product, frame,
+                               ctx.catalog.writer_id)
+    except Exception as exc:                              # noqa: BLE001 - see docstring
+        logger.warning("could not record the listing for the gap report: %s: %s",
+                       type(exc).__name__, exc)
 
 
 def _as_raw(files: list[Path]) -> list[RawFile]:
@@ -1385,9 +1516,24 @@ def stage_catalog(ctx: Context) -> int:
     print(f"  stores: {len(stores):>6}  store builds recorded")
     print(f"  jobs  : {len(jobs):>6}  units of work")
     if len(jobs):
-        counts = jobs.group_by("stage", "status").len().sort("stage")
+        # `status` says whether a re-run redoes a unit; `outcome` says why it
+        # ended where it did (empty upstream, absent, failed). Rows written
+        # before outcomes were recorded show "-".
+        counts = (jobs.with_columns(jobs["outcome"].fill_null("-"))
+                  .group_by("stage", "status", "outcome").len().sort("stage", "status", "outcome"))
         for row in counts.iter_rows(named=True):
-            print(f"    {row['stage']:10s} {row['status']:8s} {row['len']}")
+            print(f"    {row['stage']:10s} {row['status']:8s} {row['outcome']:8s} {row['len']}")
+        if not getattr(ctx.args, "gaps", False):
+            print(f"  (`meteopack catalog {ctx.cfg.source} --gaps` for what is missing and why)")
+    if getattr(ctx.args, "gaps", False):
+        from meteopack.core import coverage
+
+        text, _ = coverage.report(
+            cat, ctx.cfg.source, ctx.cfg.product,
+            window=ctx.window if ctx.args.window else None,
+            out=Path(ctx.args.out) if ctx.args.out else None)
+        print()
+        print(text)
     return 0
 
 

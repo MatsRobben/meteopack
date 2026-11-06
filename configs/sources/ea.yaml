@@ -13,13 +13,16 @@ base_url: https://environment.data.gov.uk/hydrology
 
 rate_limit:
   # A station-year CSV is ~1-6 MB and takes ~0.8 s, so the cost here is
-  # genuinely per request. The service publishes no quota and no 429 was seen
-  # while building this; the setting is therefore politeness rather than a
-  # measured ceiling, and a full 35-year backfill is ~35 000 requests.
+  # genuinely per request. The service publishes no quota and sends no 429.
+  # It throttles with 403 instead: with 8 workers, 1,084 of 6,580 requests
+  # (16%) were refused on 2026-11-06, and every one of them succeeded when
+  # asked again. So 403 is retried, a 403 pauses the whole host (see
+  # core.http), and the concurrency is halved.
   requests_per_second: 5.0
-  max_workers: 8
-  max_retries: 5
-  backoff_seconds: 1.0
+  max_workers: 4
+  max_retries: 6
+  backoff_seconds: 2.0
+  retry_status: [403]
 
 # Open data: nothing to authenticate with.
 credentials_env: []

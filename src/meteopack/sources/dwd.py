@@ -25,6 +25,11 @@ silently corrupts the store if you get it wrong:
   but not solar simply 404s in `solar/`. `fetch` skips those rather than failing
   the job.
 
+A listing or a station catalogue that cannot be read is NOT normal, and is
+raised after retries (`ListingError`) rather than read as "nothing there": the
+units it would have listed would otherwise vanish from the plan without a
+trace, which is how a whole class of stations goes missing unnoticed.
+
 The upstream schema drifts without announcement, so `scan` reports every column
 set seen and `parse` refuses to run against a pinned fingerprint it does not
 match.
@@ -45,9 +50,9 @@ from typing import TYPE_CHECKING
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
-from meteopack.sources.base import RawFile, TimeWindow, Unit
+from meteopack.sources.base import Content, RawFile, TimeWindow, Unit
+from meteopack.sources.common import ListingError, refresh
 from meteopack.sources.common import SchemaDriftError as _SchemaDriftError
-from meteopack.sources.common import refresh
 
 if TYPE_CHECKING:  # keep polars off the import path of `meteopack.sources`
     import polars as pl
@@ -304,21 +309,39 @@ class DwdStations:
     # ------------------------------------------------------------- remote reads
 
     def _get_text(self, url: str, *, encoding: str = "utf-8") -> str:
-        """One plain GET, decoded. Overridable seam for tests."""
-        resp = self._requests_session().get(url, timeout=self.timeout)
-        resp.raise_for_status()
+        """One GET, retried like a download and rate limited, decoded.
+
+        Overridable seam for tests. Raises `NotFoundError` on 404 and
+        `FetchError` once retries are exhausted.
+        """
+        from meteopack.core.http import get_with_retry
+
+        rl = self.rate_limit
+        resp = get_with_retry(url, session=self._requests_session(), limiter=self._limiter,
+                              retries=rl.max_retries, backoff=rl.backoff_seconds,
+                              timeout=self.timeout, retry_status=rl.retry_status)
         return resp.content.decode(encoding)
 
     def list_directory(self, url: str) -> list[str]:
-        """Filenames in one Apache-style directory listing (cached per instance)."""
+        """Filenames in one Apache-style directory listing (cached per instance).
+
+        A directory that does not exist (404) is empty; any other failure is
+        raised as `ListingError`, because an empty answer here silently drops
+        every archive the directory holds from the plan.
+        """
+        from meteopack.core.http import NotFoundError
+
         if url in self._listing_cache:
             return self._listing_cache[url]
         try:
             html = self._get_text(url)
-        except Exception as exc:  # noqa: BLE001 - a missing subdir is not fatal
-            logger.warning("directory listing failed for %s: %s", url, exc)
+        except NotFoundError:
+            logger.warning("directory listing %s does not exist (404)", url)
             self._listing_cache[url] = []
             return []
+        except Exception as exc:
+            raise ListingError(f"directory listing failed for {url}: "
+                               f"{type(exc).__name__}: {exc}") from exc
         names = [
             n
             for n in _HREF_RE.findall(html)
@@ -329,15 +352,22 @@ class DwdStations:
 
     def description(self, group: Group, subdir: str = "recent") -> list[StationRecord]:
         """Station catalogue for one group, decoded latin-1 (cached per instance)."""
+        from meteopack.core.http import NotFoundError
+
         url = group.description_url(subdir)
         if url in self._description_cache:
             return self._description_cache[url]
         try:
             text = self._get_text(url, encoding="latin-1")
-        except Exception as exc:  # noqa: BLE001 - one missing catalogue is survivable
-            logger.warning("station catalogue fetch failed for %s: %s", group.key, exc)
+        except NotFoundError:
+            logger.warning("no station catalogue for %s/%s (404)", group.key, subdir)
             self._description_cache[url] = []
             return []
+        except Exception as exc:
+            # Not survivable any more: a missing catalogue is a missing set of
+            # stations, and nothing downstream would say so.
+            raise ListingError(f"station catalogue failed for {group.key}/{subdir}: "
+                               f"{type(exc).__name__}: {exc}") from exc
         records = parse_station_description(text)
         self._description_cache[url] = records
         return records
@@ -486,16 +516,63 @@ class DwdStations:
             "subdir": subdir,
             "station_id": sid,
             "filename": filename,
+            # For the gap report: which part of the station's record this is.
+            "component": group.key,
         }
         if m.group("from"):
             meta["covers_from"] = m.group("from")
             meta["covers_to"] = m.group("to")
+            meta["period_start"] = _yyyymmdd(m.group("from")).isoformat()
+            meta["period_end"] = _yyyymmdd(m.group("to")).isoformat()
+        else:
+            # recent/ and now/ carry no dates in their names. Their nominal span
+            # tells the report which years they stand for before they are
+            # fetched; it is not checked against the content.
+            today = self._clock().date()
+            days = int(cfg.extra.get("recent_days", RECENT_DAYS)) if subdir == "recent" else 1
+            meta["period_start"] = (today - timedelta(days=days)).isoformat()
+            meta["period_end"] = today.isoformat()
+            meta["period_nominal"] = "1"
         return Unit(
             key=f"{cfg.source}/{cfg.product}/{group.key}/{subdir}/{filename[:-4]}",
             url=group.archive_url(subdir, filename),
             valid_time=valid_time,
             meta=meta,
         )
+
+    def expected(self, window: TimeWindow, cfg: ProductConfig) -> list[dict]:
+        """What the station catalogues say should exist: one row per in-domain
+        station, group and catalogue entry, clipped to `window`.
+
+        The gap report sets this against what the directory listings actually
+        offered, which is the only way to see a station-period that DWD
+        describes but publishes no archive for ("not listed upstream"). Reads
+        only catalogues `list` has already cached, so it costs no requests
+        after a `list`.
+        """
+        start, end = self._window_bounds(window)
+        grid = grids.get(cfg.grid_id) if cfg.grid_id else None
+        only = {station_id(s) for s in cfg.extra.get("station_ids") or ()}
+        rows: list[dict] = []
+        for group in self._groups_for(cfg):
+            for subdir in self._subdirs(start, end, cfg):
+                if subdir == "now":
+                    continue        # now/ describes today only; recent/ covers it
+                for rec in self.description(group, subdir):
+                    if grid is not None and not grid.contains(rec.lon, rec.lat):
+                        continue
+                    if only and rec.station_id not in only:
+                        continue
+                    if not rec.covers(start, end):
+                        continue
+                    rows.append({
+                        "station_id": rec.station_id,
+                        "component": group.key,
+                        "start": max(rec.from_date, start.date()),
+                        "end": min(rec.to_date, (end - timedelta(microseconds=1)).date(),
+                                   self._clock().date()),
+                    })
+        return rows
 
     def _subdirs(self, start: datetime, end: datetime, cfg: ProductConfig) -> list[str]:
         """Which of historical/recent/now can hold data for this window.
@@ -563,10 +640,61 @@ class DwdStations:
                 # Rewritten upstream under the same name: the ledger re-queues it,
                 # so the download must actually happen rather than skip.
                 overwrite=refresh(unit),
+                check=self.check_raw,
+                retry_status=rl.retry_status,
             )
         except NotFoundError:
             logger.info("dwd: no upstream file for %s (404)", unit.key)
             return None
+
+    @staticmethod
+    def check_raw(path: Path) -> Content:
+        """Integrity check for one station ZIP, run before it is published.
+
+        Reading the produkt member through `zipfile` verifies its CRC, so a
+        truncated or corrupted download fails here rather than in `pack` a week
+        later. The last row must be whole (it ends in `eor`). What comes back -
+        row count and the first and last `MESS_DATUM` as labelled in the file -
+        goes into the `files` table for the gap report. A ZIP with no produkt
+        member is an empty answer, not a broken download: fetching it again
+        would get the same thing.
+        """
+        import zlib
+
+        from meteopack.core.http import IntegrityError
+
+        try:
+            data = _read_produkt(Path(path))
+        except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
+            raise IntegrityError(f"{Path(path).name}: unreadable ZIP "
+                                 f"({type(exc).__name__}: {exc})") from exc
+        if data is None:
+            logger.warning("dwd: %s holds no produkt member", Path(path).name)
+            return Content(0)
+        body = data.rstrip(b"\r\n")
+        if _TIME_COL.encode() not in body[: body.find(b"\n") if b"\n" in body else None]:
+            raise IntegrityError(f"{Path(path).name}: produkt has no {_TIME_COL} header")
+        first_nl = body.find(b"\n")
+        if first_nl < 0:
+            return Content(0)
+        last = body[body.rfind(b"\n") + 1 :]
+        if not last.rstrip(b"\r ").endswith(_EOR.encode()):
+            raise IntegrityError(f"{Path(path).name}: last row is cut short: {last[-60:]!r}")
+        second_nl = body.find(b"\n", first_nl + 1)
+        first = body[first_nl + 1 : second_nl if second_nl > 0 else None]
+
+        def when(row: bytes) -> datetime | None:
+            fields = row.split(b";")
+            try:
+                return datetime.strptime(fields[1].strip().decode(), "%Y%m%d%H%M").replace(
+                    tzinfo=UTC)
+            except (IndexError, ValueError, UnicodeDecodeError):
+                return None
+
+        times = [t for t in (when(first), when(last)) if t is not None]
+        return Content(n_records=body.count(b"\n"),
+                       time_min=min(times) if times else None,
+                       time_max=max(times) if times else None)
 
     # -------------------------------------------------------------------- parse
 
