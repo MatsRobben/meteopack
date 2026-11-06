@@ -719,6 +719,9 @@ nwp = [
     { name = "cfgrib" },
     { name = "eccodes" },
 ]
+qc = [
+    { name = "titanlib" },
+]
 radar = [
     { name = "h5netcdf" },
     { name = "h5py" },
@@ -746,10 +749,11 @@ requires-dist = [
     { name = "requests", specifier = ">=2.32" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7" },
     { name = "satpy", marker = "extra == 'satellite'", specifier = ">=0.50" },
+    { name = "titanlib", marker = "extra == 'qc'", specifier = ">=0.4" },
     { name = "xarray", specifier = ">=2025.1" },
     { name = "zarr", specifier = ">=3.4" },
 ]
-provides-extras = ["satellite", "nwp", "radar", "dev"]
+provides-extras = ["satellite", "nwp", "radar", "qc", "dev"]
 
 [[package]]
 name = "msgspec"
@@ -1829,6 +1833,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "titanlib"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f5/f4/d8d691c7ad88643785a0b0cbc816556b8c696cd85cb458328813a2c34ee6/titanlib-0.4.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:6c62cbc4b91cd0b604a8bbed6e963f57340dd884df891ab541d7defe3290d791", size = 13030259, upload-time = "2026-10-01T11:38:45.905Z" },
+    { url = "https://files.pythonhosted.org/packages/61/0b/6d18f3e58a6138aaf3964d7e5b92a43e4d7849120c6fd5492f380e84fc01/titanlib-0.4.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:eccc12c7b50e58f51ae73d0ae99616ad5fcfc1032d324afcb4a618dd357637b9", size = 13029690, upload-time = "2026-10-01T11:38:54.08Z" },
+    { url = "https://files.pythonhosted.org/packages/3d/c0/fa34e96ea4c8e53a3970ca6ce0063934d4ff2c8dfbb1cdba15ac63279357/titanlib-0.4.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:310ffaab253852f86252da0886e2487d051ab16be6f9528762a19e9caa99aa49", size = 13024518, upload-time = "2026-10-01T11:39:07.467Z" },
 ]
 
 [[package]]

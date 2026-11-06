@@ -273,18 +273,24 @@ def _bin_index(off, step: int, label: str):
     return (off + step // 2) // step   # centre: [T - step/2, T + step/2)
 
 
-def rain_increments(frame, spec: RainSpec):
+def rain_increments(frame, spec: RainSpec, *, keep: tuple[str, ...] = (), flags: bool = False):
     """Per-report counter increments under `spec.rule`, for rows sorted by (station, time).
 
     A line-for-line port of rain_counter.py's window SQL, including its
     three-valued logic: a condition that is NULL in SQL (a lead past the end of
     a station's series) is null here too and counts as "not a reset", exactly
     as `CASE WHEN` treats it there.
+
+    `keep`: columns of `frame` carried through to the result (e.g. a row id).
+    `flags`: also return, per report, `transient` (a drop the robust rule
+    ignores because the counter climbs back), `spike` (an up-jump that falls
+    straight back) and `day_change` (the local or UTC day differs from the
+    previous report's) - what QC flags on the counter are made of.
     """
     import polars as pl
 
     c, thr = spec.counter, spec.drop_mm
-    r = frame.select("station_id", "time", pl.col(c).alias("a"))
+    r = frame.select("station_id", "time", *keep, pl.col(c).alias("a"))
     r = r.filter(pl.col("a").is_not_null())
     if spec.valid_min is not None:
         r = r.filter(pl.col("a") >= spec.valid_min)
@@ -345,7 +351,13 @@ def rain_increments(frame, spec: RainSpec):
         long = pl.col("dt") > spec.max_gap_s
         gaps = int(r.select((long & pl.col("inc").is_not_null()).sum()).item())
         r = r.with_columns(pl.when(long).then(None).otherwise(pl.col("inc")).alias("inc"))
-    return r.select("station_id", "time", "inc", "dt", pl.col("reset").fill_null(False)), gaps
+    out = ["station_id", "time", *keep, "inc", "dt", pl.col("reset").fill_null(False)]
+    if flags:
+        out += [pl.col("a").alias("counter"),
+                pl.col("transient").fill_null(False), pl.col("spike").fill_null(False),
+                ((pl.col("lday") != pl.col("lday_p")) | (pl.col("uday") != pl.col("uday_p")))
+                .fill_null(True).alias("day_change")]
+    return r.select(out), gaps
 
 
 def regularise_frame(frame, cfg: RegulariseConfig, lo: datetime, hi: datetime,

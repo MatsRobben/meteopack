@@ -19,6 +19,8 @@ dependencies = [
 satellite = ["satpy>=0.50", "eumdac>=3.0"]
 nwp = ["cfgrib>=0.9", "eccodes>=2.38"]
 radar = ["h5py>=3.12", "h5netcdf>=1.4"]
+# titanlib (MET Norway, LGPL-3): the spatial consistency test in `derive wow_nl_qc`
+qc = ["titanlib>=0.4"]
 dev = ["pytest>=8.3", "ruff>=0.7", "mypy>=1.13"]
 
 [project.scripts]

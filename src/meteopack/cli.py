@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "and per station x year, from the last fetch's listing and the ledger")
     p.add_argument("--out", help="catalog --gaps: directory to write the full tables to (CSV)")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
-                   help="derive (kind: regularise): override one config value for this run, "
+                   help="derive (kind: regularise or qc): override one config value for this run, "
                         "e.g. --set step_seconds=300 --set rain.rule=naive (repeatable)")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
@@ -1926,8 +1926,10 @@ def stage_derive(ctx_args: argparse.Namespace) -> int:
     raw = load_yaml(path)
     if raw.get("kind") == "regularise":
         return _derive_regularise(ctx_args, raw)
+    if raw.get("kind") == "qc":
+        return _derive_qc(ctx_args, raw)
     if ctx_args.set:
-        print("error: --set is only understood by `kind: regularise` derive configs")
+        print("error: --set is only understood by `kind: regularise` and `kind: qc` configs")
         return 2
     cfg = DeriveConfig(**raw)
     root = data_root(ctx_args.data_root, default=str(Path.cwd() / "data"))
@@ -2018,6 +2020,43 @@ def _derive_regularise(ctx_args: argparse.Namespace, raw: dict) -> int:
         print(f"  non-causal (use reports after T): {', '.join(meta['non_causal_columns'])}")
     for k, v in meta["stage_counts"].items():
         print(f"  {k}: {v:,}")
+    return 0
+
+
+def _derive_qc(ctx_args: argparse.Namespace, raw: dict) -> int:
+    """Quality-control flags for an irregular points store (meteopack.derive.qc).
+
+    Like regularise: every parameter in the config, any overridable for one
+    run with `--set key=value`; a run with other parameters refuses to write
+    into an existing store (new `--set name=...`, or `--refresh`).
+    """
+    from meteopack.core.config import data_root
+    from meteopack.derive import qc
+    from meteopack.derive.regularise import apply_overrides
+
+    try:
+        cfg = qc.QcConfig(**apply_overrides(raw, ctx_args.set))
+    except (ValueError, TypeError) as exc:
+        print(f"error: {exc}")
+        return 2
+    root = data_root(ctx_args.data_root, default=str(Path.cwd() / "data"))
+    window = None
+    if ctx_args.window:
+        w = parse_window(ctx_args.window)
+        window = (w.start, w.end)
+    print(f"QC {cfg.input} -> {cfg.layer}/{cfg.store_id} (params {cfg.params_hash()}), "
+          f"{len(cfg.variables)} variable(s)"
+          + (f", window {window[0]:%Y-%m-%d}..{window[1]:%Y-%m-%d}" if window else ""))
+    meta = qc.build(cfg, root, window=window, workers=ctx_args.workers, threads=cfg.threads,
+                    refresh=ctx_args.refresh)
+    run, months = meta["last_run"], meta["months_summary"]
+    print(f"wrote {meta['rows_written_this_run']:,} rows ({run['months_built']} month(s)) in "
+          f"{run['wall_s']:.0f} s with {run['workers']} worker(s) x {run['polars_threads']} "
+          f"thread(s); store: {meta['months']} month(s), {meta['rows_total']:,} rows; slowest "
+          f"month {months['slowest_month_s']:.0f} s; worker peak "
+          f"{months['max_worker_rss_mib'] / 1024:.1f} GiB")
+    for k, v in sorted(months["stage_s_summed"].items(), key=lambda kv: -kv[1]):
+        print(f"  {k}: {v:,.0f} s summed over the store's months")
     return 0
 
 
