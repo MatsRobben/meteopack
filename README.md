@@ -23,6 +23,8 @@ it); storage, scheduling, validation and bookkeeping are shared.
 | `midas/hourly_weather` | UK stations, hourly, 2012- | **packed and validated**: 14.0 M rows, 185 stations (positions from the raw file headers when CEDA's token has expired) |
 | `ea/rainfall_15min` | England & Wales rain gauges, 15 min, 2012- | **re-fetched, packed and validated** (2026-11-06): 490 M rows, 993 reporting gauges (995 with metadata), every gauge-year 1 Jan - 31 Dec, to 2026-11-06 |
 | `eumetsat_seviri/msg15_rss` | MSG SEVIRI rapid scan | works; resampled onto the radar grid, 4 of 11 channels |
+| `wow_nl/reports` | WOW-NL citizen weather reports, every report and field as uploaded, **irregular** in time, 2015-2025 | **packed and validated** (2026-11-06): see [docs/stores.md](docs/stores.md#irregular-stores-wow-nl) |
+| `training/wow_nl_10min`, `wow_nl_5min` | WOW-NL regularised per station: last/mean/max per bin, rain from the counter | **derived** (2026-11-06); every choice is a parameter (`meteopack derive wow_nl_10min --set ...`) |
 
 On the ICIS/DAS cluster every store above lives under
 `/vol/knmimo-nobackup/users/mrobben/meteopack_data/packed/` -
@@ -75,6 +77,19 @@ uv run meteopack catalog ea                   # what is fetched and packed
 ```
 
 The same commands work for `dwd`, `dmi`, `belgium`, `meteofrance` and `midas`.
+
+**WOW-NL** (citizen weather stations) is read from the local archive of
+yearly zips, linked - never copied - into the raw layer:
+
+```bash
+mkdir -p $METEOPACK_DATA_ROOT/raw/wow_nl
+ln -s /path/to/wow_nl_raw $METEOPACK_DATA_ROOT/raw/wow_nl/reports    # 2015.zip ... 2025.zip
+uv run meteopack pack wow_nl                       # the whole archive: 15-17 min on 48 CPUs
+uv run meteopack pack wow_nl --window 2024/2024    # rebuild one year; other months untouched
+uv run meteopack validate wow_nl
+uv run meteopack derive wow_nl_10min               # regular 10-minute grid per station
+uv run meteopack derive wow_nl_10min --set step_seconds=300 --set name=wow_nl_5min_try
+```
 With `--limit` on a network that reports several variables in separate files
 (DWD), `validate` will say the variables you did not fetch are missing - it
 checks the store against everything the product config promises.
@@ -136,7 +151,7 @@ flowchart LR
 | `parse` | parses raw files and reports what they hold | nothing |
 | `pack` | parses and writes the store | `packed/` |
 | `validate` | asks whether the store is *usable*, not merely present | nothing |
-| `derive` | builds training bricks, station matrices and splits | `training/` |
+| `derive` | builds training bricks, station matrices and splits; regularises irregular stores | `training/` |
 | `catalog <source>` | what is fetched and packed for a source; `--gaps`: what is missing and why | nothing |
 | `credentials` | which keys this machine has, and which are missing | nothing |
 

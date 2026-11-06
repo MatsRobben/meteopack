@@ -78,9 +78,25 @@ pid=$!; trap 'kill -TERM $pid' TERM
 wait $pid; while kill -0 $pid 2>/dev/null; do wait $pid; done
 ```
 
+## /dev/shm is wiped when any of your jobs on the node ends
+
+Measured 2026-11-06 on cn114: about 10 s after **any** job of yours on a node
+ends - an `srun true` will do - everything you own in that node's `/dev/shm`
+is deleted, including the files of your jobs that are still running there. A
+benchmark lost its output directory this way and a test run lost its
+`TMPDIR` mid-suite. Python's multiprocessing keeps its named semaphores
+there too: a pool worker spawned after a wipe dies at start
+(`SemLock._rebuild: FileNotFoundError`) and the pool waits for it - a re-pack
+hung this way on cn117 when another job ended. `run_pipeline` therefore starts
+all its workers up front and never recycles them. So `/dev/shm` is only safe for a job that is the only one
+of yours on its node for its whole run (no array siblings, no `srun` checks,
+no other agent's jobs); otherwise use node-local `/scratch/$USER`, or keep the
+data in memory. Free space on `/scratch` varies a lot: 18 GB on cn114, 2.6 GB
+on cn117 that day.
+
 ## Conventions that matter
 
-- **Scratch is `/dev/shm`, never `/tmp`.** `/tmp` is small and shared and has
+- **Scratch is `/dev/shm`, never `/tmp`** - but see the section above. `/tmp` is small and shared and has
   filled mid-job before; `/dev/shm` showed 126 GB free on cn79. Point `TMPDIR`
   under `/dev/shm` in your job and remove it on exit. (A points pack's spill is
   different: it goes to node-local `/scratch/$USER` by itself, never to RAM.)

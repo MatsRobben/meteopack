@@ -156,3 +156,131 @@ meteopack validate knmi_radar --product rtcor_5min
 reads the metadata and samples frames: time axis, flags, provenance, value
 ranges against the config. It does not compare against the raw files; that is
 a separate, slower check.
+
+## Irregular stores (WOW-NL)
+
+`packed/wow_nl/reports/v1` is a points store with **no cadence**
+(`cadence_seconds: null` in its product config): one row per report, at the
+time the station made it, nothing snapped to a grid and nothing dropped for
+being off one. It is the lossless level 1 of the WOW-NL archive - every field
+of every report, exact values, no QC, no gap filling, no rain rule. Regular
+grids are *derived* from it (below), with every choice a parameter.
+
+```
+packed/wow_nl/reports/v1/
+├── observations/year=2024/month=06/data.parquet   ~7 M reports a month, sorted by (station_id, time)
+├── hours/year=2024/month=06/data.parquet          one row per zip member, + one per missing hour
+├── station_segments/year=2024/month=06/...        runs of identical position per site, per month
+├── stations/data.parquet                          one row per site (standard station schema + extras)
+├── station_positions.parquet                      full position history (runs), store-wide
+├── station_years.parquet                          per site-year medians, raw height, height-0 count
+├── pack_report.json                               store-wide counts + what the last pack did
+├── schema.json, manifest.json, README.md
+```
+
+### Columns
+
+* `station_id` (WOW `SiteId`, text: numeric ids and UUIDs both occur; 493
+  reports have none and keep a null) and `time` (`ReportEndDateTime` parsed to
+  UTC microseconds; the original string is kept in `ReportEndDateTime` - some
+  have 7 fractional digits).
+* The measurements other stores carry, under the same names: `air_temperature`,
+  `dew_point_temperature`, `relative_humidity`, `air_pressure_at_sea_level`,
+  `air_pressure`, `wind_speed`, `wind_speed_of_gust`, `wind_from_direction`,
+  `wind_gust_from_direction`, `wet_bulb_temperature`, `rainfall_rate`, and
+  **`rainfall_counter`** - the station's running rain total as uploaded. It is
+  *not* an amount: it resets (mostly at local midnight) and drops out; turn it
+  into amounts with a rain rule in the derive step.
+* Every other WOW field under its own name, typed as its values are (float64
+  for every measurement, int64 for ids and codes, bool, text): the imperial
+  twins (`*_Fahrenheit`, `*_Inch`, `*_MilePerHour`, `*_Knot`,
+  `*_InchOfMercury` - for most private stations these are what was uploaded),
+  `Latitude`/`Longitude`/`Height` as reported with each report, `Id`,
+  `IsOfficial`, `CreatedDateTime`, `SoftwareType`, ... 82 fields in all.
+* `unpinned_fields` - JSON, null on almost every row. A value that did not fit
+  its field's type is kept here verbatim, never coerced or dropped:
+  `{"WindSpeed_MetrePerSecond": {"raw": "36,612.3", "reason": "string_for_float64"}}`.
+  Reasons: `<json type>_for_<pinned type>` (`null_for_float64` is an explicit
+  JSON null), or `unknown_field`. Counts per field and reason are in the hours
+  table (`unpinned_counts`), `pack_report.json` and `validate`.
+* `source_zip`, `source_member` - which yearly zip and hour member the row
+  came from.
+
+### What was dropped, and what is missing
+
+Only exact duplicates: rows identical in every field. They come from the 2019
+hours that are in both 2019.zip and 2020.zip; per hour the copy with more
+records is kept (`hours.chosen`; ties: the later zip) and any report that only
+the other copy has is kept too. `hours.n_duplicate_dropped` counts them per
+member. Seven 2019.zip members are damaged JSON: their complete reports are
+salvaged (`status: salvaged`) and then mostly fall away as duplicates of the
+intact 2020.zip copy.
+
+Hours no zip has (Jul-Dec 2020, the end of June 2020) are rows with
+`status = 'missing'`. From 2022 almost every hour holds exactly 10 000
+reports - one API page - and lost its earliest minutes upstream:
+`hours.at_page_cap`.
+
+### Reading
+
+```python
+import polars as pl
+obs = pl.scan_parquet("packed/wow_nl/reports/v1/observations/**/*.parquet",
+                      hive_partitioning=False)
+june = (obs.filter(pl.col("time").is_between(pl.datetime(2024, 6, 1), pl.datetime(2024, 7, 1),
+                                             closed="left"))
+           .select("station_id", "time", "air_temperature", "rainfall_counter").collect())
+hours = pl.read_parquet("packed/wow_nl/reports/v1/hours/**/*.parquet", hive_partitioning=False)
+```
+
+`points.read("wow_nl/reports/v1", root, time_range=..., columns=[...])` works
+too. Because each month file is sorted by station, a time filter cannot skip
+row groups inside a month - but it skips whole months by path, and a
+`station_id` filter skips row groups.
+
+### Re-packing part of it
+
+`meteopack pack wow_nl --window 2024/2024` re-packs one year. The window is
+widened to whole months, those months (observations, hours, segments) are
+replaced and every other month is left byte-for-byte alone; the store-wide
+station tables and report are rebuilt from all months on disk. A windowed
+pack into a store built from a different config is refused.
+
+## Regularising an irregular store (`derive`, kind: regularise)
+
+`meteopack derive wow_nl_10min` turns the reports into one row per
+(station, bin) on a regular grid. Everything is a parameter in
+`configs/derive/wow_nl_10min.yaml`, and any of them can be changed for one run:
+
+```bash
+meteopack derive wow_nl_10min                                   # as configured
+meteopack derive wow_nl_10min --set step_seconds=300 --set name=wow_nl_5min_try
+meteopack derive wow_nl_10min --set label=centre --set rain.rule=naive --set name=...
+meteopack derive wow_nl_10min --window 2024/2024 --set name=wow_nl_10min_2024
+```
+
+| parameter | meaning |
+|---|---|
+| `step_seconds` | grid step |
+| `label` | `end` (default): bin T holds (T - step, T], KNMI radar's convention. `start`: [T, T + step). `centre`: [T - step/2, T + step/2) |
+| `origin` | grid anchor; default the Unix epoch (bins at :00, :05, ...) |
+| `variables.<name>.methods` | any of `last` (+ `_last_age_s`), `first`, `mean`, `min`, `max` (+ `_n`), `nearest` (needs `tolerance_s` <= step/2; + `_nearest_dt_s`), `linear` (needs `max_gap_s`) |
+| `rain` | `rule: naive` or `robust` (wow_nl_analysis/scripts/rain_counter.py, ported exactly - a test runs both against that SQL), summed per bin as `rainfall_amount`, with `rainfall_amount_span_s` (seconds of counter history the increments cover) and `rainfall_amount_n` |
+| `stages` | per-report steps before binning (QC flags, homogenisation). One demonstration stage: `range_mask`. Add one by registering a function in `meteopack.derive.regularise.STAGES` |
+| `dtype` | float32 (half the size) or float64 (every value exact) |
+
+`n_reports` is always written. **Causality:** a column is causal when it uses
+no report after T - true for the bin methods with `label: end`, false for
+`nearest`, `linear`, the `robust` rain rule (it looks three reports ahead) and
+any bin method with `label: start`/`centre`. `regularise.json` in the output
+lists every parameter, its hash, every output column with its causality, and
+how the run went. A run with different parameters will not mix into an
+existing output of the same name (give it a new `name`, or `--refresh`).
+
+Output: `training/<name>/v<version>/observations/year=Y/month=M/data.parquet`
+(sorted by station, time), the points-store layout, so `points.read` and
+`points.to_matrix` (a dense time x station array) read it like any regular
+store. Months are computed independently but read a margin of input on either
+side (at least one step, every tolerance and gap, and two days when rain is
+derived), so the result equals a single pass over the whole archive - a test
+checks exactly that.
