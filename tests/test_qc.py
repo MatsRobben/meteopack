@@ -344,9 +344,9 @@ def test_rain_counter_and_pwsqc_flags(tmp_path):
     assert rows("g03", "rain_huge_increment") == [k8 + 5]
     assert rows("g04", "rain_transient") == [k15]
     assert rows("g05", "rain_spike") == [k15]
-    # the robust rule (rain_counter.py) takes the fall back after a spike for a reset - and
-    # counts the whole counter again - so that report is flagged too
-    assert rows("g05", "rain_reset_off_midnight") == [k15 + 1]
+    # the fall back after a spike is not a reset (it was, before the robust rule judged
+    # drops against the last non-spike report), and the spike adds no rain
+    assert rows("g05", "rain_reset_off_midnight") == []
     assert rows("g06", "rain_reset_off_midnight") == [k18]
     for s in ["g00", "g07", "g08", "g09", "g10", "g11"]:
         i = sid == s
@@ -355,6 +355,7 @@ def test_rain_counter_and_pwsqc_flags(tmp_path):
     assert (f[sid == "iso"] == 0).all()
     inc = out["rainfall_increment"].to_numpy()
     assert np.nansum(inc[sid == "g00"]) == pytest.approx(24 * 0.2)
+    assert np.nansum(inc[sid == "g05"]) == pytest.approx(np.nansum(inc[sid == "g00"]))
 
 
 # ------------------------------------------------------- PWSQC three states

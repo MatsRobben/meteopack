@@ -91,10 +91,12 @@ class RainSpec(BaseModel):
     `drop_mm` is a *transient* - ignored - when one of the next `lookahead`
     reports of the same local and UTC day climbs back to at least
     a_prev - drop_mm; an up-jump that falls straight back is a *spike*, also
-    ignored; confirmed resets start a new segment, and inside a segment the
-    increment is the rise of the running maximum. Both are exactly the SQL of
-    wow_nl_analysis/scripts/rain_counter.py. `robust` looks ahead, so it is
-    not causal.
+    ignored, and a_prev is then the last report that was not a spike;
+    confirmed resets start a new segment, and inside a segment the increment
+    is the rise of the running maximum. Ported from the SQL of
+    wow_nl_analysis/scripts/rain_counter.py, with one fix: there, a counter
+    falling back after a spike counted as a reset. `robust` looks ahead, so it
+    is not causal.
     """
 
     model_config = {"extra": "forbid"}
@@ -359,24 +361,35 @@ def rain_increments(frame, spec: RainSpec, *, keep: tuple[str, ...] = (), flags:
         ((pl.col("time") - lag(pl.col("time"))).dt.total_microseconds() / 1e6).alias("dt"),
     )
     a, ap = pl.col("a"), pl.col("ap")
-    climbs = pl.lit(None, pl.Boolean)
-    for k in range(1, spec.lookahead + 1):
-        term = pl.col(f"a{k}") >= ap - thr
-        climbs = term if k == 1 else (climbs | term)
-    drop = a < ap - thr
     r = r.with_columns(
-        drop.alias("drop"),
-        (drop & (pl.col("lday") == pl.col("lday_p")) & (pl.col("uday") == pl.col("uday_p"))
-         & climbs).alias("transient"),
         ((a > ap + thr) & (pl.col("a1") < a - thr) & (pl.col("a1") >= ap - thr)
          & (pl.col("a1") <= ap + thr) & (pl.col("lday_n") == pl.col("lday"))
          & (pl.col("uday_n") == pl.col("uday"))).alias("spike"),
         pl.when(ap.is_null()).then(None).when(a >= ap).then(a - ap)
         .when(a < ap - thr).then(a).otherwise(0.0).alias("inc_naive"),
     )
+    # Drops are judged against the last report that was not a spike. Judged
+    # against the spike itself, the counter falling back from a one-report
+    # up-jump read as a reset, and the robust rule then counted the whole
+    # counter again (found by the QC run on the full archive, 2026-11-06).
+    # The naive rule keeps the raw previous value: it is naive by design.
+    r = r.with_columns(pl.when(pl.col("spike").fill_null(False)).then(None).otherwise(a)
+                       .shift(1).over(st).alias("ap_ref"))
+    r = r.with_columns(pl.col("ap_ref").forward_fill().over(st))
+    apr = pl.col("ap_ref")
+    climbs = pl.lit(None, pl.Boolean)
+    for k in range(1, spec.lookahead + 1):
+        term = pl.col(f"a{k}") >= apr - thr
+        climbs = term if k == 1 else (climbs | term)
+    drop = a < apr - thr
+    r = r.with_columns(
+        drop.alias("drop"),
+        (drop & (pl.col("lday") == pl.col("lday_p")) & (pl.col("uday") == pl.col("uday_p"))
+         & climbs).alias("transient"),
+    )
     if spec.rule == "naive":
         inc = pl.col("inc_naive")
-        r = r.with_columns(pl.col("drop").fill_null(False).alias("reset"))
+        r = r.with_columns((a < ap - thr).fill_null(False).alias("reset"))
     else:
         r = r.with_columns((pl.col("drop") & ~pl.col("transient")).alias("reset"))
         r = r.with_columns(pl.col("reset").fill_null(False).cast(pl.Int64).cum_sum().over(st)

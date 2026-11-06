@@ -129,15 +129,22 @@ SELECT *, lag(a) OVER s AS ap, lead(a, 1) OVER s AS a1, lead(a, 2) OVER s AS a2,
   lead(a, 3) OVER s AS a3, lag(lday) OVER s AS lday_p, lag(uday) OVER s AS uday_p,
   lead(lday) OVER s AS lday_n, lead(uday) OVER s AS uday_n
 FROM r WINDOW s AS (PARTITION BY SiteId ORDER BY ts);
-CREATE OR REPLACE TEMP TABLE r2 AS
-SELECT *, (a < ap - 0.25) AS drop_,
-  (a < ap - 0.25 AND lday = lday_p AND uday = uday_p AND (a1 >= ap - 0.25 OR a2 >= ap - 0.25
-   OR a3 >= ap - 0.25)) AS transient,
-  (a > ap + 0.25 AND a1 < a - 0.25 AND a1 >= ap - 0.25 AND a1 <= ap + 0.25 AND lday_n = lday
-   AND uday_n = uday) AS spike,
+CREATE OR REPLACE TEMP TABLE r1b AS
+SELECT *, (a > ap + 0.25 AND a1 < a - 0.25 AND a1 >= ap - 0.25 AND a1 <= ap + 0.25
+   AND lday_n = lday AND uday_n = uday) AS spike,
   CASE WHEN ap IS NULL THEN NULL WHEN a >= ap THEN a - ap WHEN a < ap - 0.25 THEN a ELSE 0 END
     AS inc_naive
 FROM r1;
+-- the fix: drops are judged against the last report that was not a spike
+CREATE OR REPLACE TEMP TABLE r1c AS
+SELECT *, last_value(CASE WHEN coalesce(spike, false) THEN NULL ELSE a END IGNORE NULLS)
+  OVER (PARTITION BY SiteId ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS apr
+FROM r1b;
+CREATE OR REPLACE TEMP TABLE r2 AS
+SELECT *, (a < apr - 0.25) AS drop_,
+  (a < apr - 0.25 AND lday = lday_p AND uday = uday_p AND (a1 >= apr - 0.25 OR a2 >= apr - 0.25
+   OR a3 >= apr - 0.25)) AS transient
+FROM r1c;
 CREATE OR REPLACE TEMP TABLE r3 AS
 SELECT *, (drop_ AND NOT transient) AS reset,
   sum(CASE WHEN drop_ AND NOT transient THEN 1 ELSE 0 END) OVER (PARTITION BY SiteId ORDER BY ts
@@ -180,7 +187,7 @@ def _counter_series(seed: int) -> pl.DataFrame:
 
 @pytest.mark.parametrize("seed", [1, 2, 3])
 def test_rain_rules_are_rain_counter_py_exactly(seed):
-    """The polars port against the analysis' own SQL, increment by increment."""
+    """The polars port against the analysis' own SQL (with the spike fix), increment by increment."""
     frame = _counter_series(seed).sort("station_id", "time")
     con = duckdb.connect()
     con.execute("SET TimeZone='UTC'")
@@ -208,6 +215,18 @@ def test_the_robust_rule_ignores_a_transient_drop_out():
     naive, _ = rg.rain_increments(frame, rg.RainSpec(rule="naive"))
     assert robust["inc"].sum() == pytest.approx(6.0)        # 1 + 4.35 + 0 + 0 + 0.65
     assert naive["inc"].sum() == pytest.approx(12.35)       # the drop-out counted as a reset
+
+
+def test_a_counter_spike_is_not_followed_by_a_false_reset():
+    """After a one-report up-jump the counter falls back; judged against the
+    spike that fall read as a reset and the whole counter was counted again
+    (found by the QC run on the full archive, 2026-11-06)."""
+    t = [datetime(2024, 6, 1, 10) + timedelta(minutes=5 * i) for i in range(6)]
+    frame = pl.DataFrame({"station_id": ["s"] * 6, "time": t,
+                          "rainfall_counter": [1.0, 2.0, 11.0, 2.2, 2.4, 3.0]})
+    robust, _ = rg.rain_increments(frame, rg.RainSpec(rule="robust"))
+    assert robust["inc"].sum() == pytest.approx(2.0)        # 1 + 0 + 0.2 + 0.2 + 0.6
+    assert not robust["reset"].any()
 
 
 # ------------------------------------------------- months change nothing
