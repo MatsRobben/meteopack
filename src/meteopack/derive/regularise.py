@@ -233,7 +233,7 @@ class RegulariseConfig(BaseModel):
 # --------------------------------------------------------------------- stages
 
 
-def stage_range_mask(frame, spec: StageSpec, report: dict):
+def stage_range_mask(frame, spec: StageSpec, report: dict, **_):
     """Null `variable` where it lies outside [min, max]; count how many.
 
     A demonstration of the stage mechanism, not a QC decision: the thresholds
@@ -255,10 +255,58 @@ def stage_range_mask(frame, spec: StageSpec, report: dict):
                               .otherwise(pl.col(var)).alias(var))
 
 
-#: kind -> fn(frame, spec, report) -> frame. Each runs on the reports (sorted
-#: by station, time, margin included) before anything is binned. QC flagging
-#: and homogenisation stages go here, each configured by its own parameters.
-STAGES: dict[str, Callable] = {"range_mask": stage_range_mask}
+def stage_qc_mask(frame, spec: StageSpec, report: dict, root=None, **_):
+    """Null each listed variable where the QC store rates it below `min_level`.
+
+    Parameters: `store` (default `wow_nl/qc/v1`), `layer` (default `packed`),
+    `variables` (default: every variable of the frame the store has a level
+    for), `min_level` (default 3: drop bad and suspect values, keep values
+    that could not be checked spatially). Reports are matched on
+    (station_id, time); a report the QC store does not know (an older build)
+    is kept and counted.
+    """
+    import polars as pl
+
+    from meteopack.core.config import data_root, layer_path
+
+    p = spec.model_extra or {}
+    base = layer_path(Path(root or data_root(None)), p.get("layer", "packed"),
+                      *p.get("store", "wow_nl/qc/v1").split("/"), "observations")
+    t0, t1 = frame["time"].min(), frame["time"].max()
+    if t0 is None:
+        return frame
+    files = [base / f"year={m.year:04d}" / f"month={m.month:02d}" / "data.parquet"
+             for m in _month_starts(t0.replace(tzinfo=UTC), t1.replace(tzinfo=UTC)
+                                    + timedelta(seconds=1))]
+    files = [str(f) for f in files if f.exists()]
+    if not files:
+        raise FileNotFoundError(f"qc_mask: no QC months under {base} for {t0}..{t1}")
+    have = pl.read_parquet_schema(files[0])
+    variables = p.get("variables") or [v for v in frame.columns if f"{v}_qc_level" in have]
+    # (station_id, time) is unique but for a few thousand WOW reports sent twice
+    # at one instant: such a pair gets the lower (more cautious) level of the two
+    lv = (pl.scan_parquet(files, hive_partitioning=False)
+          .select("station_id", "time", *(f"{v}_qc_level" for v in variables))
+          .filter(pl.col("time").is_between(t0, t1))
+          .group_by("station_id", "time").agg(pl.col(f"{v}_qc_level").min() for v in variables)
+          .collect())
+    out = frame.join(lv, on=["station_id", "time"], how="left", maintain_order="left")
+    min_level = int(p.get("min_level", 3))
+    unknown = int(out[f"{variables[0]}_qc_level"].is_null().sum()) if variables else 0
+    report["qc_mask:unmatched_reports"] = report.get("qc_mask:unmatched_reports", 0) + unknown
+    for v in variables:
+        low = pl.col(f"{v}_qc_level") < min_level
+        n = int(out.select((low & pl.col(v).is_not_null()).fill_null(False).sum()).item())
+        report[f"qc_mask:{v}"] = report.get(f"qc_mask:{v}", 0) + n
+        out = out.with_columns(pl.when(low.fill_null(False)).then(None).otherwise(pl.col(v))
+                               .alias(v))
+    return out.drop([f"{v}_qc_level" for v in variables])
+
+
+#: kind -> fn(frame, spec, report, root=...) -> frame. Each runs on the reports
+#: (sorted by station, time, margin included) before anything is binned. QC
+#: flagging and homogenisation stages go here, each configured by its own parameters.
+STAGES: dict[str, Callable] = {"range_mask": stage_range_mask, "qc_mask": stage_qc_mask}
 
 
 # ----------------------------------------------------------------------- core
@@ -361,14 +409,14 @@ def rain_increments(frame, spec: RainSpec, *, keep: tuple[str, ...] = (), flags:
 
 
 def regularise_frame(frame, cfg: RegulariseConfig, lo: datetime, hi: datetime,
-                     report: dict):
+                     report: dict, root=None):
     """Reports (sorted by station, time) -> one row per (station, bin) with T in [lo, hi)."""
     import polars as pl
 
     step = cfg.step_seconds * 1_000_000
     origin = int(cfg.origin.timestamp() * 1_000_000)
     for stage in cfg.stages:
-        frame = STAGES[stage.kind](frame, stage, report)
+        frame = STAGES[stage.kind](frame, stage, report, root=root)
 
     off = pl.col("time").dt.epoch("us") - origin
     k = _bin_index(off, step, cfg.label)
@@ -489,9 +537,10 @@ def _columns(cfg: RegulariseConfig) -> list[str]:
     if cfg.rain is not None:
         cols.add(cfg.rain.counter)
     for stage in cfg.stages:
-        var = (stage.model_extra or {}).get("variable")
-        if var:
-            cols.add(var)
+        extra = stage.model_extra or {}
+        if extra.get("variable"):
+            cols.add(extra["variable"])
+        cols.update(extra.get("variables") or [])
     return sorted(cols)
 
 
@@ -521,7 +570,7 @@ def do_month(args: tuple) -> dict:
         scan = scan.filter(pl.col("station_id").is_in(cfg.stations))
     frame = scan.collect().sort("station_id", "time")
     t_read = time.time() - started
-    out = regularise_frame(frame, cfg, lo, hi, report)
+    out = regularise_frame(frame, cfg, lo, hi, report, root=root)
     t_compute = time.time() - started - t_read
     written = None
     if out.height:

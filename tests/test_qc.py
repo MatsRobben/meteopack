@@ -476,3 +476,22 @@ def test_reading_level1_with_flags_side_by_side(tmp_path):
     t = rel.filter((pl.col("variable") == "air_temperature") & (pl.col("station_id") != ""))
     assert t.height == 2 and (t["frac_ok"] == 1.0).all() and (t["trust_tier"] == 2).all()
 
+
+def test_regularise_can_mask_values_by_qc_level(tmp_path):
+    from datetime import UTC
+
+    from meteopack.derive import regularise as rg
+
+    st = {f"g{i:02d}": _clean(i) for i in range(2)}
+    st["g00"]["air_temperature"][10] = 60.0                       # extreme: level 1
+    l1 = _store(tmp_path, st, {"g00": GRID[0], "g01": GRID[1]})
+    qc.build(_cfg(WITHIN), tmp_path, workers=1, threads=1)
+    cfg = rg.RegulariseConfig(name="t", input="src/p/v1", step_seconds=300,
+                              variables={"air_temperature": {"methods": ["max"]}},
+                              stages=[{"kind": "qc_mask", "store": "src/qc/v1", "min_level": 2}])
+    report: dict = {}
+    frame = l1.select("station_id", "time", "air_temperature")
+    out = rg.regularise_frame(frame, cfg, datetime(2024, 6, 1, tzinfo=UTC),
+                              datetime(2024, 6, 4, tzinfo=UTC), report, root=tmp_path)
+    assert report["qc_mask:air_temperature"] == 1 and report["qc_mask:unmatched_reports"] == 0
+    assert out["air_temperature_max"].max() < 20
