@@ -170,7 +170,9 @@ def store_readme(cfg, store_path: Path | str, info: dict | None = None) -> Path 
         (cfg.description or "").strip() or f"{cfg.source} {cfg.product}.",
         "",
         f"- source: `{cfg.source}`   product: `{cfg.product}`   version: {cfg.version}",
-        f"- cadence: {cfg.cadence_seconds} s",
+        (f"- cadence: {cfg.cadence_seconds} s" if cfg.cadence_seconds is not None else
+         "- cadence: irregular - one row per report, at the time it was made; nothing "
+         "snapped to a grid"),
     ]
     if cfg.grid_id:
         lines.append(f"- grid: `{cfg.grid_id}`")
@@ -246,6 +248,11 @@ def store_readme(cfg, store_path: Path | str, info: dict | None = None) -> Path 
             "",
             "Station coordinates are in `stations/`, joined on `station_id` (text).",
         ]
+        # What only this product needs said (its side tables, its provenance
+        # columns): from the config, so it travels with the store's definition.
+        extra = cfg.extra.get("readme")
+        if extra:
+            lines += ["", str(extra).rstrip()]
     text = "\n".join(lines) + "\n"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

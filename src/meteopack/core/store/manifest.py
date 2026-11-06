@@ -41,10 +41,21 @@ _DESCRIPTIVE = frozenset({"description", "attrs", "retention"})
 _DESCRIPTIVE_VARIABLE = frozenset({"long_name", "legacy_name", "standard_name"})
 
 
+#: `extra` keys that change how a pack runs, never what it stores.
+_RUNTIME_EXTRA = frozenset({"readme", "spill", "spill_compression", "partition_rss_factor",
+                            "write_workers", "write_threads", "max_spill_gib"})
+
+
 def content_hash(cfg: BaseModel | dict[str, Any]) -> str:
     """`config_hash` over only the settings that change what the store holds."""
     payload = cfg.model_dump(mode="json") if isinstance(cfg, BaseModel) else dict(cfg)
     payload = {k: v for k, v in payload.items() if k not in _DESCRIPTIVE}
+    if isinstance(payload.get("extra"), dict):
+        # README prose a config may carry for its store, and knobs for how a
+        # pack runs rather than what it writes: tuning them must not make a
+        # store "stale" and block a windowed re-pack.
+        payload["extra"] = {k: v for k, v in payload["extra"].items()
+                            if k not in _RUNTIME_EXTRA}
     if isinstance(payload.get("variables"), list):
         payload["variables"] = [
             {k: v for k, v in var.items() if k not in _DESCRIPTIVE_VARIABLE}

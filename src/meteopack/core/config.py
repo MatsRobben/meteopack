@@ -11,7 +11,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 #: The three layers data moves through, named after the command that fills
 #: them. "canonical" and "derived" said nothing about what was in them, which
@@ -204,6 +204,14 @@ class StoreConfig(BaseModel):
     compressor: str = "zstd"
     compression_level: int = 3
     partition_by: list[str] = Field(default_factory=lambda: ["year"])
+    #: Row order inside each points partition file. Unset keeps the historical
+    #: (time, station_id). An irregular store sorts by (station_id, time) so a
+    #: station's reports are contiguous - what every per-station lag, run or
+    #: regularisation reads.
+    sort_by: list[str] | None = None
+    #: Rows per parquet row group in a points store; unset is polars' default.
+    #: Smaller groups let a reader skip more by their min/max statistics.
+    row_group_rows: Annotated[int, Field(gt=0)] | None = None
 
 
 class ProductConfig(BaseModel):
@@ -217,7 +225,12 @@ class ProductConfig(BaseModel):
     #: One line, for a human opening the data root. Copied into the store's
     #: manifest so the store says what it is without the config beside it.
     description: str | None = None
-    cadence_seconds: Annotated[int, Field(gt=0)] = 600
+    #: The product's fixed time step. `null` declares an IRREGULAR points
+    #: product: reports at whatever time each station sent them, nothing
+    #: snapped, nothing dropped for being off a grid. It has to be said
+    #: explicitly - leaving the field out still means the 600 s default - so a
+    #: regular product can never lose its cadence check by omission.
+    cadence_seconds: Annotated[int, Field(gt=0)] | None = 600
     grid_id: str | None = None
     variables: list[Variable] = Field(default_factory=list)
     store: StoreConfig
@@ -230,8 +243,23 @@ class ProductConfig(BaseModel):
     attrs: dict[str, str] = Field(default_factory=dict)
     extra: dict = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _irregular_needs_points(self) -> ProductConfig:
+        if self.cadence_seconds is None and self.store.kind != "points":
+            raise ValueError("cadence_seconds: null (irregular) is only meaningful for a "
+                             "points store; a gridded store is a regular time axis")
+        return self
+
+    @property
+    def irregular(self) -> bool:
+        """True for a product with no time step (`cadence_seconds: null`)."""
+        return self.cadence_seconds is None
+
     @property
     def cadence(self) -> timedelta:
+        if self.cadence_seconds is None:
+            raise ValueError(f"{self.store_id} is irregular (cadence_seconds: null) and has "
+                             f"no time step; derive a regular product from it instead")
         return timedelta(seconds=self.cadence_seconds)
 
     @property
