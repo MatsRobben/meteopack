@@ -1,0 +1,280 @@
+# WOW-NL citizen weather reports: every report in the archive, as uploaded.
+#
+# Loads into meteopack.core.config.ProductConfig. This is a LOSSLESS level-1
+# store: one row per report, every field WOW sent kept with its exact value,
+# no gap filling, no QC, no rain rule. Everything that is a choice lives in a
+# derive step (configs/derive/wow_nl_*.yaml).
+#
+# Irregular: reports arrive whenever each station sends them (seconds to
+# hours apart, at any phase), so there is no cadence and no time axis. Regular
+# grids are derived from this store; see meteopack.derive.regularise.
+
+source: wow_nl
+product: reports
+version: 1
+description: >-
+  WOW-NL citizen weather reports (KNMI's Weather Observations Website), every
+  report and every field as uploaded, irregular in time, 2015-2025.
+
+cadence_seconds: null         # irregular: no grid, nothing is snapped or dropped
+
+store:
+  kind: points
+  # ~7 M reports per month in 2021-2025. A month is the unit a re-pack
+  # replaces, and small enough to sort and write in one worker (~3 GB in memory).
+  partition_by: [year, month]
+  # Rows of one station are contiguous, in time order, so reading one station
+  # or computing per-station lags touches as few row groups as possible.
+  sort_by: [station_id, time]
+  # Row groups of ~256 k rows: their station_id min/max statistics let a
+  # reader skip most of a month when it wants a few stations.
+  row_group_rows: 262144
+  compressor: zstd
+  compression_level: 3
+
+raw_layout:
+  archive: none
+
+retention:
+  raw:
+    keep: true                # the archive is the only copy of a one-off API pull
+    tier: cold
+
+# The measurements other stores also carry get the names those stores use.
+# Units are WOW's metric fields as published; the imperial twins
+# (*_Fahrenheit, *_Inch, *_MilePerHour, *_Knot, *_InchOfMercury) are kept under
+# their own names - for most private stations they are the values actually
+# uploaded, and the metric field is WOW's conversion of them.
+# No valid_min/valid_max on purpose: this layer does not judge values (WOW has
+# imperial zeros as sentinels, e.g. dew point -17.78 degC = 0 degF).
+variables:
+  - name: air_temperature
+    source_key: DryBulbTemperature_Celsius
+    units: degC
+    long_name: Air (dry-bulb) temperature
+    dtype: float64
+
+  - name: dew_point_temperature
+    source_key: DewPointTemperature_Celsius
+    units: degC
+    long_name: Dew point temperature
+    dtype: float64
+
+  - name: relative_humidity
+    source_key: RelativeHumidity
+    units: "%"
+    long_name: Relative humidity
+    dtype: float64
+
+  - name: air_pressure_at_sea_level
+    source_key: MeanSeaLevelPressure_Hectopascal
+    units: hPa
+    long_name: Air pressure reduced to mean sea level
+    dtype: float64
+
+  - name: air_pressure
+    source_key: AirPressure_Hectopascal
+    units: hPa
+    long_name: Air pressure as reported (station level for most stations)
+    dtype: float64
+
+  - name: wind_speed
+    source_key: WindSpeed_MetrePerSecond
+    units: m s-1
+    long_name: Wind speed
+    dtype: float64
+
+  - name: wind_speed_of_gust
+    source_key: WindGust_MetrePerSecond
+    units: m s-1
+    long_name: Wind gust speed
+    dtype: float64
+
+  - name: wind_from_direction
+    source_key: WindDirection
+    units: degree
+    long_name: Wind direction (from)
+    dtype: float64
+
+  - name: wind_gust_from_direction
+    source_key: WindGustDirection
+    units: degree
+    long_name: Wind gust direction (from)
+    standard_name: wind_gust_from_direction
+    dtype: float64
+
+  - name: wet_bulb_temperature
+    source_key: WetBulbTemperature_Celsius
+    units: degC
+    long_name: Wet-bulb temperature
+    dtype: float64
+
+  - name: rainfall_rate
+    source_key: RainfallRate_MillimetrePerHour
+    units: mm h-1
+    long_name: Rainfall rate
+    standard_name: rainfall_rate
+    dtype: float64
+
+  # NOT an amount. The station's running rain total, as uploaded: it grows
+  # with rain and resets at times of the station's choosing (mostly local
+  # midnight), with transient drop-outs. Turning it into amounts is a rule,
+  # and rules are derive parameters (rain.rule: naive | robust).
+  - name: rainfall_counter
+    source_key: RainfallAmount_Millimetre
+    units: mm
+    long_name: Running rain-gauge counter as uploaded (resets irregularly; not an interval amount)
+    dtype: float64
+
+# Hash of extra.fields (names AND types), as `Catalogue` computes it. Editing
+# the catalogue without re-pinning this fails loudly instead of quietly
+# changing what a type check accepts.
+schema_fingerprint: "3ddf567b60366540"
+
+extra:
+  # Appended to the store's README.md (meteopack.core.readme).
+  readme: |
+    ## What else is in this store
+
+    Every row is one report, every field WOW sent: the measurement fields
+    under the names above, everything else (imperial twins, ids, flags, the
+    original timestamp strings) under its WOW name. Per row:
+    `source_zip` / `source_member` say which yearly zip and hour member it
+    came from; `unpinned_fields` (JSON, usually null) holds any value that did
+    not fit its pinned type, verbatim, as `{field: {"raw": ..., "reason": ...}}`
+    - e.g. a number sent as text is `string_for_float64`.
+
+    | table | one row per |
+    |---|---|
+    | `hours/year=Y/month=M/` | zip member (status ok / empty_file / salvaged / error), with raw and stored counts, duplicates dropped, page cap, first/last time; plus one `missing` row per hour no zip has |
+    | `stations/` | site: position and raw height of its latest report, first/last time, reports, official reports, positions seen |
+    | `station_positions.parquet` | run of identical reported (lat, lon, height) per site: the full position history |
+    | `station_years.parquet` | site-year: median position, raw median height, reports with height 0 |
+    | `station_segments/year=Y/month=M/` | the same runs per month, from which the three above are rebuilt |
+    | `pack_report.json` | store-wide counts and what the last pack did, how long it took |
+
+    Exact duplicates (identical in every field, e.g. a 2019 hour present in
+    both 2019.zip and 2020.zip) are stored once; nothing else is dropped.
+    Height 0 means "not set" for most sites in most years, but the store keeps
+    it as 0: treating it as unknown is a derived step's choice.
+
+  station_key: SiteId            # -> station_id (text; numeric ids and UUIDs both occur)
+  time_key: ReportEndDateTime    # parsed to `time`, UTC microseconds; the string is kept
+  # The WOW API returned one page of 10 000 entries per hour and the archive
+  # never asked for the next one. A capped hour holds 9 9xx reports, not
+  # exactly 10 000 (2024-06-15 12h: 9 989), so `hours.at_page_cap` is
+  # n_records >= this - the threshold wow_nl_analysis/scripts/align.py uses.
+  # n_records itself is in the hours table for anyone who wants another.
+  page_cap_min_records: 9900
+
+  # How `pack` runs (meteopack.jobs.packing.run_pipeline), measured on cn114
+  # (EPYC 7642) on 2026-11-06. A month of 2025 is 7.2 M reports, 5.0 GiB in
+  # memory, 451 MiB as a zstd Arrow spill (lz4: ~2x bigger, same speed).
+  spill_compression: zstd
+  # memory: each day's rows come back through the worker pool as compressed
+  # IPC and are held only until their month is written (a few months, ~0.5 GB
+  # each). disk: files under node-local /scratch or the data root. On this
+  # cluster disk meant NFS (no node had 6 GB free on /scratch), where the
+  # spill took a third of the bandwidth the zip reads needed.
+  spill: memory
+  # Parsing pauses while this much spill waits for its writers, so the
+  # writers get the CPUs and the parent's memory stays bounded.
+  max_spill_gib: 6
+  # Peak memory of writing a month, as a multiple of its rows' in-memory
+  # size: the concatenated spill, the sorted copy, the parquet encoder
+  # (17.5 GB for a 5.0 GiB month, 3.5x).
+  partition_rss_factor: 3.6
+  # Sort + encode of that month: 47.5 s on 1 polars thread, 10.4 s on 8,
+  # 8.9 s on 16. Three writers of 8 keep up with 48 single-threaded parsers.
+  write_workers: 3
+  write_threads: 8
+
+  # Every field seen in the archive (82, 2015-2025, from every member's key
+  # set) with the type its values have. Types were read off the values, not
+  # the names: identifiers and codes are integers in the JSON; every
+  # measurement mixes JSON integers and floats and is float64, which holds
+  # both exactly. A value that does not fit its type, a JSON null, or a field
+  # not listed here goes to `unpinned_fields` as JSON and fails the pack.
+  fields:
+    AccessGroup: int64
+    AirPressure_Hectopascal: float64
+    AirPressure_InchOfMercury: float64
+    AirPressure_Millibar: float64
+    AirTemperatureMax_Celsius: float64
+    AirTemperatureMax_Fahrenheit: float64
+    AirTemperatureMin_Celsius: float64
+    AirTemperatureMin_Fahrenheit: float64
+    CollectionName: int64
+    ConcreteTemperatureMin_Celsius: float64
+    CreatedDateTime: string
+    DayOfGale: int64
+    DayOfHail: int64
+    DayOfSnow: int64
+    DayOfThunder: int64
+    DewPointTemperature_Celsius: float64
+    DewPointTemperature_Fahrenheit: float64
+    DryBulbTemperature_Celsius: float64
+    DryBulbTemperature_Fahrenheit: float64
+    ExternalId: int64
+    ExternalSiteId: int64
+    GrassTemperatureMin_Celsius: float64
+    GroundState: int64
+    Height: float64
+    HighestWindSpeed_MetrePerSecond: float64
+    HighestWind_Direction: float64
+    Id: string
+    ImageBlobPath: string
+    ImpactId: string
+    IsDcnn: bool
+    IsFlagged: bool
+    IsLatestVersion: bool
+    IsOfficial: bool
+    IsPublic: bool
+    IsTraceRainfallAmount: bool
+    Latitude: float64
+    LocalReportEndDateTime: string
+    Longitude: float64
+    MeanSeaLevelPressure_Hectopascal: float64
+    MeanSeaLevelPressure_InchOfMercury: float64
+    MeanSeaLevelPressure_Millibar: float64
+    ModifiedDateTime: string
+    ObservationType: int64
+    PresentWeatherCode: int64
+    PresentWeatherCodeSimple: int64
+    PreviousVersionExternalId: int64
+    PreviousVersionId: string
+    RainfallAmount_Inch: float64
+    RainfallAmount_Millimetre: float64
+    RainfallRate_InchPerHour: float64
+    RainfallRate_MillimetrePerHour: float64
+    RelativeHumidity: float64
+    ReportEndDateTime: string
+    ReportStartDateTime: string
+    RiverLevel_Metre: float64
+    SiteId: string
+    SnowDepth_Centimetre: float64
+    SoftwareType: string
+    SoilMoisture_Centibar: float64
+    SoilMoisture_Percent: float64
+    SoilTemperature100cm_Celsius: float64
+    SoilTemperature10cm_Celsius: float64
+    SoilTemperature10cm_Fahrenheit: float64
+    SoilTemperature30cm_Celsius: float64
+    SubmissionType: string
+    Sunshine_Hour: float64
+    TotalCloudCover: int64
+    UserId: string
+    Version: int64
+    VisibilityCode: string
+    WeatherDiary: string
+    WetBulbTemperature_Celsius: float64
+    WetBulbTemperature_Fahrenheit: float64
+    WindDirection: float64
+    WindGustDirection: float64
+    WindGust_Knot: float64
+    WindGust_MetrePerSecond: float64
+    WindGust_MilePerHour: float64
+    WindRun_Kilometre: float64
+    WindSpeed_Knot: float64
+    WindSpeed_MetrePerSecond: float64
+    WindSpeed_MilePerHour: float64

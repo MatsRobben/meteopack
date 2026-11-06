@@ -30,6 +30,7 @@ BUILTIN: dict[str, str] = {
     "knmi_insitu": "meteopack.sources.knmi_insitu:KnmiInsitu",
     "meteofrance": "meteopack.sources.meteofrance:MeteoFranceStations",
     "midas": "meteopack.sources.midas:MidasOpen",
+    "wow_nl": "meteopack.sources.wow_nl:WowNl",
 }
 
 
