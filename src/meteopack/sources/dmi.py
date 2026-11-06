@@ -741,12 +741,21 @@ class DmiStations:
         variants: dict[tuple[str, ...], dict] = {}
         errors: list[dict[str, str]] = []
         parameters: set[str] = set()
+        compact_files = 0
         for raw in raw_files:
             path = Path(raw.path)
             try:
-                features, _compact = _features(_read_document(path), path)
+                features, compact = _features(_read_document(path), path)
             except Exception as exc:  # noqa: BLE001 - a bad file is a finding, not a crash
                 errors.append({"path": str(path), "error": f"{type(exc).__name__}: {exc}"})
+                continue
+            if compact:
+                # The archived `[[time, value], ...]` form has no property
+                # schema - its fields are positional and its properties are
+                # synthesised from the path - so, exactly as in `parse`, there
+                # is nothing to fingerprint. Counting it as a variant reported
+                # every archive file as drift from the API's pin (2026-11-05).
+                compact_files += 1
                 continue
             if not features:
                 continue
@@ -781,6 +790,7 @@ class DmiStations:
             "fingerprints": fingerprints,
             "parameters": sorted(parameters),
             "fingerprint": fingerprints[0] if len(fingerprints) == 1 else None,
+            "compact_files": compact_files,
             "errors": errors,
         }
 

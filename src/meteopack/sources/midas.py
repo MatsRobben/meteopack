@@ -885,6 +885,55 @@ class MidasOpen:
         out = out.sort(["time", "station_id"])
         return self._drop_off_cadence(out, cfg)
 
+    @staticmethod
+    def canonical_station_id(value: str) -> str:
+        """Five-digit src_id, as the observations carry it; anything else unchanged."""
+        try:
+            return station_id(value)
+        except (TypeError, ValueError):
+            return str(value)
+
+    def raw_stations(self, raw_root: Path) -> pl.DataFrame:
+        """Station positions read from the BADC-CSV headers of the raw files.
+
+        Every station-year file states `midas_station_id`, `location`
+        (lat,lon), `height` and `observation_station` in its global header, so
+        coordinates do not depend on CEDA's station catalogue - which needs a
+        token that lasts about three days. With an expired token and only the
+        archived catalogue, 133 of 185 packed stations had no position
+        (2026-11-05). The newest year per station wins, in case a station moved.
+        """
+        import polars as pl
+
+        newest: dict[str, tuple[str, Path]] = {}
+        for path in Path(raw_root).rglob("*.csv"):
+            if path.name.startswith(".") or not path.stem.isdigit():
+                continue
+            sid = path.parent.name
+            if sid not in newest or path.stem > newest[sid][0]:
+                newest[sid] = (path.stem, path)
+        rows = []
+        for _, path in newest.values():
+            meta: dict[str, list[str]] = {}
+            for row in csv.reader(io.StringIO(_head(path, 8192))):
+                if len(row) >= 3 and row[1] == "G":
+                    meta.setdefault(row[0], row[2:])
+                if row and row[0] == "data":
+                    break
+            try:
+                sid = station_id(meta["midas_station_id"][0])
+                lat, lon = float(meta["location"][0]), float(meta["location"][1])
+            except (KeyError, IndexError, ValueError):
+                logger.warning("midas: no station id/location in the header of %s", path)
+                continue
+            height = _number(meta.get("height", [None])[0])
+            name = (meta.get("observation_station") or [None])[0]
+            rows.append({"station_id": sid, "lat": lat, "lon": lon,
+                         "height": height, "name": name})
+        schema = {"station_id": pl.String, "lat": pl.Float64, "lon": pl.Float64,
+                  "height": pl.Float64, "name": pl.String}
+        return pl.DataFrame(rows, schema=schema).sort("station_id")
+
     def _station_of(self, raw: RawFile) -> str:
         """Fallback station id from the unit key, for a file with no `src_id`."""
         parts = (raw.unit_key or "").split("/")

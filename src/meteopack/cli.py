@@ -351,7 +351,19 @@ def _write_station_metadata(ctx: Context) -> int:
         logger.warning("%s: live station catalogue unavailable (%s: %s); falling back to "
                        "the archived one", ctx.cfg.source, type(exc).__name__, exc)
         table = None
+    # Catalogues do not always spell a station the way the observations do:
+    # MIDAS's archived catalogue says 160 where the data say 00160, which left
+    # 133 of 185 stations without coordinates. The source says what canonical is.
+    canonical = getattr(ctx.src, "canonical_station_id", None)
+
+    def _canon(frame):
+        if canonical is None or not len(frame):
+            return frame
+        return frame.with_columns(pl.col("station_id").cast(pl.String)
+                                  .map_elements(canonical, return_dtype=pl.String))
+
     if table is not None and len(table):
+        table = _canon(table)
         # Sources name the elevation column differently; the store has one name.
         renames = {"height_m": "height", "altitude": "height", "elevation": "height"}
         table = table.rename({k: v for k, v in renames.items() if k in table.columns})
@@ -369,7 +381,8 @@ def _write_station_metadata(ctx: Context) -> int:
     # collide.
     archived = archived_stations(ctx.raw_root)
     if archived:
-        extra = pl.DataFrame(archived, schema=schema).select(keep)
+        extra = _canon(pl.DataFrame(archived, schema=schema).select(keep)).unique(
+            subset=["station_id"], keep="first")
         new_rows = extra.filter(
             ~pl.col("station_id").is_in(table["station_id"].to_list())
         )
@@ -379,6 +392,29 @@ def _write_station_metadata(ctx: Context) -> int:
                 "live one no longer lists", ctx.cfg.source, len(new_rows),
             )
             table = pl.concat([table, new_rows], how="diagonal_relaxed")
+
+    # Last resort, and needing no network: positions written in the raw files
+    # themselves (MIDAS headers). Fills stations still without coordinates.
+    from_raw = getattr(ctx.src, "raw_stations", None)
+    if from_raw is not None:
+        located = table.filter(pl.col("lat").is_not_null() & pl.col("lon").is_not_null())
+        try:
+            extra = from_raw(ctx.raw_root)
+        except Exception as exc:  # noqa: BLE001 - metadata must not fail a pack
+            logger.warning("%s: reading station positions from raw files failed: %s: %s",
+                           ctx.cfg.source, type(exc).__name__, exc)
+            extra = None
+        if extra is not None and len(extra):
+            extra = extra.select(keep).filter(
+                ~pl.col("station_id").is_in(located["station_id"].to_list()))
+            if len(extra):
+                logger.info("%s: %d station position(s) taken from the raw file headers",
+                            ctx.cfg.source, len(extra))
+                table = pl.concat(
+                    [located, extra,
+                     table.filter(~pl.col("station_id").is_in(
+                         pl.concat([located["station_id"], extra["station_id"]]).to_list()))],
+                    how="diagonal_relaxed")
 
     if not len(table):
         logger.warning("source %s: no station metadata, live or archived", ctx.cfg.source)
@@ -628,6 +664,14 @@ def _timeline_for(ctx: Context):
     if offset_end % span:
         end = origin + timedelta(seconds=offset_end + (span - offset_end % span))
     return Timeline(start, end, step)
+
+
+def _size(path: str) -> int:
+    """A spill file's size, or 0 if it cannot be read - sizing must not fail a pack."""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
 
 
 def _files_for_window(ctx, files: list[Path]) -> tuple[list[Path], int]:
@@ -1003,34 +1047,61 @@ def stage_pack(ctx: Context) -> int:
             # variable groups each contribute a row for the same instant - and
             # doing seventeen of those one after another left fifteen cores
             # idle.
-            part_tasks = [
-                packing.PartitionTask(
+            # Largest first, and only as many at once as memory allows: writing
+            # all seventeen dwd partitions together reached 127 GB and the OOM
+            # killer took the job (2026-11-05).
+            part_tasks = sorted(
+                (packing.PartitionTask(
                     label=label, files=tuple(by_partition[label]),
                     source=ctx.cfg.source, product=ctx.cfg.product,
                     root=str(ctx.root), configs=ctx.args.configs,
-                )
-                for label in sorted(by_partition)
-            ]
-            part_workers = min(len(part_tasks), workers)
-            print(f"writing {len(part_tasks)} partition(s) with {part_workers} worker(s)")
+                    n_bytes=sum(_size(f) for f in by_partition[label]),
+                ) for label in by_partition),
+                key=lambda t: t.n_bytes, reverse=True,
+            )
+            part_workers = packing.partition_workers(part_tasks, workers)
+            limit = packing.memory_limit_bytes()
+            print(f"writing {len(part_tasks)} partition(s) with {part_workers} worker(s) "
+                  f"({sum(t.n_bytes for t in part_tasks) / 2**30:.1f} GiB spilled, largest "
+                  f"{part_tasks[0].n_bytes / 2**30:.2f} GiB"
+                  + (f", memory limit {limit / 2**30:.0f} GiB)" if limit else ")"))
             written = packing.run(part_tasks, packing.write_partition,
                                   workers=part_workers, max_tasks_per_child=0)
             n_records = 0
             paths: list[Path] = []
-            for result in sorted(written, key=lambda r: str(r.get("label"))):
+            failed: list[dict] = []
+            for result in sorted(written, key=lambda r: str(r.get("label") or r.get("path"))):
                 if result.get("error"):
-                    errors.append(result)
+                    failed.append(result)
                     continue
                 n_records += int(result["rows"])
                 paths.extend(Path(p) for p in result["paths"])
                 merged = int(result.get("merged") or 0)
                 note = f", {merged:,} duplicate rows merged" if merged else ""
-                print(f"  {result['label']}: {int(result['rows']):,} rows{note}")
+                rss = result.get("peak_rss")
+                rss_note = f", worker peak {rss / 2**30:.1f} GiB" if rss else ""
+                print(f"  {result['label']}: {int(result['rows']):,} rows{note}{rss_note}")
         finally:
             shutil.rmtree(spill, ignore_errors=True)
 
-        points.write_schema(ctx.cfg, ctx.root)
         store = points.store_path(ctx.root, ctx.cfg.store_id)
+        if failed:
+            # Some partitions were rewritten and some were not, so the store
+            # no longer matches any single pack. Writing the manifest anyway
+            # made `validate` pass on a store whose partitions were all left
+            # over from an earlier, failed run, while the catalog recorded 0
+            # records (dwd, 2026-11-05). Withdraw the manifest instead, so the
+            # store reads as unfinished until a pack succeeds.
+            stale = store / "manifest.json"
+            if stale.exists():
+                stale.unlink()
+            print(f"error: {len(failed)} of {len(part_tasks)} partition(s) failed to write; "
+                  f"the manifest was withdrawn and the store must be packed again:")
+            for e in failed[:20]:
+                print(f"  {e.get('path')}: {e['error']}")
+            return 1
+
+        points.write_schema(ctx.cfg, ctx.root)
         print(f"packed {n_records} rows into {len(paths)} partition file(s) at {store}")
 
     manifest.write(store, manifest.Manifest.new(
@@ -1103,9 +1174,14 @@ def _compare_schema(cfg, report: dict) -> tuple[list[str], str]:
             if want and want != got:
                 drifted.append(f"{group}: {got} != pinned {want}")
         missing = sorted(set(groups) - scanned)
-        note = f"{len(scanned)} of {len(groups)} pinned group schemas match"
+        unpinned = sorted(scanned - set(groups))
+        note = f"{len(scanned & set(groups))} of {len(groups)} pinned group schemas match"
         if missing:
             note += f" (not seen here: {', '.join(missing)})"
+        if unpinned:
+            # Seen but not pinned: a group no variable reads (dwd's
+            # extreme_temperature). Said, so "6 of 5 match" cannot recur.
+            note += f"; unpinned groups also in the raw data: {', '.join(unpinned)}"
         if variants and not scanned:
             # Nothing was compared, which reads like "no drift" and is the one
             # outcome a drift check must never report quietly.
@@ -1137,6 +1213,9 @@ def _compare_schema(cfg, report: dict) -> tuple[list[str], str]:
     if pin and got:
         return ([] if pin == got else [f"file schema: {got} != pinned {pin}"],
                 "the pinned file schema matches")
+    if not got and report.get("compact_files"):
+        return [], (f"{report['compact_files']} compact archive file(s) carry no property "
+                    f"schema, so there is nothing to compare against the pin")
     return [], f"nothing pinned to compare against; observed {got}"
 
 
@@ -1202,7 +1281,7 @@ def _merge_scan_reports(reports: list[dict]) -> dict:
                         seen["examples"] = examples
             elif key == "errors":
                 errors.extend(value or [])
-            elif key in {"n_files", "n_variants"}:
+            elif key in {"n_files", "n_variants", "compact_files"}:
                 merged[key] = merged.get(key, 0) + int(value or 0)
             elif isinstance(value, dict):
                 combined = dict(merged.get(key) or {})

@@ -289,12 +289,16 @@ class KnmiInsitu:
             day = tar_date(path.name)
             counter = m.group("counter")
             previous = found.get(day)
+            if previous is not None:
+                # Warn whichever order the directory lists them in: iterdir()
+                # order is the filesystem's, and warning only when the lower
+                # counter came first hid half of the re-issued days.
+                keep, drop = sorted((counter, previous[0]), reverse=True)
+                logger.warning(
+                    "knmi_insitu: %s has several tars; using counter %s over %s",
+                    day, keep, drop,
+                )
             if previous is None or counter > previous[0]:
-                if previous is not None:
-                    logger.warning(
-                        "knmi_insitu: %s has several tars; using counter %s over %s",
-                        day, counter, previous[0],
-                    )
                 found[day] = (counter, path)
         self._archive_cache = {day: path for day, (_, path) in sorted(found.items())}
         logger.info(

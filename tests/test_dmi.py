@@ -841,3 +841,25 @@ def test_an_unrecognisable_payload_is_still_refused(tmp_path, product):
     raw = RawFile(path=path, sha256="x", n_bytes=1, unit_key="dmi/x")
     with pytest.raises(SchemaDriftError, match="compact"):
         DmiStations().parse(raw, product)
+
+
+def test_scan_does_not_report_the_compact_archive_form_as_drift(tmp_path, product):
+    """`parse` skips the schema pin for the compact form - it has no property
+    schema - but `scan` fingerprinted its synthesised features, so a scan of
+    the 4,775-file archive failed with drift on every run (2026-11-05)."""
+    import json
+
+    from meteopack.cli import _compare_schema
+    from meteopack.sources.base import RawFile
+    from meteopack.sources.dmi import DmiStations
+
+    param = next(v.source_key for v in product.variables)
+    path = tmp_path / "06188" / param / "2018.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps([["2018-01-01T00:00:00Z", 2.3]]))
+    raw = RawFile(path=path, sha256="x", n_bytes=path.stat().st_size,
+                  unit_key=f"dmi/stations_10min/06188/{param}/2018")
+    report = DmiStations().scan([raw])
+    assert report["compact_files"] == 1 and report["variants"] == []
+    drifted, _ = _compare_schema(product, report)
+    assert drifted == []

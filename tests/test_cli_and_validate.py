@@ -677,3 +677,77 @@ def test_a_configured_variable_with_no_values_fails(tmp_path, extra):
     report = validate(cfg, tmp_path)
     check = next(c for c in report.checks if c.name == "air_pressure has values")
     assert not check.ok, report.text()
+
+
+def test_a_failed_partition_write_withdraws_the_manifest(tmp_path, monkeypatch, capsys):
+    """Every dwd partition failed to write and pack still wrote a fresh manifest,
+    so `validate` passed on rows left over from an earlier failed run while the
+    catalog recorded 0 records (2026-11-05)."""
+    from meteopack.core.store import points
+    from meteopack.jobs import packing
+
+    raw = tmp_path / "raw" / "dwd" / "stations_10min"
+    raw.mkdir(parents=True)
+    (raw / "a.zip").write_bytes(b"x")
+    store = points.store_path(tmp_path, "dwd/stations_10min/v1")
+    store.mkdir(parents=True)
+    (store / "manifest.json").write_text("{}")
+
+    def fake_run(tasks, fn, **kw):
+        if fn.__name__ == "parse_points":
+            return [{"path": str(raw / "a.zip"), "parts": {"2012": "/nonexistent"}}]
+        return [{"path": t.label, "error": "TypeError: boom"} for t in tasks]
+
+    monkeypatch.setattr(packing, "run", fake_run)
+    code = main(["pack", "dwd", "--data-root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "manifest was withdrawn" in out and "2012" in out
+    assert not (store / "manifest.json").exists()
+
+
+def test_archived_station_ids_are_put_in_the_sources_canonical_form(tmp_path):
+    """MIDAS's archived catalogue says 160 where the observations say 00160:
+    133 of 185 packed stations had no coordinates (2026-11-05)."""
+    import json
+
+    from meteopack import cli
+
+    raw = tmp_path / "raw" / "midas" / "hourly_weather"
+    raw.mkdir(parents=True)
+    (raw / "station_catalog.json").write_text(json.dumps(
+        [{"src_id": 160, "name": "CRAIBSTONE", "lat": 57.187, "lon": -2.215, "elevation": 102.0}]))
+
+    class Ctx:
+        cfg = _cfg()
+        root = tmp_path
+        raw_root = raw
+
+        class src:
+            @staticmethod
+            def stations(cfg):
+                raise RuntimeError("token expired")
+
+            @staticmethod
+            def canonical_station_id(value):
+                return f"{int(value):05d}"
+
+    assert cli._write_station_metadata(Ctx()) == 1
+    back = points.read_stations(_cfg().store_id, tmp_path)
+    assert back["station_id"].to_list() == ["00160"]
+    assert back["lat"][0] == 57.187
+
+
+def test_group_pin_note_counts_only_pinned_groups():
+    """dwd's scan said "6 of 5 pinned group schemas match": extreme_temperature
+    is in the raw data but no variable reads it, so it has no pin."""
+    from types import SimpleNamespace
+
+    from meteopack.cli import _compare_schema
+
+    cfg = SimpleNamespace(extra={"schema_fingerprints": {"wind": "a"}}, schema_fingerprint=None)
+    report = {"variants": [{"group": "wind", "fingerprint": "a"},
+                           {"group": "extreme_temperature", "fingerprint": "b"}]}
+    drifted, note = _compare_schema(cfg, report)
+    assert drifted == []
+    assert note.startswith("1 of 1 pinned") and "extreme_temperature" in note

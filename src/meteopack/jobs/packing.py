@@ -144,6 +144,84 @@ class PartitionTask:
     product: str | None
     root: str
     configs: str | None = None
+    #: Bytes of spilled Arrow IPC this partition reads back - what the memory
+    #: planner in `partition_workers` sizes the pool by.
+    n_bytes: int = 0
+
+
+#: Peak RSS of writing a partition, as a multiple of its spilled IPC bytes:
+#: the frames read back, their concatenation, and the group-by that coalesces
+#: duplicate (time, station) rows each hold a copy. Measured on the full dwd
+#: pack (2026-11-05): 17.5 GiB peaks for ~2.7 GiB partitions (6.5x) and 29.2
+#: GiB for the largest, 5.2 GiB (5.6x); the job peaked at 103.6 of 110 GiB with
+#: a factor of 4. Guessing low costs the whole pack to the OOM killer.
+PARTITION_RSS_FACTOR = 7.0
+
+
+def _read_limit(path: Path) -> int | None:
+    try:
+        v = path.read_text().strip()
+    except OSError:
+        return None
+    return int(v) if v.isdigit() and int(v) < 1 << 60 else None     # "max", v1's huge sentinel
+
+
+def memory_limit_bytes() -> int | None:
+    """The memory this process may use: the cgroup limit, else Slurm's, else RAM.
+
+    Slurm enforces `--mem` through the job's cgroup, and the OOM killer acts on
+    that limit, not on what the node has free. Exceeding it killed a dwd pack
+    that wrote seventeen partitions at once (127 GB against a 110 GB request).
+    """
+    limits = []
+    try:  # cgroup v2: the job's group and its ancestors (Slurm sets it on job_N, not the step)
+        rel = Path("/proc/self/cgroup").read_text().splitlines()[-1].split(":", 2)[2]
+        group = Path("/sys/fs/cgroup" + rel)
+        for d in (group, *group.parents):
+            if d == Path("/sys/fs"):
+                break
+            v = _read_limit(d / "memory.max")
+            if v:
+                limits.append(v)
+    except (OSError, IndexError):
+        pass
+    v = _read_limit(Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"))   # cgroup v1
+    if v:
+        limits.append(v)
+    if limits:
+        return min(limits)
+    mb = os.environ.get("SLURM_MEM_PER_NODE")
+    if mb and mb.isdigit():
+        return int(mb) << 20
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):  # pragma: no cover - non-POSIX
+        return None
+
+
+def partition_workers(tasks: list[PartitionTask], workers: int, *,
+                      limit: int | None = None, fraction: float = 0.7,
+                      factor: float = PARTITION_RSS_FACTOR) -> int:
+    """How many partitions can be written at once without exceeding memory.
+
+    Sized so the largest `k` partitions, written together, fit in `fraction`
+    of the limit. Always at least one: a single partition that does not fit
+    will fail on its own, and saying so is better than refusing to try.
+    """
+    workers = max(1, min(workers, len(tasks)))
+    if limit is None:
+        limit = memory_limit_bytes()
+    if not limit:
+        return workers
+    budget = fraction * limit
+    sizes = sorted((factor * t.n_bytes for t in tasks), reverse=True)
+    k, used = 0, 0.0
+    for s in sizes[:workers]:
+        if k and used + s > budget:
+            break
+        used += s
+        k += 1
+    return max(1, k)
 
 
 def write_partition(task: PartitionTask) -> dict[str, Any]:
@@ -153,11 +231,18 @@ def write_partition(task: PartitionTask) -> dict[str, Any]:
     from meteopack.core.store import points
 
     _, cfg = _load_cached(task.source, task.product, task.configs)
-    frame = pl.concat([pl.read_ipc(f) for f in task.files], how="diagonal_relaxed")
+    frame = pl.concat([pl.read_ipc(f) for f in task.files],
+                      how="diagonal_relaxed", rechunk=False)
     frame, merged = coalesce_observations(frame)
     paths = points.write(frame, cfg, Path(task.root))
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss << 10
     return {"label": task.label, "rows": frame.height, "merged": merged,
-            "paths": [str(p) for p in paths]}
+            "paths": [str(p) for p in paths], "n_bytes": task.n_bytes, "peak_rss": peak}
+
+
+def task_name(task) -> str:
+    """What to call a task in an error: its raw file, or its partition label."""
+    return str(getattr(task, "raw_path", None) or getattr(task, "label", None) or task)
 
 
 def coalesce_observations(df):
@@ -402,11 +487,11 @@ def run(tasks: list[PackTask], fn, *, workers: int | None = None,
                     # This future is already out of `pending`, so it has to be
                     # reported here or it vanishes from the accounting. When a
                     # pool breaks, every in-flight future breaks at once.
-                    out.append({"path": task.raw_path, "error": broken})
+                    out.append({"path": task_name(task), "error": broken})
                 except Exception as exc:  # noqa: BLE001 - reported per file, never silent
                     logger.error("pack failed for %s: %s: %s",
-                                 task.raw_path, type(exc).__name__, exc)
-                    out.append({"path": task.raw_path, "error": f"{type(exc).__name__}: {exc}"})
+                                 task_name(task), type(exc).__name__, exc)
+                    out.append({"path": task_name(task), "error": f"{type(exc).__name__}: {exc}"})
             if broken:
                 break
             submit_more()
@@ -415,9 +500,9 @@ def run(tasks: list[PackTask], fn, *, workers: int | None = None,
             logger.error("%s", broken)
             for fut, task in pending.items():
                 fut.cancel()
-                out.append({"path": task.raw_path, "error": broken})
+                out.append({"path": task_name(task), "error": broken})
             for task in queued:
-                out.append({"path": task.raw_path, "error": f"not attempted: {broken}"})
+                out.append({"path": task_name(task), "error": f"not attempted: {broken}"})
     finally:
         _shutdown(pool, force=broken is not None)
     return out

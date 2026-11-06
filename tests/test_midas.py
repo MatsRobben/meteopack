@@ -1012,3 +1012,15 @@ def test_live_catalogue_and_station_metadata():
     table = src.stations(cfg)
     assert table.height > 100
     assert table["height_m"].null_count() < table.height
+
+
+def test_station_positions_come_from_the_raw_headers_without_a_token(tmp_path):
+    """With CEDA's token expired, the archived catalogue placed only 52 of 185
+    packed stations (2026-11-05). Every raw file states its own position."""
+    (tmp_path / "16596").mkdir()
+    (tmp_path / "16596" / "2022.csv").write_text(BADC.replace("54.205,-1.39", "54.0,-1.0"))
+    (tmp_path / "16596" / "2023.csv").write_text(BADC)
+    (tmp_path / "station_catalog.json").write_text("{}")
+    table = FakeMidas().raw_stations(tmp_path)
+    assert table.to_dicts() == [{"station_id": "16596", "lat": 54.205, "lon": -1.39,
+                                 "height": 25.0, "name": "topcliffe"}]

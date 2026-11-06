@@ -15,13 +15,18 @@ it); storage, scheduling, validation and bookkeeping are shared.
 | `knmi_radar/rtcor_5min` | radar rainfall accumulation, quality, gauge adjustment, 2018- | **packed and verified** against the raw files (2026-11-01) |
 | `knmi_radar/echotop_5min` | radar echo top height, 2008- | **packed and verified** |
 | `knmi_radar/refl_5min` | radar reflectivity composite, 2008- | **packed and verified** |
-| `knmi_insitu/obs_10min` | KNMI automatic weather stations | code working; store to be rebuilt |
-| `dwd`, `dmi`, `belgium`, `meteofrance`, `midas`, `ea` | station networks around NL | code fixed 2026-11-01; **re-fetch before trusting** (EA dropped 1 Jan / 31 Dec, DWD missed closed stations) |
+| `knmi_insitu/obs_10min` | KNMI automatic weather stations, 2012- | **packed and validated** (2026-11-05): 49.0 M rows, 73 stations |
+| `dwd/stations_10min` | German stations, 10 min, 2010- | **packed and validated**: 762 M rows, 1,117 stations; raw lacks closed stations (DWD listing bug, fixed in code, not re-fetched) |
+| `dmi/stations_10min` | Danish stations, 10 min, 2012- | **packed and validated**: 75.0 M rows, 115 stations |
+| `belgium/aws_10min` | Belgian AWS, 10 min, 2012- | **packed and validated**: 9.97 M rows, 14 stations |
+| `meteofrance/hourly_all` | French stations near NL, hourly, 2010- | **packed**: 12.2 M rows, 237 stations; direct/diffuse/longwave/UV radiation are empty because no in-domain station measures them |
+| `midas/hourly_weather` | UK stations, hourly, 2012- | **packed and validated**: 14.0 M rows, 185 stations (positions from the raw file headers when CEDA's token has expired) |
+| `ea/rainfall_15min` | English rain gauges, 15 min, 2012- | **packed and validated**: 305 M rows, 628 reporting gauges; raw lacks 1 Jan and 31 Dec of each gauge-year (fetch bug, fixed in code, not re-fetched) |
 | `esoh/observations` | pan-European real-time stations (24 h rolling upstream) | works; wind selectors do not yet match DWD's E-SOH labelling |
 | `eumetsat_seviri/msg15_rss` | MSG SEVIRI rapid scan | works; resampled onto the radar grid, 4 of 11 channels |
 
-On the ICIS/DAS cluster the packed radar stores live under
-`/vol/knmimo-nobackup/users/mrobben/meteopack_data/packed/knmi_radar/` -
+On the ICIS/DAS cluster every store above lives under
+`/vol/knmimo-nobackup/users/mrobben/meteopack_data/packed/` -
 read them directly, there is no need to rebuild them.
 
 ## Reading a store
