@@ -67,6 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="catalog: what the source's raw layer is missing and why, per file "
                         "and per station x year, from the last fetch's listing and the ledger")
     p.add_argument("--out", help="catalog --gaps: directory to write the full tables to (CSV)")
+    p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                   help="derive (kind: regularise): override one config value for this run, "
+                        "e.g. --set step_seconds=300 --set rain.rule=naive (repeatable)")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -1920,7 +1923,13 @@ def stage_derive(ctx_args: argparse.Namespace) -> int:
         print(f"no derive config: {path}")
         return 1
 
-    cfg = DeriveConfig(**load_yaml(path))
+    raw = load_yaml(path)
+    if raw.get("kind") == "regularise":
+        return _derive_regularise(ctx_args, raw)
+    if ctx_args.set:
+        print("error: --set is only understood by `kind: regularise` derive configs")
+        return 2
+    cfg = DeriveConfig(**raw)
     root = data_root(ctx_args.data_root, default=str(Path.cwd() / "data"))
     readme.write(root)
     kind = _derive_kind(cfg, root)
@@ -1967,6 +1976,48 @@ def stage_derive(ctx_args: argparse.Namespace) -> int:
         except (OSError, ValueError):
             note = ""
     print(f"derived {cfg.name} -> {out}{note}")
+    return 0
+
+
+def _derive_regularise(ctx_args: argparse.Namespace, raw: dict) -> int:
+    """Irregular points store -> regular grid (meteopack.derive.regularise).
+
+    Every parameter is in the config and any can be overridden for one run
+    with `--set key=value` (dotted for nested keys; YAML values), e.g.
+    `--set step_seconds=300 --set label=start --set rain.rule=naive`. A run
+    whose parameters differ from the store already on disk refuses to mix
+    into it: give it a new `--set name=...`, or `--refresh` to replace it.
+    """
+    from meteopack.core.config import data_root
+    from meteopack.derive import regularise
+
+    try:
+        cfg = regularise.RegulariseConfig(**regularise.apply_overrides(raw, ctx_args.set))
+    except (ValueError, TypeError) as exc:
+        print(f"error: {exc}")
+        return 2
+    root = data_root(ctx_args.data_root, default=str(Path.cwd() / "data"))
+    window = None
+    if ctx_args.window:
+        w = parse_window(ctx_args.window)
+        window = (w.start, w.end)
+    print(f"regularising {cfg.input} -> training/{cfg.store_id}: step {cfg.step_seconds} s, "
+          f"label {cfg.label}, origin {cfg.origin.isoformat()}, "
+          f"{len(cfg.variables)} variable(s)"
+          + (f", rain {cfg.rain.rule}" if cfg.rain else "")
+          + (f", window {window[0]:%Y-%m-%d}..{window[1]:%Y-%m-%d}" if window else ""))
+    meta = regularise.build(cfg, root, window=window, workers=ctx_args.workers,
+                            threads=cfg.threads, refresh=ctx_args.refresh)
+    run = meta["run"]
+    print(f"wrote {meta['rows']:,} rows ({meta['months_built']} month(s)) in "
+          f"{run['wall_s']:.0f} s: {run['input_rows']:,} reports read, {run['workers']} "
+          f"worker(s) x {run['polars_threads']} thread(s); read {run['read_s']:.0f} s, "
+          f"compute {run['compute_s']:.0f} s, write {run['write_s']:.0f} s summed over "
+          f"workers; worker peak {run['max_worker_rss_mib'] / 1024:.1f} GiB")
+    if meta["non_causal_columns"]:
+        print(f"  non-causal (use reports after T): {', '.join(meta['non_causal_columns'])}")
+    for k, v in meta["stage_counts"].items():
+        print(f"  {k}: {v:,}")
     return 0
 
 
