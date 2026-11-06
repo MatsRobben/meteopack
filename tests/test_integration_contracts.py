@@ -121,7 +121,6 @@ def test_sources_constructed_without_a_session_can_still_fetch(monkeypatch, tmp_
     from meteopack.core import http
     from meteopack.sources.base import RawFile
     from meteopack.sources.dwd import DwdStations
-    from meteopack.sources.esoh import EsohObservations
 
     real_sig = inspect.signature(http.fetch_file)
     captured = {}
@@ -138,11 +137,6 @@ def test_sources_constructed_without_a_session_can_still_fetch(monkeypatch, tmp_
                 meta={"group": "air_temperature", "subdir": "now", "filename": "x.zip"})
     DwdStations().fetch(unit, tmp_path)
     assert captured["session"] is not None, "DwdStations passed a None session"
-
-    captured.clear()
-    esoh_unit = Unit(key="k", url="https://example.invalid/x.json", meta={})
-    EsohObservations().fetch(esoh_unit, tmp_path)
-    assert captured["session"] is not None, "EsohObservations passed a None session"
 
 
 def test_volatile_units_are_actually_refetched(monkeypatch, tmp_path):
@@ -233,7 +227,7 @@ def test_schema_drift_is_one_exception_across_every_source():
 
     from meteopack.sources.common import SchemaDriftError, SourceError
 
-    names = ["dwd", "esoh", "belgium", "dmi", "ea", "knmi_insitu",
+    names = ["dwd", "belgium", "dmi", "ea", "knmi_insitu",
              "knmi_radar", "meteofrance", "midas", "eumetsat_seviri"]
     for name in names:
         mod = importlib.import_module(f"meteopack.sources.{name}")
@@ -419,7 +413,7 @@ def test_a_source_fits_out_the_session_the_cli_hands_it():
     from meteopack.jobs.plan import load_source_config
     from meteopack.sources import registry
 
-    for name in ("dwd", "belgium", "dmi", "ea", "esoh", "meteofrance"):
+    for name in ("dwd", "belgium", "dmi", "ea", "meteofrance"):
         cfg = load_source_config(name)
         src = registry.build(name, cfg, session=requests.Session())
         session = src._requests_session()

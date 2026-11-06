@@ -488,8 +488,8 @@ class Catalog:
         `fetch` records a unit whose content was still filling upstream as
         `pending` rather than `done`, so the next run fetches it again - over
         the old copy - and only a fetch made after it stopped changing marks it
-        done. Without that, an E-SOH hour harvested at 10:37 was done for good,
-        and 10:37-11:00 was never requested again from a feed with no archive.
+        done. Without that, an hour harvested at 10:37 was done for good, and
+        10:37-11:00 was never requested again.
         """
         escaped = stage.replace("'", "''")
         rows = self.query(

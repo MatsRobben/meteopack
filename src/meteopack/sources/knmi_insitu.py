@@ -27,8 +27,7 @@ silently corrupts the store if you get it wrong:
   and 102 from 2021 on, when `tg` and `Q24H` appeared. A per-file fingerprint
   would therefore reject half the archive. What is pinned is the *catalogue* —
   `extra.known_variables` — and a file carrying a subset of it is normal and
-  passes; a variable outside it is drift and fails. Same rule as `esoh`, and
-  for the same reason.
+  passes; a variable outside it is drift and fails.
 * **Missing is NaN, not a sentinel.** Every observation variable is float64 with
   `_FillValue = NaN`. polars does not treat a float NaN as null, so NaN is
   nulled explicitly *before* scale/offset — otherwise `NaN * 60` is still NaN
@@ -40,7 +39,8 @@ silently corrupts the store if you get it wrong:
 
 Station ids are the five-character WMO code the file calls `station`
 ("06260"), and the WIGOS id (`wsi`, "0-20000-0-06260") is carried alongside in
-the station table so this store joins against `esoh` without a second lookup.
+the station table so this store joins against WIGOS-keyed feeds without a
+second lookup.
 
 There is no HTTP here. The archive is already on local disk and a unit's `url`
 is a `file://` path, so `fetch` hardlinks (or copies) the day's tar into the raw

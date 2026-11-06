@@ -15,7 +15,7 @@
 # valid_max are expressed in the canonical units below (i.e. post-scale).
 # Météo-France publishes several quantities in accumulated energy (J/cm2 per
 # hour) and in minutes, oktas or centimetres; everything is scaled here to the
-# same canonical units the DWD and E-SOH products use, so the columns are
+# same canonical units the DWD product uses, so the columns are
 # directly comparable across borders.
 
 source: meteofrance
@@ -289,7 +289,7 @@ variables:
 
   # The four radiation columns and UV are hourly accumulations in J/cm2.
   # 1 J/cm2 = 1e4 J/m2, over 3600 s -> 1e4/3600 = 2.777778 W/m2, which is what
-  # makes them comparable with the DWD and E-SOH flux columns.
+  # makes them comparable with the DWD flux columns.
   - name: surface_downwelling_shortwave_flux
     source_key: GLO
     units: W m-2

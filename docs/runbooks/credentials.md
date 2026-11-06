@@ -126,7 +126,6 @@ path is MTG-I FCI, which uses the same account.
 | `dmi` | Danish MetObs — keyless since March 2026; the `api-key` parameter in the v2 docs is no longer required |
 | `ea` | England & Wales Environment Agency, Open Government Licence |
 | `meteofrance` | Météo-France public S3 climatological archive. Only their *near-real-time* API needs a token, and this is not it |
-| `esoh` | MeteoGate / E-SOH OGC-EDR, open by design |
 | `knmi_radar`, `knmi_insitu` | local archives delivered by KNMI; paths, not endpoints |
 | `eumetsat_seviri` | local archive (see §2 for how it is filled) |
 
@@ -149,19 +148,15 @@ take weeks.
 | **EUMETNET OPERA** composites | via KNMI's OPERA membership | the pan-European radar leg | institutional, ask internally first |
 | **Météo-France portail-api** | <https://portail-api.meteofrance.fr/> | near-real-time French observations; the archive leg needs no key | days |
 | **MET Norway Frost** | <https://frost.met.no/auth/requestCredentials.html> | Norwegian archive; free client ID | minutes |
-| **AEMET OpenData** | <https://opendata.aemet.es/centrodedescargas/altaUsuario> | Spain, absent from E-SOH | minutes |
+| **AEMET OpenData** | <https://opendata.aemet.es/centrodedescargas/altaUsuario> | Spain | minutes |
 | **VMM waterinfo.be** | email for a client-credit code; `pywaterinfo` | the real Flemish rain-gauge density, 15-min | days |
 | **SPW / WACONDAH** (Wallonia) | <https://hydrometrie.wallonie.be/> bulk request form | ~100 weighing gauges, ≈1 per 150 km² | days to weeks |
 | **Met Office WOW / WOW-NL** | <https://mowowprod.portal.azure-api.net/> | the only free route to *historical* private-station data; one account covers NL and BE | days |
 | **Netatmo** | <https://dev.netatmo.com/> | densest NL network (~1 per 9 km²) but the public API has **no history**, so polling must start before you need the data | days; bulk data is **not redistributable** |
 | **CEDA EUMETNET-Netatmo sandbox** | application through your CEDA account | 31 countries, all of 2020, already quality-controlled | weeks, access-restricted |
 
-Two notes that save work:
+One note that saves work:
 
-- **E-SOH has a ~24-hour rolling window and no archive.** Whatever is not
-  harvested is gone. Its coverage is also volatile: between two probes, the
-  Europe-wide station count fell 6402 → 3943 and Germany 557 → 3. It cannot
-  replace the per-country downloaders.
 - **Netatmo's public API returns only currently-operational stations.** There is
   no backfill. If you want 2027's data you have to be polling in 2026.
 

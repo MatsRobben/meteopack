@@ -1152,7 +1152,7 @@ def _compare_schema(cfg, report: dict) -> tuple[list[str], str]:
 
       extra.schema_fingerprints  {group: fp}   per-group  (dwd, per variable group)
       extra.known_layouts        [fp, ...]     allow-list (knmi_radar, generations)
-      extra.known_<thing>        names         catalogue  (esoh, knmi_insitu)
+      extra.known_<thing>        names         catalogue  (knmi_insitu)
       schema_fingerprint         fp            whole file (belgium)
 
     A catalogue or allow-list passes on a SUBSET: a station reporting fewer

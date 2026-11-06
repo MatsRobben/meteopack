@@ -112,8 +112,7 @@ def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") 
     # Every configured variable must be in the store and have at least one
     # value. A selector that matches nothing upstream produces a column of
     # nulls, or no column, and passed silently: air_pressure was 0 of 237,600
-    # rows in one quickstart, and E-SOH's wind selectors match nothing DWD
-    # publishes.
+    # rows in one quickstart.
     for var in cfg.variables:
         if var.name not in columns:
             report.add(f"{var.name} has values", False,

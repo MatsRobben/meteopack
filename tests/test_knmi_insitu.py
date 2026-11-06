@@ -224,7 +224,7 @@ def test_station_ids_keep_the_width_the_file_wrote():
     """"06260" is five characters in the file and in its WIGOS id.
 
     Re-padding or stripping here would silently split one station in two
-    against `esoh`, which keys on `0-20000-0-06260`.
+    against a WIGOS-keyed feed, which keys on `0-20000-0-06260`.
     """
     assert station_id("06260") == "06260"
     assert station_id(b" 06260 ") == "06260"
@@ -687,7 +687,7 @@ def test_stations_carry_coordinates_a_height_and_the_wigos_id(tmp_path):
     assert (row["lat"], row["lon"]) == (52.0989, 5.1797)
     assert row["height"] == pytest.approx(1.9)
     assert row["name"] == "De Bilt"
-    # The WIGOS id is what joins this store against esoh without a second lookup.
+    # The WIGOS id is what joins this store against WIGOS-keyed feeds without a second lookup.
     assert row["wigos_id"] == "0-20000-0-06260"
 
 

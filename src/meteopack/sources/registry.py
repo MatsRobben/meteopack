@@ -22,7 +22,6 @@ _GROUP = "meteopack.sources"
 #: name -> "module:attribute"
 BUILTIN: dict[str, str] = {
     "dwd": "meteopack.sources.dwd:DwdStations",
-    "esoh": "meteopack.sources.esoh:EsohObservations",
     "knmi_radar": "meteopack.sources.knmi_radar:KnmiRadar",
     "belgium": "meteopack.sources.belgium:RmiAws",
     "dmi": "meteopack.sources.dmi:DmiStations",

@@ -22,7 +22,6 @@ it); storage, scheduling, validation and bookkeeping are shared.
 | `meteofrance/hourly_all` | French stations near NL, hourly, 2010- | **packed**: 12.2 M rows, 237 stations; direct/diffuse/longwave/UV radiation are empty because no in-domain station measures them |
 | `midas/hourly_weather` | UK stations, hourly, 2012- | **packed and validated**: 14.0 M rows, 185 stations (positions from the raw file headers when CEDA's token has expired) |
 | `ea/rainfall_15min` | English rain gauges, 15 min, 2012- | **packed and validated**: 305 M rows, 628 reporting gauges; raw lacks 1 Jan and 31 Dec of each gauge-year (fetch bug, fixed in code, not re-fetched) |
-| `esoh/observations` | pan-European real-time stations (24 h rolling upstream) | works; wind selectors do not yet match DWD's E-SOH labelling |
 | `eumetsat_seviri/msg15_rss` | MSG SEVIRI rapid scan | works; resampled onto the radar grid, 4 of 11 channels |
 
 On the ICIS/DAS cluster every store above lives under

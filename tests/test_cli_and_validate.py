@@ -571,8 +571,8 @@ def _fetch_run(tmp_path, source):
 
 
 def test_a_unit_fetched_while_still_filling_is_fetched_again_once_it_closes(tmp_path):
-    """E-SOH: an hour harvested at 10:37 was marked done, so 10:37-11:00 was never
-    requested again - from a feed that keeps no archive."""
+    """An hour harvested at 10:37 was marked done, so 10:37-11:00 was never
+    requested again."""
     from meteopack.sources.base import RawFile, Unit
 
     state = {"open": True}
