@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import subprocess
+import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -122,7 +123,12 @@ def write(store_path: Path, manifest: Manifest) -> Path:
     store_path.mkdir(parents=True, exist_ok=True)
     dest = store_path / MANIFEST_NAME
     manifest.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
-    tmp = dest.with_suffix(".json.part")
+    # A temp name private to this writer: windowed derives run as parallel
+    # Slurm jobs and finish together, and with one shared `.json.part` the
+    # second rename found the file already moved and the job crashed (QC
+    # rebuild, 2026-11-06). Last writer wins, which is right here: every
+    # writer describes the whole store.
+    tmp = store_path / f".{MANIFEST_NAME}.{os.getpid()}.{uuid.uuid4().hex[:8]}.part"
     tmp.write_text(json.dumps(asdict(manifest), indent=2, sort_keys=True))
     os.replace(tmp, dest)
     return dest

@@ -64,3 +64,31 @@ def test_a_manifest_from_before_content_hash_is_judged_by_the_full_hash(tmp_path
     old.pop("content_hash")
     path.write_text(json.dumps(old))
     assert not m.is_stale(tmp_path, c)
+
+
+def test_concurrent_manifest_writes_do_not_collide(tmp_path):
+    """Parallel windowed derives finish together; with one shared temp name the
+    second rename found the file gone and the job crashed (QC rebuild, 2026-11-06)."""
+    import threading
+
+    from meteopack.core.store import manifest as mf
+
+    m = mf.Manifest(store_id="x/y/v1", layer="packed", kind="points", config_hash="c",
+                    code_version="v", created_at="t", updated_at="t")
+    errors = []
+
+    def write():
+        try:
+            for _ in range(30):
+                mf.write(tmp_path, m)
+        except Exception as exc:  # noqa: BLE001 - collected and asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors[:3]
+    assert mf.read(tmp_path).store_id == "x/y/v1"
+    assert not list(tmp_path.glob("*.part"))
