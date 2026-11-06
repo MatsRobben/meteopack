@@ -49,6 +49,20 @@ class PackTask:
     #: reading back empty. Grouping them into one task is what makes the
     #: parallel pack equal the serial one.
     also: tuple[str, ...] = ()
+    #: A piece of the raw file(s) the source parses on its own (`parse_part`),
+    #: for sources whose files are too big to be a unit of work: one UTC day of
+    #: the WOW-NL yearly zips. None means "the whole file", as before.
+    part: str | None = None
+    #: The store partitions this task's rows belong in, declared up front. It
+    #: is what lets `run_pipeline` write a partition the moment its last task
+    #: is done instead of after the whole archive is parsed.
+    partitions: tuple[str, ...] = ()
+    #: Arrow IPC compression of the spill: "uncompressed", "lz4" or "zstd".
+    spill_compression: str = "uncompressed"
+    #: Hand the spilled rows back through the pool's pipe (compressed IPC
+    #: bytes) instead of writing files. For `run_pipeline`, whose spill is only
+    #: the few partitions in flight: it then costs no filesystem traffic at all.
+    spill_inline: bool = False
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -100,30 +114,79 @@ def parse_points(task: PackTask) -> dict[str, Any]:
     """
     import io
 
+    started = time.time()
     src, cfg = _load(task)
-    frame = src.parse(_raw_file(task.raw_path), cfg)
+    records: list[dict] = []
+    if task.part is not None:
+        # The source returns rows plus whatever it wants recorded about the
+        # piece (WOW: one row per hour member for its hours table).
+        frame, records = src.parse_part(list(task.paths), task.part, cfg)
+    else:
+        frame = src.parse(_raw_file(task.raw_path), cfg)
+    t_parse = time.time() - started
     if frame is None or not len(frame):
-        return {"path": task.raw_path, "rows": 0, "ipc": None, "parts": {}}
+        return {"path": task.raw_path, "part": task.part, "rows": 0, "ipc": None, "parts": {},
+                "sizes": {}, "records": records,
+                "timing": _timing(started, t_parse, 0.0)}
 
-    if not task.spill:
+    if not task.spill and not task.spill_inline:
         buf = io.BytesIO()
         frame.write_ipc(buf)
-        return {"path": task.raw_path, "rows": frame.height, "ipc": buf.getvalue(), "parts": {}}
+        return {"path": task.raw_path, "part": task.part, "rows": frame.height,
+                "ipc": buf.getvalue(), "parts": {}, "records": records,
+                "timing": _timing(started, t_parse, 0.0)}
 
-    from meteopack.core.store.points import partition_labels
+    t = time.time()
+    spill = Path(task.spill) if task.spill else None
+    parts: dict[str, str | bytes] = {}
+    sizes: dict[str, int] = {}
+    for label, group in _by_partition(frame, cfg, task.partitions):
+        if task.spill_inline:
+            buf = io.BytesIO()
+            group.write_ipc(buf, compression=task.spill_compression)
+            parts[label] = buf.getvalue()
+        else:
+            directory = spill / label
+            directory.mkdir(parents=True, exist_ok=True)
+            target = directory / f"{uuid.uuid4().hex}.arrow"
+            group.write_ipc(target, compression=task.spill_compression)
+            parts[label] = str(target)
+        # What the rows occupy in memory once read back - with a compressed
+        # spill the file size says little about what writing it will cost.
+        sizes[label] = int(group.estimated_size())
+    return {"path": task.raw_path, "part": task.part, "rows": frame.height, "ipc": None,
+            "parts": parts, "sizes": sizes, "records": records,
+            "timing": _timing(started, t_parse, time.time() - t)}
 
-    spill = Path(task.spill)
-    labels = partition_labels(frame, cfg)
-    tagged = frame.with_columns(labels.alias("__part"))
-    parts: dict[str, str] = {}
+
+def _by_partition(frame, cfg, declared: tuple[str, ...]):
+    """`(label, rows)` per store partition the frame touches.
+
+    When the task declared one partition and the frame's first and last
+    times both fall in it, every row does (partitions are time ranges), and
+    labelling each row is skipped: building a label string per row cost
+    ~0.5 s of every WOW-NL day task, 3 % of a full pack.
+    """
+    from meteopack.core.store.points import (
+        partition_label_of,
+        partition_labels,
+        time_partitioned,
+    )
+
+    if len(declared) == 1 and time_partitioned(cfg) and frame["time"].null_count() == 0:
+        lo, hi = frame["time"].min(), frame["time"].max()
+        if partition_label_of(cfg, lo) == partition_label_of(cfg, hi) == declared[0]:
+            yield declared[0], frame
+            return
+    tagged = frame.with_columns(partition_labels(frame, cfg).alias("__part"))
     for value, group in tagged.partition_by("__part", as_dict=True).items():
-        label = str(value[0] if isinstance(value, tuple) else value)
-        directory = spill / label
-        directory.mkdir(parents=True, exist_ok=True)
-        target = directory / f"{uuid.uuid4().hex}.arrow"
-        group.drop("__part").write_ipc(target)
-        parts[label] = str(target)
-    return {"path": task.raw_path, "rows": frame.height, "ipc": None, "parts": parts}
+        yield str(value[0] if isinstance(value, tuple) else value), group.drop("__part")
+
+
+def _timing(started: float, parse_s: float, write_s: float) -> dict[str, float]:
+    return {"pid": os.getpid(), "start": started, "end": time.time(), "parse_s": parse_s,
+            "write_s": write_s,
+            "rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024}
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +202,8 @@ class PartitionTask:
     """
 
     label: str
-    files: tuple[str, ...]
+    #: Spill files, or inline IPC bytes (`PackTask.spill_inline`).
+    files: tuple[str | bytes, ...]
     source: str
     product: str | None
     root: str
@@ -230,14 +294,37 @@ def write_partition(task: PartitionTask) -> dict[str, Any]:
 
     from meteopack.core.store import points
 
-    _, cfg = _load_cached(task.source, task.product, task.configs)
-    frame = pl.concat([pl.read_ipc(f) for f in task.files],
+    started = time.time()
+    src, cfg = _load_cached(task.source, task.product, task.configs)
+    import io
+
+    # A spilled part is a file, or - from an inline-spilling pipeline - the
+    # compressed IPC bytes themselves.
+    frame = pl.concat([pl.read_ipc(io.BytesIO(f) if isinstance(f, bytes) else f)
+                       for f in task.files],
                       how="diagonal_relaxed", rechunk=False)
-    frame, merged = coalesce_observations(frame)
-    paths = points.write(frame, cfg, Path(task.root))
+    t_read = time.time() - started
+    finish = getattr(src, "finish_partition", None)
+    info: dict[str, Any] = {}
+    if callable(finish):
+        # The source owns what a partition means: an irregular store must not
+        # have its reports "coalesced" by (time, station) - two reports a
+        # station sent in the same second are two reports.
+        frame, info = finish(frame, cfg)
+        merged = 0
+        presorted = True
+    else:
+        frame, merged = coalesce_observations(frame)
+        presorted = False
+    paths = points.write(frame, cfg, Path(task.root), presorted=presorted)
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss << 10
     return {"label": task.label, "rows": frame.height, "merged": merged,
-            "paths": [str(p) for p in paths], "n_bytes": task.n_bytes, "peak_rss": peak}
+            "paths": [str(p) for p in paths], "n_bytes": task.n_bytes, "peak_rss": peak,
+            "info": info,
+            "timing": {"pid": os.getpid(), "start": started, "end": time.time(),
+                       "read_s": t_read, "parse_s": 0.0,
+                       "write_s": time.time() - started - t_read,
+                       "rss_mib": peak / 2**20}}
 
 
 def task_name(task) -> str:
@@ -535,3 +622,363 @@ def _shutdown(pool, *, force: bool) -> None:
         pool.shutdown(wait=False, cancel_futures=True)
     except Exception as exc:  # noqa: BLE001
         logger.debug("pool shutdown after a break: %s", exc)
+
+
+def memory_peak_bytes() -> int | None:
+    """The job's peak memory so far, from the cgroup (tmpfs pages included).
+
+    `ru_maxrss` sees one process; what the OOM killer acts on is the job's
+    cgroup, which also counts a spill on /dev/shm. cgroup v2 records the peak
+    in `memory.peak` on the group that carries the limit. None if unknown.
+    """
+    try:
+        rel = Path("/proc/self/cgroup").read_text().splitlines()[-1].split(":", 2)[2]
+        group = Path("/sys/fs/cgroup" + rel)
+    except (OSError, IndexError):
+        return None
+    best = None
+    for d in (group, *group.parents):
+        if d == Path("/sys/fs"):
+            break
+        peak = _read_limit(d / "memory.peak")
+        if peak is not None:
+            best = peak
+            if _read_limit(d / "memory.max"):
+                return peak
+    return best
+
+
+#: What one parse worker is assumed to hold while it works, when sizing how
+#: many partitions may be written beside the parsers. Measured on WOW-NL
+#: (2026-11-06): a day of 2025 reports - 240 k reports, 323 MiB of JSON -
+#: peaked at 0.45 GB in a single-threaded worker (1.2 GB for a 2019 day that
+#: decodes two copies of every hour).
+PARSE_WORKER_BYTES = 0.6 * 2**30
+
+
+@dataclass(slots=True)
+class PipelineResult:
+    """What `run_pipeline` did: every parse result, every partition written, and why
+    any partition was not."""
+
+    parsed: list[dict[str, Any]]
+    written: list[dict[str, Any]]
+    errors: list[dict[str, Any]]
+    #: label -> reason, for partitions that were declared but not written.
+    skipped: dict[str, str]
+    stats: dict[str, Any]
+
+
+def _set_threads(n: int) -> None:
+    """Pool initializer: fix polars' thread pool before anything imports polars.
+
+    polars sizes its pool once, at import, from POLARS_MAX_THREADS. A parse
+    worker spends its time in single-threaded Python (msgspec, list building),
+    and 48 of them each starting a 48-thread pool cost 4x in context switches
+    (measured: 17 MiB/s per worker against 69 alone, 2.4 M involuntary
+    switches for one month). A partition writer is the opposite: sort and
+    parquet encoding parallelise (a 7 M-row month: 47.5 s on 1 thread, 10.4 s
+    on 8, 8.9 s on 16 - cn114, 2026-11-06).
+    """
+    os.environ["POLARS_MAX_THREADS"] = str(n)
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+
+def _hold(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _prestart(pool: cf.ProcessPoolExecutor, n: int) -> None:
+    """Make `pool` start all `n` workers now rather than on demand.
+
+    A submit spawns a worker only when none is idle, so `n` tasks that each
+    hold a worker for a moment start all of them.
+    """
+    for fut in [pool.submit(_hold, 0.5) for _ in range(n)]:
+        fut.result()
+
+
+def run_pipeline(tasks: list[PackTask], *, workers: int, make_partition,
+                 allowed: set[str] | None = None, limit: int | None = None,
+                 fraction: float = 0.7, factor: float = PARTITION_RSS_FACTOR,
+                 parse_bytes: float = PARSE_WORKER_BYTES, spill_in_memory: bool = False,
+                 allow_partial: bool = False, max_tasks_per_child: int = 0,
+                 write_workers: int = 3, write_threads: int = 8,
+                 max_spill: float | None = None, progress_every: float = 60.0,
+                 stall_timeout: float | None = DEFAULT_STALL_TIMEOUT,
+                 parse_fn=None, write_fn=None) -> PipelineResult:
+    """Parse and write in one pass: each partition is written as soon as its
+    last parse task is done.
+
+    The two-phase pack (`run` the parsers, then `run` the partition writers)
+    holds the whole archive in the spill between the phases and leaves the
+    CPUs idle while the slowest parse finishes, and then the NFS idle while
+    partitions are written. For WOW-NL that is ~230 GB of rows - more than the
+    job's memory if the spill is on /dev/shm, which on cn114 it must be (its
+    /scratch had 18 GB free). Tasks declare their partitions (`partitions`)
+    and are handed over in time order, so months complete one after another
+    and the spill only ever holds the few months in flight.
+
+    Rules that keep this from losing data:
+
+    * A partition is written only when every task that declared it succeeded.
+      If one failed, the partition is left exactly as it was (unless
+      `allow_partial`), and `skipped` says why.
+    * Rows for a partition no task declared (a report stamped outside its own
+      hour) are accepted until that partition is written; arriving after it
+      was, or outside `allowed` (a windowed pack), they are an error - never
+      a silent overwrite of a partition with a fraction of its rows.
+    * Writers run only while their estimated peak (`factor` x the rows'
+      in-memory size) fits in `fraction` of the memory limit beside the
+      parsers (`parse_bytes` each) and - when the spill is RAM - the spill.
+
+    Parsers and writers are separate pools, because they want opposite
+    things: `workers` single-threaded parsers, and at most `write_workers`
+    writers with `write_threads` polars threads each.
+
+    `make_partition(label, files, n_bytes)` builds the PartitionTask.
+    `parse_fn`/`write_fn` default to `parse_points`/`write_partition`.
+    """
+    parse_fn = parse_fn or parse_points
+    write_fn = write_fn or write_partition
+    import collections
+
+    started = time.time()
+    if limit is None:
+        limit = memory_limit_bytes()
+    budget = fraction * limit if limit else float("inf")
+
+    declared = collections.Counter(p for t in tasks for p in t.partitions)
+    remaining = dict(declared)
+    files: dict[str, list[str]] = collections.defaultdict(list)
+    sizes: dict[str, int] = collections.defaultdict(int)
+    spill_of: dict[str, int] = collections.defaultdict(int)
+    failed: dict[str, str] = {}
+    submitted: set[str] = set()
+    ready: collections.deque[str] = collections.deque()
+    parsed: list[dict] = []
+    written: list[dict] = []
+    errors: list[dict] = []
+    skipped: dict[str, str] = {}
+    queued = iter(tasks)
+    order = {id(t): i for i, t in enumerate(tasks)}
+    pending: dict[cf.Future, tuple[str, Any, float]] = {}
+    live = {"spill": 0, "writing": 0.0, "parsing": 0, "max_spill": 0, "max_writing": 0.0,
+            "max_writers": 0}
+    broken: str | None = None
+
+    ctx = multiprocessing.get_context("spawn")
+    kwargs: dict[str, Any] = {"max_workers": workers, "mp_context": ctx,
+                              "initializer": _set_threads, "initargs": (1,)}
+    if max_tasks_per_child:
+        kwargs["max_tasks_per_child"] = max_tasks_per_child
+    pool = cf.ProcessPoolExecutor(**kwargs)
+    # Writers are never recycled: each holds one partition at a time and
+    # returns its memory when the frame is dropped.
+    wpool = cf.ProcessPoolExecutor(max_workers=max(1, write_workers), mp_context=ctx,
+                                   initializer=_set_threads, initargs=(write_threads,))
+    # Start every worker now, while the pools' semaphores exist. On this
+    # cluster everything a user owns in /dev/shm - including the named
+    # semaphores multiprocessing creates there - is deleted ~10 s after any
+    # job of theirs on the node ends; a worker spawned after that dies
+    # rebuilding its semaphore (SemLock._rebuild: FileNotFoundError) and the
+    # pool waits for it. Seen on cn117, 2026-11-06, when another job ended
+    # during a re-pack. Workers already running are unaffected.
+    _prestart(pool, workers)
+    _prestart(wpool, max(1, write_workers))
+
+    def drop_spill(label: str) -> None:
+        for _, f in files.pop(label, []):
+            if isinstance(f, bytes):
+                continue
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
+        live["spill"] -= spill_of.pop(label, 0)
+        sizes.pop(label, None)
+
+    def complete(label: str) -> None:
+        if label in failed and not allow_partial:
+            skipped[label] = f"not rewritten: {failed[label]}"
+            drop_spill(label)
+        elif files.get(label):
+            ready.append(label)
+        else:
+            skipped[label] = "no rows"
+
+    def submit() -> None:
+        n_writers = sum(1 for k, _, _ in pending.values() if k == "write")
+        while ready:
+            label = ready[0]
+            need = factor * sizes[label]
+            used = (live["writing"] + live["parsing"] * parse_bytes
+                    + (live["spill"] if spill_in_memory else 0))
+            if n_writers >= max(1, write_workers) or (n_writers and used + need > budget):
+                break
+            ready.popleft()
+            # In task order, not completion order: the partition's rows then
+            # arrive in the same order on every run, and a stable sort makes
+            # the file the same however the workers happened to finish.
+            pieces = tuple(f for _, f in sorted(files[label], key=lambda kv: kv[0]))
+            task = make_partition(label, pieces, sizes[label])
+            pending[wpool.submit(write_fn, task)] = ("write", (label, task), need)
+            submitted.add(label)
+            live["writing"] += need
+            n_writers += 1
+        live["max_writers"] = max(live["max_writers"], n_writers)
+        live["max_writing"] = max(live["max_writing"], live["writing"])
+        # Keep the parse queue short: a stall must be noticed early, and a
+        # failed pool must not have thousands of tasks to cancel. And hold it
+        # back while the spill is over `max_spill`: parsing outran writing on
+        # the full WOW-NL archive (2026-11-06) - 22 GB of spill, writers
+        # starved of CPU, and 7 of 17 minutes spent writing after the last
+        # parse. Pausing the parsers hands their CPUs to the writers.
+        while live["parsing"] < workers + 2 and (
+                max_spill is None or live["spill"] < max_spill or not pending):
+            task = next(queued, None)
+            if task is None:
+                break
+            pending[pool.submit(parse_fn, task)] = ("parse", task, 0.0)
+            live["parsing"] += 1
+
+    def after_parse(task: PackTask, result: dict) -> None:
+        live["parsing"] -= 1
+        parsed.append(result)
+        if result.get("error"):
+            errors.append({"path": task_name(task), "part": task.part, "error": result["error"]})
+            for label in task.partitions:
+                failed.setdefault(label, f"task {task.part or task.raw_path} failed")
+        for label, path in (result.get("parts") or {}).items():
+            if isinstance(path, bytes):
+                size = len(path)
+            else:
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = 0
+            if label not in task.partitions and (
+                    (allowed is not None and label not in allowed) or label in submitted):
+                why = ("outside the window being packed" if allowed is not None
+                       and label not in allowed else "after that partition was written")
+                errors.append({"path": task_name(task), "part": task.part,
+                               "error": f"rows for partition {label} arrived {why}; "
+                                        f"they were NOT written"})
+                failed.setdefault(label, f"stray rows from {task.part}")
+                if not isinstance(path, bytes):
+                    os.unlink(path)
+                continue
+            files[label].append((order[id(task)], path))
+            sizes[label] += int((result.get("sizes") or {}).get(label, size))
+            spill_of[label] += size
+            live["spill"] += size
+        live["max_spill"] = max(live["max_spill"], live["spill"])
+        for label in task.partitions:
+            remaining[label] -= 1
+            if remaining[label] == 0:
+                complete(label)
+
+    last_note = time.time()
+    n_parsed = n_written = 0
+
+    def progress(force: bool = False) -> None:
+        nonlocal last_note
+        if not force and time.time() - last_note < progress_every:
+            return
+        last_note = time.time()
+        logger.info("pack: %d/%d parts parsed, %d/%d partitions written, %.1f GiB spilled, "
+                    "%d writer(s) busy, %.0f s", n_parsed, len(tasks), n_written,
+                    len(declared), live["spill"] / 2**30,
+                    sum(1 for k, _, _ in pending.values() if k == "write"),
+                    time.time() - started)
+
+    try:
+        submit()
+        while pending:
+            wait = None
+            if stall_timeout is not None:
+                wait = stall_timeout * max(_n_files(t) if k == "parse" else 1
+                                           for k, t, _ in pending.values())
+            done, _ = cf.wait(pending, timeout=wait, return_when=cf.FIRST_COMPLETED)
+            if not done:
+                broken = f"no task finished in {wait:.0f}s; the worker pool is not making progress"
+                break
+            for fut in done:
+                kind, task, need = pending.pop(fut)
+                try:
+                    result = fut.result()
+                except cf.process.BrokenProcessPool as exc:
+                    broken = (f"a worker died ({exc}); on a shared node this is usually the "
+                              f"OOM killer - lower --workers or raise the memory request")
+                    result = {"error": broken}
+                except Exception as exc:  # noqa: BLE001 - reported per task, never silent
+                    result = {"error": f"{type(exc).__name__}: {exc}"}
+                if kind == "parse":
+                    after_parse(task, result)
+                    n_parsed += 1
+                    continue
+                n_written += 1
+                label, _ptask = task
+                live["writing"] -= need
+                if result.get("error"):
+                    errors.append({"path": label, "error": result["error"]})
+                    failed.setdefault(label, "partition write failed")
+                    skipped[label] = f"write failed: {result['error']}"
+                else:
+                    written.append(result)
+                drop_spill(label)
+            if broken:
+                break
+            progress()
+            if next_is_empty(pending, queued):
+                # Every parse is done: partitions only stray rows reached are
+                # complete now too.
+                for label in list(files):
+                    if label not in submitted and label not in ready and label not in skipped:
+                        complete(label)
+            submit()
+        if broken:
+            for kind, task, _ in pending.values():
+                errors.append({"path": task_name(task) if kind == "parse" else task[0],
+                               "error": broken})
+            for task in queued:
+                errors.append({"path": task_name(task), "error": f"not attempted: {broken}"})
+            for label in list(files):
+                skipped.setdefault(label, f"not written: {broken}")
+                drop_spill(label)
+    finally:
+        _shutdown(pool, force=broken is not None)
+        _shutdown(wpool, force=broken is not None)
+
+    parse_t = [r["timing"] for r in parsed if r.get("timing")]
+    write_t = [r["timing"] for r in written if r.get("timing")]
+    wall = time.time() - started
+    stats = {
+        "wall_s": wall, "workers": workers, "write_workers": write_workers,
+        "write_threads": write_threads, "parse_tasks": len(tasks),
+        "partitions_written": len(written),
+        "parse_busy_s": sum(t["end"] - t["start"] for t in parse_t),
+        "parse_cpu_s": sum(t["parse_s"] for t in parse_t),
+        "spill_write_s": sum(t["write_s"] for t in parse_t),
+        "write_busy_s": sum(t["end"] - t["start"] for t in write_t),
+        "parse_last_end_s": (max(t["end"] for t in parse_t) - started) if parse_t else 0.0,
+        "max_parse_worker_rss_mib": max((t["rss_mib"] for t in parse_t), default=0.0),
+        "max_write_worker_rss_mib": max((t["rss_mib"] for t in write_t), default=0.0),
+        "max_spill_bytes": live["max_spill"], "max_writers": live["max_writers"],
+        "max_writing_estimate_bytes": live["max_writing"],
+        "memory_budget_bytes": budget if limit else None,
+        "job_memory_peak_bytes": memory_peak_bytes(),
+    }
+    return PipelineResult(parsed=parsed, written=written, errors=errors, skipped=skipped,
+                          stats=stats)
+
+
+def next_is_empty(pending: dict, queued) -> bool:
+    """True when no parse task is in flight and none is left to submit.
+
+    `queued` is an iterator over a list, whose `__length_hint__` is exactly
+    the number of items left - so this looks without consuming one.
+    """
+    if any(k == "parse" for k, _, _ in pending.values()):
+        return False
+    return getattr(queued, "__length_hint__", lambda: 0)() == 0

@@ -437,11 +437,50 @@ def _parse_all(ctx: Context, files: list[Path]):
     return pl.concat(frames, how="diagonal_relaxed")
 
 
+def _parse_parts(ctx: Context, files: list[Path]) -> int:
+    """Parse a few parts of a source packed in parts, and say what they held.
+
+    A WOW-NL zip is a year - tens of millions of reports - so `parse` takes
+    parts (days) instead: `--window` picks them, `--limit` caps how many
+    (default 3). Nothing is concatenated or written.
+    """
+    import io
+    from collections import Counter
+
+    import polars as pl
+
+    from meteopack.jobs import packing
+
+    window = ctx.window if ctx.args.window else None
+    parts = ctx.src.pack_parts(files, ctx.cfg, window)[: ctx.args.limit or 3]
+    if not parts:
+        print("no parts to parse")
+        return 1
+    tasks = [packing.PackTask(source=ctx.cfg.source, product=ctx.cfg.product,
+                              raw_path=paths[0], also=tuple(paths[1:]), root=str(ctx.root),
+                              configs=ctx.args.configs, part=key, partitions=(label,))
+             for key, paths, label in parts]
+    results = packing.run(tasks, packing.parse_points, workers=ctx.args.workers)
+    failed = 0
+    for r in sorted(results, key=lambda r: str(r.get("part"))):
+        if r.get("error"):
+            failed += 1
+            print(f"  {r.get('part') or r.get('path')}: ERROR {r['error']}")
+            continue
+        frame = pl.read_ipc(io.BytesIO(r["ipc"])) if r.get("ipc") else None
+        status = Counter(rec.get("status") for rec in r.get("records") or ())
+        print(f"  {r['part']}: {r['rows']:,} rows x {frame.width if frame is not None else 0} "
+              f"cols; members {dict(status)}")
+    return 1 if failed else 0
+
+
 def stage_parse(ctx: Context) -> int:
     files = ctx.raw_files()
     print(f"parsing {len(files)} raw files under {ctx.raw_root}")
     if ctx.cfg.store.kind == "gridded":
         return _parse_gridded(ctx, files)
+    if callable(getattr(ctx.src, "pack_parts", None)):
+        return _parse_parts(ctx, files)
     df = _parse_all(ctx, files)
     if df is None:
         print("nothing parsed")
@@ -897,7 +936,8 @@ def _filesystem_type(path: Path) -> str | None:
     return best[1] if best else None
 
 
-def _spill_root(root: Path) -> Path:
+def _spill_root(root: Path, *, ram_ok: bool = False,
+                min_free: int | None = None) -> Path:
     """Where a points pack spills its parsed rows between parse and write.
 
     The spill is written once, read once and deleted; it never reaches the
@@ -919,7 +959,7 @@ def _spill_root(root: Path) -> Path:
     if override:
         base = Path(override)
         base.mkdir(parents=True, exist_ok=True)
-        if _filesystem_type(base) in _MEMORY_FS:
+        if _filesystem_type(base) in _MEMORY_FS and not ram_ok:
             logger.warning(
                 "$METEOPACK_SPILL points at %s, which is RAM; a large pack will "
                 "run the machine out of memory rather than spilling to disk", base,
@@ -941,14 +981,14 @@ def _spill_root(root: Path) -> Path:
             free = shutil.disk_usage(base).free
         except OSError:
             continue
-        if free >= _MIN_SPILL_BYTES:
+        if free >= (min_free if min_free is not None else _MIN_SPILL_BYTES):
             logger.info("spilling to local disk %s (%.0f GB free)", base, free / 1e9)
             return base
 
     logger.info(
         "no node-local disk with %.0f GB free; spilling to %s, which is on the "
         "same filesystem the pack reads from. $METEOPACK_SPILL overrides this.",
-        _MIN_SPILL_BYTES / 1e9, fallback,
+        (min_free if min_free is not None else _MIN_SPILL_BYTES) / 1e9, fallback,
     )
     free = shutil.disk_usage(fallback).free
     if free < _MIN_SPILL_BYTES:
@@ -958,6 +998,9 @@ def _spill_root(root: Path) -> Path:
 
 #: Below this, say so before the pack rather than after it has filled the disk.
 _MIN_SPILL_BYTES = 20 * 1024**3
+#: The pipelined pack's spill peaks at a few months in flight (2.0 GB measured
+#: for the full WOW-NL archive), so it needs far less.
+_MIN_PIPELINE_SPILL_BYTES = 6 * 1024**3
 
 
 def _write_pack_scan_report(ctx: Context, store, results: list[dict]) -> None:
@@ -1019,6 +1062,225 @@ def _product_fingerprint(ctx: Context, fingerprints: list[str]) -> str:
     return own(fingerprints) if callable(own) else fingerprint(fingerprints)
 
 
+def snap_window(cfg, window: TimeWindow) -> TimeWindow:
+    """Widen a window outwards to whole partitions of a time-partitioned store.
+
+    A partition is replaced whole, so a window that cut one in half would
+    rewrite it with half its rows. Snapping makes the windowed pack replace
+    exactly the partitions it names, complete, and touch nothing else.
+    """
+    from meteopack.sources.base import TimeWindow
+
+    keys = set(cfg.store.partition_by)
+
+    def floor(t: datetime) -> datetime:
+        t = t.astimezone(UTC)
+        if "hour" in keys:
+            return t.replace(minute=0, second=0, microsecond=0)
+        if keys & {"day", "date"}:
+            return t.replace(hour=0, minute=0, second=0, microsecond=0)
+        if "month" in keys:
+            return t.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return t.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    def step(t: datetime) -> datetime:
+        if "hour" in keys:
+            return t + timedelta(hours=1)
+        if keys & {"day", "date"}:
+            return t + timedelta(days=1)
+        if "month" in keys:
+            return t.replace(year=t.year + (t.month == 12), month=t.month % 12 + 1)
+        return t.replace(year=t.year + 1)
+
+    start = floor(window.start)
+    end = floor(window.end)
+    if end < window.end:
+        end = step(end)
+    return TimeWindow(start, end)
+
+
+def partitions_in(cfg, window: TimeWindow) -> list[str]:
+    """Labels of every partition a (snapped) window covers."""
+    from meteopack.core.store.points import partition_label_of
+
+    keys = set(cfg.store.partition_by)
+    out, t = [], window.start
+    while t < window.end:
+        out.append(partition_label_of(cfg, t))
+        if "hour" in keys:
+            t += timedelta(hours=1)
+        elif keys & {"day", "date"}:
+            t += timedelta(days=1)
+        elif "month" in keys:
+            t = t.replace(year=t.year + (t.month == 12), month=t.month % 12 + 1)
+        else:
+            t = t.replace(year=t.year + 1)
+    return out
+
+
+def _pack_in_parts(ctx: Context, found: list[Path]) -> int:
+    """Pack a points store from parts of its raw files, writing as it goes.
+
+    For sources whose raw files are too big to be a unit of work (`pack_parts`:
+    WOW-NL's yearly zips, parsed a UTC day at a time across all of them).
+    Parsing and partition writing run in one pool (`packing.run_pipeline`), so
+    a month is written as soon as its last day is parsed.
+
+    `--window` is honoured here, unlike in the per-file points pack: the
+    window is snapped outwards to whole partitions, only those are rebuilt and
+    every other partition is left alone, which is what makes "re-pack one
+    year" safe. A windowed pack into a store built from a different config is
+    refused, because it would leave two configs in one store.
+    """
+    import tempfile
+
+    from meteopack.core.store import manifest, points
+    from meteopack.jobs import packing
+
+    cfg = ctx.cfg
+    store = points.store_path(ctx.root, cfg.store_id)
+    window = allowed = None
+    if ctx.args.window:
+        if not points.time_partitioned(cfg):
+            print(f"error: {cfg.store_id} is partitioned by {cfg.store.partition_by}, not by "
+                  f"time alone, so a window cannot name whole partitions; pack without --window")
+            return 2
+        window = snap_window(cfg, ctx.window)
+        allowed = set(partitions_in(cfg, window))
+        if (store / manifest.MANIFEST_NAME).exists() and manifest.is_stale(store, cfg):
+            print(f"error: {store} was built from a different config; re-packing only "
+                  f"{window.start:%Y-%m-%d}..{window.end:%Y-%m-%d} would leave two configs in "
+                  f"one store. Pack without --window (or bump the version).")
+            return 2
+        print(f"window snapped to whole partitions: {window.start:%Y-%m-%dT%H:%M} .. "
+              f"{window.end:%Y-%m-%dT%H:%M} ({len(allowed)} partition(s); all others are left "
+              f"untouched)")
+
+    parts = ctx.src.pack_parts(found, cfg, window)
+    if ctx.args.limit:
+        parts = parts[: ctx.args.limit]
+    if not parts:
+        print(f"no parts of the {len(found)} raw file(s) fall in the window")
+        return 1
+    workers = ctx.args.workers or len(os.sched_getaffinity(0))
+    labels = sorted({label for _, _, label in parts})
+    print(f"packing {len(parts)} part(s) of {len(found)} raw file(s) into {len(labels)} "
+          f"partition(s) with {workers} worker(s)")
+    if ctx.args.dry_run:
+        return 0
+    if ctx.args.limit and allowed is None:
+        # A capped full pack would rewrite its last partition half-built.
+        allowed = set(labels)
+
+    # The pipeline only ever holds the months in flight (a zstd month of 2025
+    # is 0.45 GB), so node-local disk with a few GB free is enough - cn114's
+    # /scratch had 18 GB, below the two-phase pack's 20 GB floor. A RAM spill
+    # ($METEOPACK_SPILL=/dev/shm/...) is counted against the memory budget,
+    # but beware: this cluster deletes everything a user owns in /dev/shm
+    # ~10 s after any job of theirs on that node ends (docs/runbooks/cluster.md).
+    # `extra.spill: memory` (the default here) passes each part's rows back
+    # through the pool's pipe as compressed IPC bytes; the parent holds them
+    # only until their partition is written. Measured on the full WOW-NL
+    # archive (2026-11-06): with the spill on the NFS data root (cn117's
+    # /scratch had 2.6 GB free) the pack moved ~160 MB/s of which ~60 was its
+    # own spill, flushed at every close and read straight back, and was on
+    # course for ~35 minutes.
+    inline = str(cfg.extra.get("spill", "memory")) == "memory"
+    if inline:
+        spill, in_memory = None, True
+    else:
+        spill = Path(tempfile.mkdtemp(prefix="pack-", dir=_spill_root(
+            ctx.root, ram_ok=True, min_free=_MIN_PIPELINE_SPILL_BYTES)))
+        in_memory = _filesystem_type(spill) in _MEMORY_FS
+    compression = str(cfg.extra.get("spill_compression", "lz4"))
+    tasks = [packing.PackTask(source=cfg.source, product=cfg.product, raw_path=paths[0],
+                              also=tuple(paths[1:]), root=str(ctx.root),
+                              configs=ctx.args.configs, spill=str(spill) if spill else None,
+                              spill_inline=inline, part=key,
+                              partitions=(label,), spill_compression=compression)
+             for key, paths, label in parts]
+
+    def make_partition(label: str, files: tuple[str, ...], n_bytes: int):
+        return packing.PartitionTask(label=label, files=files, source=cfg.source,
+                                     product=cfg.product, root=str(ctx.root),
+                                     configs=ctx.args.configs, n_bytes=n_bytes)
+
+    factor = float(cfg.extra.get("partition_rss_factor", packing.PARTITION_RSS_FACTOR))
+    limit = packing.memory_limit_bytes()
+    print(f"  spill {spill or 'in memory, through the pool'} "
+          f"({'RAM' if in_memory else 'disk'}, {compression}); memory limit "
+          f"{(limit or 0) / 2**30:.0f} GiB; partition writers sized at {factor:g}x their rows")
+    try:
+        result = packing.run_pipeline(tasks, workers=workers, make_partition=make_partition,
+                                      allowed=allowed, limit=limit, factor=factor,
+                                      spill_in_memory=in_memory,
+                                      allow_partial=ctx.args.allow_partial,
+                                      write_workers=int(cfg.extra.get("write_workers", 3)),
+                                      write_threads=int(cfg.extra.get("write_threads", 8)),
+                                      max_spill=float(cfg.extra.get("max_spill_gib", 6))
+                                      * 2**30 if inline else None)
+    finally:
+        if spill is not None:
+            shutil.rmtree(spill, ignore_errors=True)
+
+    st = result.stats
+    rows = sum(int(r["rows"]) for r in result.written)
+    print(f"wrote {len(result.written)} partition(s), {rows:,} rows, in {st['wall_s']:.0f} s "
+          f"(parsing done at {st['parse_last_end_s']:.0f} s; parse busy {st['parse_busy_s']:.0f} "
+          f"s, write busy {st['write_busy_s']:.0f} s over {workers} workers; up to "
+          f"{st['max_writers']} writer(s) at once; spill peak "
+          f"{st['max_spill_bytes'] / 2**30:.1f} GiB; worker peak "
+          f"{max(st['max_parse_worker_rss_mib'], st['max_write_worker_rss_mib']) / 1024:.1f} GiB"
+          + (f"; job peak {st['job_memory_peak_bytes'] / 2**30:.1f} GiB"
+             if st.get("job_memory_peak_bytes") else "") + ")")
+    for label, why in sorted(result.skipped.items()):
+        if why != "no rows":
+            print(f"  {label}: {why}")
+    errors = list(result.errors)
+
+    summary: dict = {}
+    finish = getattr(ctx.src, "finish_pack", None)
+    if callable(finish):
+        summary = finish(ctx.root, cfg, result=result, window=window, files=found,
+                         timing={"cli_started": ctx.started}) or {}
+        for line in summary.get("notes") or ():
+            print(f"  {line}")
+        errors += [{"path": str(store), "error": e} for e in summary.get("errors") or ()]
+
+    if any(why.startswith("write failed") for why in result.skipped.values()):
+        stale = store / manifest.MANIFEST_NAME
+        if stale.exists():
+            stale.unlink()
+        print("error: a partition failed to write; the manifest was withdrawn and the store "
+              "must be packed again")
+        for e in errors[:20]:
+            print(f"  {e.get('path')}: {e['error']}")
+        return 1
+
+    n_records = int(summary.get("n_records", rows))
+    points.write_schema(cfg, ctx.root)
+    _publish_store(ctx, store, n_records)
+    for e in errors[:20]:
+        print(f"  ERROR {e.get('part') or Path(str(e.get('path'))).name}: {e['error']}")
+    if len(errors) > 20:
+        print(f"  ... and {len(errors) - 20} more")
+    return 1 if errors else 0
+
+
+def _publish_store(ctx: Context, store: Path, n_records: int) -> None:
+    """Manifest, README and catalog entry: what every finished pack leaves behind."""
+    from meteopack.core import readme
+    from meteopack.core.store import manifest
+
+    manifest.write(store, manifest.Manifest.new(
+        ctx.cfg.store_id, "packed", ctx.cfg.store.kind, ctx.cfg, n_records=n_records))
+    readme.store_readme(ctx.cfg, store, None)
+    ctx.catalog.record_store(store_id=ctx.cfg.store_id, layer="packed",
+                             kind=ctx.cfg.store.kind, path=str(store), version=ctx.cfg.version,
+                             n_records=n_records, config_hash=manifest.config_hash(ctx.cfg))
+    ctx.catalog.flush()
+
+
 def stage_pack(ctx: Context) -> int:
     from meteopack.core import readme
     from meteopack.core.store import manifest
@@ -1038,6 +1300,8 @@ def stage_pack(ctx: Context) -> int:
     if not found:
         print(f"no raw files under {ctx.raw_root}; run `meteopack fetch {ctx.cfg.source}` first")
         return 1
+    if ctx.cfg.store.kind == "points" and callable(getattr(ctx.src, "pack_parts", None)):
+        return _pack_in_parts(ctx, found)
     files, undated = _files_for_window(ctx, found)
     if not files:
         print(f"none of the {len(found)} raw file(s) under {ctx.raw_root} fall in the window")
@@ -1471,6 +1735,15 @@ def stage_validate(ctx: Context) -> int:
     from meteopack.core.validate import validate
 
     report = validate(ctx.cfg, ctx.root)
+    # What only the source knows how to check - for WOW-NL, that every hour of
+    # the archive is accounted for and no report is stored twice. Optional,
+    # like scan(); it adds checks and stats to the same report.
+    extra = getattr(ctx.src, "validate_store", None)
+    if callable(extra) and report.checks and report.checks[0].ok:
+        try:
+            extra(ctx.cfg, ctx.root, report, raw_root=ctx.raw_root)
+        except Exception as exc:  # noqa: BLE001 - an unreadable store is the finding
+            report.add("source checks ran", False, f"{type(exc).__name__}: {exc}")
     print(report.text())
     return 0 if report.ok else 1
 
