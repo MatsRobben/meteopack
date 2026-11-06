@@ -284,3 +284,177 @@ store. Months are computed independently but read a margin of input on either
 side (at least one step, every tolerance and gap, and two days when rain is
 derived), so the result equals a single pass over the whole archive - a test
 checks exactly that.
+
+## Quality-control flags (`derive`, kind: qc) - `packed/wow_nl/qc/v1`
+
+`meteopack derive wow_nl_qc` judges every WOW-NL report and writes the
+verdicts to a store of their own, **row for row aligned with level 1**: the
+same `year=/month=` partitions, the same rows in the same order. Level 1 is
+never changed and nothing is dropped - a test that fires sets a bit. The
+tests are **reference-free**: only the station's own series and other WOW
+stations are used (no KNMI AWS, radar or model data, which are model inputs
+and targets).
+
+```
+packed/wow_nl/qc/v1/
+├── observations/year=2024/month=06/data.parquet   one row per level-1 row, same order
+├── reliability/year=.../month=.../data.parquet    station-month x variable table
+├── reliability.parquet, stats.parquet             all months (stats: counts per bit)
+├── station_months.parquet, neighbours.parquet     positions and neighbour pairs, built once
+├── runs/year=.../month=...json                    per-month timings
+├── qc.json                                        every parameter, its hash, the bit tables
+└── manifest.json, README.md
+```
+
+### Reading flags with the reports
+
+```python
+import polars as pl
+from meteopack.derive import qc
+
+june = qc.read_month(root, 2024, 6)            # level 1 + flags side by side, alignment checked
+good_t = june.filter(pl.col("air_temperature_qc_level") >= 3)["air_temperature"]
+```
+
+or join yourself: the files have the same row order (`l1_row` is the row's
+position in its level-1 month file), so
+`pl.concat([l1, flags.drop("station_id", "time")], how="horizontal")` is the
+join. `(station_id, time)` is unique except for 5,694 reports (2,847 pairs,
+mostly Jan-May 2019) that a station sent twice at the same instant with two
+WOW `Id`s; the second of each pair carries `near_duplicate`. A regularise derive can use the flags
+directly: `stages: [{kind: qc_mask, min_level: 3}]` nulls every variable whose
+level is below 3 before binning.
+
+### Columns
+
+Per variable (`air_temperature`, `dew_point_temperature`, `relative_humidity`,
+`air_pressure_at_sea_level`, `air_pressure`, `wind_speed`, `wind_speed_of_gust`,
+`wind_from_direction`, `rainfall_rate`, `rainfall_counter`):
+
+* `<var>_qc_fail` (uint32) - one bit per test the value **failed**;
+* `<var>_qc_ne` (uint32) - one bit per test that **could not be evaluated**
+  (too few neighbours or data), with the same bit number as the test, plus
+  `censored_low` (30) and `isolated` (31);
+* `<var>_qc_level` (uint8) - summary by a configurable rule: 0 no value,
+  1 bad, 2 suspect, 3 not spatially confirmed, 4 good.
+
+Per report: `qc_report` (uint32), `rainfall_increment` (the robust-rule
+counter increment the rain tests judge, mm), `l1_row`, `qc_config_hash`.
+
+| fail bit | name | test (default) |
+|---|---|---|
+| 0 | `range` | outside the climatological range (T -28..42 degC, MSLP 940..1065 hPa, wind 0..35 m/s ...) |
+| 1 | `extreme` | physically impossible (T -50..50, wind > 75 m/s ...) - flagged, never capped |
+| 2 | `sentinel` | placeholder values: 0 degF (-17.78 degC) for T/Td, RH 0, p 0 |
+| 3 | `spike` | up/down from both neighbouring reports by > threshold within 20 min (T 3 K) |
+| 4 | `step` | change > threshold within 10 min (T 5 K, wind 13.88 m/s - Chen 2021) |
+| 5 | `stuck` | one identical (non-zero for wind/rate) value for >= T 4 h (Cornes 2020), wind 160 min (Chen) ... |
+| 6 | `stuck_zero` | zeros for >= 2 days (wind, gust, direction; Chen) |
+| 7 | `td_gt_t` | dew point > T + 0.5 K |
+| 8 | `td_mismatch` | dew point differs > 2 K from Magnus(T, RH) |
+| 9 | `stale_repeat` | the first report after a > 1 h gap repeats the previous record exactly |
+| 10 | `network_z` | CrowdQC+ m2: robust z against all stations in the 5-min bin (T: z < -2.33 or > 1.64) |
+| 11 | `month_fraction` | CrowdQC+ m3: > 20 % of the station-month failed m2 |
+| 12 | `month_corr` | CrowdQC+ m4: station-month r with the network median < 0.9 (T, MSLP), 0.8 (Td, RH), 0.5 (wind) |
+| 13 | `buddy` | robust z against the median of up to 20 neighbours within 10 km (>= 5); T: warm > 2, cold < -2.83 |
+| 14 | `sct` | titanlib SCT (T): pos 4 / neg 8, eps2 0.5, hourly snapshots; a report gets the nearest snapshot's verdict |
+| 15-18 | `rain_transient`, `rain_spike`, `rain_reset_off_midnight`, `rain_huge_increment` | counter anomalies from the robust rule; increment > 20 mm in <= 10 min |
+| 19-21 | `rain_faulty_zero`, `rain_high_influx`, `rain_station_outlier` | PWSQC FZ / HI / SO on 5-min amounts, 10 km, >= 5 neighbours |
+
+`qc_report` bits: 0 `near_duplicate` (< 30 s after the previous report),
+1 `position_jump` (> 1 km from the station-month position), 2 `dup_coords`
+(CrowdQC+ m1), 3 `capped_hour` (hour file at the 10,000-record page cap),
+4 `local_time_inconsistent`, 5 `no_position`. Bits 3 and 4 are metadata only
+and never lower a level.
+
+The default level rule (`levels` in the config): **1 bad** if any of bits
+0-9 or 15-18 is set; **2 suspect** if any network test (10-14, 19-21) failed
+or the report has `position_jump`, `dup_coords` or `no_position`; **3 not
+spatially confirmed** if a network test could not be run, the station is
+isolated, or the value is a censored zero; **4 good** otherwise.
+
+### How the network tests work
+
+The reference field is every station's last usable value per 5-min bin
+(bins `(T-5min, T]`), carried forward 10 min so 10-min reporters are in every
+bin; values failing a within-station test are not part of it. Each report is
+compared with the statistics of its own bin, so the flags are per report even
+though the field is regular. Neighbours are stations active in the same
+month within the radius, nearest first, from `neighbours.parquet` (rebuilt
+only when level 1's station segments or the radii change). An isolated
+station (< 5 others with the variable within 15 km, TITAN) gets the
+`isolated` bit and the not-evaluable bits of the spatial tests, never a
+failure. Heights are not used (`network.use_height: false`): WOW heights are
+0 for 99 % of 2015 site-years and unreliable after.
+
+Rain: the counter's robust increments (`rain_counter.py`'s rule) are spread
+at a constant rate over the 5-min bins they cover (de Vos 2017; intervals
+over 20 min are not spread), then PWSQC's filters run on that matrix exactly
+as in its R code (FZ, HI), with SO evaluated once per hour over a 14-day
+window that grows back to 28 days to find 100 wet intervals. Bins carry
+PWSQC's three states; a report fails if any bin it touched failed, and is
+not evaluable if none failed but one was -1 (or it touched none).
+
+Deviations from the published methods, all deliberate: MAD instead of Qn as
+the robust scale; buddy radius 10 km instead of CrowdQC+'s 3 km (at WOW's
+density most stations would have fewer than 5 buddies); CrowdQC+'s m3 code
+flags a month when *fewer than 20 % pass* m2 (including missing values), its
+paper and Napoly 2018 say *more than 20 % fail* - the latter is implemented;
+SCT on hourly snapshots (TITAN's operational cadence) rather than every
+5 min; SO hourly rather than every 5 min. Every threshold is a parameter in
+`configs/derive/wow_nl_qc.yaml`, cited there.
+
+### Re-running with other settings
+
+```bash
+meteopack derive wow_nl_qc                                    # all months
+meteopack derive wow_nl_qc --window 2024/2024                 # some months; the rest stay
+meteopack derive wow_nl_qc --set variables.air_temperature.buddy.pos=2.5 --set name=wow_nl/qc_t25
+```
+
+A run with other parameters refuses to write into an existing store (new
+`name`, or `--refresh`). Windowed runs can go in parallel (one Slurm job per
+few years): each month writes its own files and every run rebuilds the
+store-wide tables from what is on disk. `write_scores: true` also writes the
+z-scores behind m2 and the buddy check, for tuning thresholds without
+re-running.
+
+### The reliability table
+
+`reliability.parquet`: one row per station-month and variable - number of
+values, share of values with each fail and not-evaluable bit and at each
+level, r with the network median (m4), number of neighbours, the inferred
+native unit (the coarsest lattice holding >= 90 % of the non-zero values, e.g.
+`0.1 degF`, `0.01 inHg`, `1 mph`) and the modal step between values
+(quantum), position stability (`n_positions`, share of position jumps),
+`dup_coords`, shares of capped-hour and local-time-inconsistent reports, and a
+`trust_tier`: 1 official, 2 private with >= 90 % of its T/RH/MSLP values at
+level >= 3, 3 otherwise.
+
+### What it flags (full archive, built 2026-11-06)
+
+581,564,223 reports, 126 months, parameters hash `3a432451b3403deb`. Share
+of private values failing at least one test / at level 4 (good): T 15.6 % /
+48 %, RH 17.7 % / 47 %, Td 5.7 % / 51 %, MSLP 14.3 % / 30 % (station offsets:
+m2 10.2 %, buddy 6.1 %), wind 11.1 % / 57 %, rain counter 4.9 % / 43 % (FZ
+2.7 %, SO 2.3 %). The largest single T flags are CrowdQC+'s m2 (6.5 %, by
+design at least ~6 % of a normal distribution) and m3 (5.3 %). 41 % of
+private T values could not be buddy-checked (fewer than 5 neighbours with a
+value in the bin) and 13 % come from isolated stations. Per test, year and
+network: `stats.parquet`; summarised by `wow_nl_analysis/scripts/qc_eval.py`
+(out/qc_eval/rates_*.csv).
+
+Checked against KNMI AWS (evaluation only; private WOW stations within 2 km,
+27 stations, one mirror of the AWS excluded): T unflagged MAE 0.56 K, level 1
+3.7 K, buddy-flagged 3.2 K (74 % off by > 2 K), SCT-flagged 1.5 K (27 %), m2
+0.80 K (9.5 %); m3/m4-flagged T is *not* worse than unflagged there (0.49 /
+0.56 K) and RH's m4 only slightly (5.2 vs 3.7 % MAE) - those month tests are
+the ones to tune first. MSLP flags pick out offsets (flagged MAE 11 hPa,
+unflagged 0.6). Rain per station-hour: FZ-flagged hours missed 89 % of the
+KNMI-wet hours (unflagged 10 %), r with KNMI 0.85 unflagged vs 0.47 for SO
+and 0.08 for FZ. With errors injected into June 2023 (Alerskans 2022 style):
+single T errors of +-4 K and +-8 K, sentinels, a 6-h stuck sensor, wind
+zeroed for 3 days and counter spikes are caught 98-100 %; a 6-h +4 K offset
+93 %, +2 K 70 % (SCT 57 %); single +-2 K 60 % / 32 %; MSLP +5 hPa for a day
+52 %; RH -20 % for 6 h 59 %; a frozen counter on a wet day only 16 % (FZ
+needs a wet neighbour *median* for half an hour at 5 min).

@@ -24,6 +24,7 @@ it); storage, scheduling, validation and bookkeeping are shared.
 | `ea/rainfall_15min` | England & Wales rain gauges, 15 min, 2012- | **re-fetched, packed and validated** (2026-11-06): 490 M rows, 993 reporting gauges (995 with metadata), every gauge-year 1 Jan - 31 Dec, to 2026-11-06 |
 | `eumetsat_seviri/msg15_rss` | MSG SEVIRI rapid scan | works; resampled onto the radar grid, 4 of 11 channels |
 | `wow_nl/reports` | WOW-NL citizen weather reports, every report and field as uploaded, **irregular** in time, 2015-2025 | **packed and validated** (2026-11-06): see [docs/stores.md](docs/stores.md#irregular-stores-wow-nl) |
+| `wow_nl/qc` | WOW-NL quality-control flags, aligned row for row with `wow_nl/reports`: per variable a fail and a not-evaluable bitmask and a level, per report provenance bits, a station-month reliability table; reference-free (within-station and between-WOW-station tests) | **derived** (2026-11-06): 581.6 M reports in 11-22 min as four 12-CPU jobs; `meteopack derive wow_nl_qc`, see [docs/stores.md](docs/stores.md#quality-control-flags-derive-kind-qc---packedwow_nlqcv1) |
 | `training/wow_nl_10min`, `wow_nl_5min` | WOW-NL regularised per station: last/mean/max per bin, rain from the counter | **derived** (2026-11-06); every choice is a parameter (`meteopack derive wow_nl_10min --set ...`) |
 
 On the ICIS/DAS cluster every store above lives under
@@ -89,6 +90,10 @@ uv run meteopack pack wow_nl --window 2024/2024    # rebuild one year; other mon
 uv run meteopack validate wow_nl
 uv run meteopack derive wow_nl_10min               # regular 10-minute grid per station
 uv run meteopack derive wow_nl_10min --set step_seconds=300 --set name=wow_nl_5min_try
+uv sync --extra qc                                 # titanlib, for the spatial consistency test
+uv run meteopack derive wow_nl_qc                  # QC flags for every report (packed/wow_nl/qc/v1)
+uv run meteopack derive wow_nl_qc --window 2024/2024 --set variables.air_temperature.buddy.pos=2.5 \
+    --set name=wow_nl/qc_try                       # any threshold, into a new store
 ```
 With `--limit` on a network that reports several variables in separate files
 (DWD), `validate` will say the variables you did not fetch are missing - it
@@ -151,7 +156,7 @@ flowchart LR
 | `parse` | parses raw files and reports what they hold | nothing |
 | `pack` | parses and writes the store | `packed/` |
 | `validate` | asks whether the store is *usable*, not merely present | nothing |
-| `derive` | builds training bricks, station matrices and splits; regularises irregular stores | `training/` |
+| `derive` | builds training bricks, station matrices and splits; regularises irregular stores; QC flags for WOW-NL | `training/` (QC: `packed/wow_nl/qc`) |
 | `catalog <source>` | what is fetched and packed for a source; `--gaps`: what is missing and why | nothing |
 | `credentials` | which keys this machine has, and which are missing | nothing |
 
