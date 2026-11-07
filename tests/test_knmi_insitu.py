@@ -31,7 +31,7 @@ import yaml
 from meteopack.core import http
 from meteopack.core.config import ProductConfig, SourceConfig, StoreConfig, Variable
 from meteopack.sources.base import RawFile, Source, TimeWindow, Unit
-from meteopack.sources.knmi_insitu import (
+from meteopack.sources.stations.knmi_insitu import (
     STRUCTURAL,
     KnmiInsitu,
     SchemaDriftError,
@@ -43,8 +43,8 @@ from meteopack.sources.knmi_insitu import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "knmi_insitu.yaml"
-PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "knmi_insitu" / "obs_10min.yaml"
+SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "stations" / "knmi_insitu.yaml"
+PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "knmi_insitu" / "obs_10min.yaml"
 
 #: The real archive. Every test that reads it is skipped when it is absent.
 REAL_ARCHIVE = Path(

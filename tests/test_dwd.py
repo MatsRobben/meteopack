@@ -20,7 +20,7 @@ import yaml
 
 from meteopack.core.config import ProductConfig, SourceConfig, Variable
 from meteopack.sources.base import RawFile, Source, TimeWindow, Unit
-from meteopack.sources.dwd import (
+from meteopack.sources.stations.dwd import (
     GROUPS_BY_KEY,
     DwdStations,
     SchemaDriftError,
@@ -32,8 +32,8 @@ from meteopack.sources.dwd import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "dwd.yaml"
-PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "dwd" / "stations_10min.yaml"
+SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "stations" / "dwd.yaml"
+PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "dwd" / "stations_10min.yaml"
 
 
 # --------------------------------------------------------------------- fixtures
@@ -546,7 +546,7 @@ def test_fingerprint_moves_when_a_column_is_added_or_renamed():
 
 
 def test_pinned_fingerprints_match_the_live_schema_captured_in_the_fixtures():
-    # These are the values written into configs/products/dwd/stations_10min.yaml.
+    # These are the values written into configs/products/stations/dwd/stations_10min.yaml.
     assert schema_fingerprint(
         PRODUKT_TU.split(b"\r\n")[0].decode("latin-1").split(";")
     ) == "267791e758f02936"

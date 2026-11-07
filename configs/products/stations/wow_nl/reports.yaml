@@ -3,7 +3,7 @@
 # Loads into meteopack.core.config.ProductConfig. This is a LOSSLESS level-1
 # store: one row per report, every field WOW sent kept with its exact value,
 # no gap filling, no QC, no rain rule. Everything that is a choice lives in a
-# derive step (configs/derive/wow_nl_*.yaml).
+# derive step (configs/derive/stations/wow_nl_*.yaml).
 #
 # Irregular: reports arrive whenever each station sends them (seconds to
 # hours apart, at any phase), so there is no cadence and no time axis. Regular

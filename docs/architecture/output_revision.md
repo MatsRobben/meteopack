@@ -123,7 +123,7 @@ Not everything should be copied back.
 A store directory also stops being a zarr group:
 
 ```
-packed/<source>/<product>/v<n>/
+packed/<category>/<source>/<product>/v<n>/
     dataset.zarr/      gridded: the arrays            (or)
     observations/      points: partitioned parquet
     stations/          points: station coordinates

@@ -122,7 +122,7 @@ schema_fingerprint: d09b927ae2711f38
 extra:
   # Where the scene zips live, one directory per day. Overrides the source
   # config's base_url.
-  archive_root: ${METEOPACK_DATA_ROOT}/raw/eumetsat_seviri/msg15_rss
+  archive_root: ${METEOPACK_DATA_ROOT}/raw/satellite/eumetsat_seviri/msg15_rss
 
   # How that root is organised.
   #   year/month/day - the default: <root>/<YYYY>/<MM>/<DD>/<scene>.zip

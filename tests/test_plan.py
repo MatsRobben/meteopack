@@ -178,7 +178,7 @@ def test_splits_warn_when_the_window_cannot_reach_every_split(caplog):
     from meteopack.derive import base, splits
 
     cfg = DeriveConfig(**yaml.safe_load(
-        (CONFIGS / "derive" / "dwd_station_matrix.yaml").read_text()))
+        (CONFIGS / "derive" / "stations" / "dwd_station_matrix.yaml").read_text()))
     short = base.DeriveSpec.from_config(cfg, utc(2026, 10, 1), utc(2026, 10, 31))
     with caplog.at_level(logging.WARNING):
         frame = splits.assign(short)

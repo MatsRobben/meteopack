@@ -27,7 +27,7 @@ import yaml
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, SourceConfig, Variable
 from meteopack.sources.base import RawFile, Source, TimeWindow, Unit
-from meteopack.sources.dmi import (
+from meteopack.sources.stations.dmi import (
     PAGE_LIMIT,
     DmiStations,
     PageOverflowError,
@@ -42,8 +42,8 @@ from meteopack.sources.dmi import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "dmi.yaml"
-PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "dmi" / "stations_10min.yaml"
+SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "stations" / "dmi.yaml"
+PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "dmi" / "stations_10min.yaml"
 
 LOCAL_ARCHIVE = Path(
     "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/dmi/stations_10min"
@@ -787,7 +787,7 @@ def test_the_compact_archive_form_reads_with_the_same_rules(tmp_path, product):
     import polars as pl
 
     from meteopack.sources.base import RawFile
-    from meteopack.sources.dmi import DmiStations
+    from meteopack.sources.stations.dmi import DmiStations
 
     cfg = product
     param = next(v.source_key for v in cfg.variables)
@@ -818,7 +818,7 @@ def test_a_compact_file_outside_its_directory_is_refused(tmp_path, product):
     import pytest
 
     from meteopack.sources.base import RawFile
-    from meteopack.sources.dmi import DmiStations, SchemaDriftError
+    from meteopack.sources.stations.dmi import DmiStations, SchemaDriftError
 
     path = tmp_path / "loose.json"
     path.write_text(json.dumps([["2018-01-01T00:00:00Z", 1.0]]))
@@ -833,7 +833,7 @@ def test_an_unrecognisable_payload_is_still_refused(tmp_path, product):
     import pytest
 
     from meteopack.sources.base import RawFile
-    from meteopack.sources.dmi import DmiStations, SchemaDriftError
+    from meteopack.sources.stations.dmi import DmiStations, SchemaDriftError
 
     path = tmp_path / "06188" / "wind_speed" / "2018.json"
     path.parent.mkdir(parents=True)
@@ -851,7 +851,7 @@ def test_scan_does_not_report_the_compact_archive_form_as_drift(tmp_path, produc
 
     from meteopack.cli import _compare_schema
     from meteopack.sources.base import RawFile
-    from meteopack.sources.dmi import DmiStations
+    from meteopack.sources.stations.dmi import DmiStations
 
     param = next(v.source_key for v in product.variables)
     path = tmp_path / "06188" / param / "2018.json"

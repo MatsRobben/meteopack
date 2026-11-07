@@ -62,7 +62,8 @@ _DIMS = (_SAMPLE_DIM, "time", "y", "x")
 def store_path(spec: DeriveSpec, root: str | os.PathLike[str], *, layer: Layer = DEFAULT_LAYER
                ) -> Path:
     """Directory holding the brick, its manifest and its split index."""
-    return layer_path(Path(root), layer, *spec.store_id.split("/"))
+    return layer_path(Path(root), layer, *spec.store_id.split("/"),
+                      category=spec.category)
 
 
 def brick_path(spec: DeriveSpec, root: str | os.PathLike[str], *, layer: Layer = DEFAULT_LAYER

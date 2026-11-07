@@ -25,7 +25,7 @@ it); storage, scheduling, validation and bookkeeping are shared.
 | `eumetsat_seviri/msg15_rss` | MSG SEVIRI rapid scan | works; resampled onto the radar grid, 4 of 11 channels |
 | `wow_nl/reports` | WOW-NL citizen weather reports, every report and field as uploaded, **irregular** in time, 2015-2025 | **packed and validated** (2026-11-06): see [docs/stores.md](docs/stores.md#irregular-stores-wow-nl) |
 | `wow_nl/qc` | WOW-NL quality-control flags, aligned row for row with `wow_nl/reports`: per variable a fail and a not-evaluable bitmask and a level, per report provenance bits, a station-month reliability table; reference-free (within-station and between-WOW-station tests) | **derived** (2026-11-06): 581.6 M reports in 11-22 min as four 12-CPU jobs; `meteopack derive wow_nl_qc`, see [docs/stores.md](docs/stores.md#quality-control-flags-derive-kind-qc---packedwow_nlqcv1) |
-| `training/wow_nl_10min`, `wow_nl_5min` | WOW-NL regularised per station: last/mean/max per bin, rain from the counter | **derived** (2026-11-06); every choice is a parameter (`meteopack derive wow_nl_10min --set ...`) |
+| `training/stations/wow_nl_10min`, `training/stations/wow_nl_5min` | WOW-NL regularised per station: last/mean/max per bin, rain from the counter | **derived** (2026-11-06); every choice is a parameter (`meteopack derive wow_nl_10min --set ...`) |
 
 On the ICIS/DAS cluster every store above lives under
 `/vol/knmimo-nobackup/users/mrobben/meteopack_data/packed/` -
@@ -36,7 +36,7 @@ read them directly, there is no need to rebuild them.
 ```python
 import xarray as xr
 
-ds = xr.open_zarr(".../packed/knmi_radar/rtcor_5min/v1/dataset.zarr", consolidated=False)
+ds = xr.open_zarr(".../packed/radar/knmi_radar/rtcor_5min/v1/dataset.zarr", consolidated=False)
 usable = ~(ds.is_missing_frame | ds.is_corrupt_frame)     # frames with data
 rain = ds.accumulation_mm.sel(time=slice("2024-06-01", "2024-06-02"))
 ```
@@ -72,7 +72,7 @@ rain gauges - each file is one gauge's year:
 ```bash
 uv run meteopack list ea                      # what exists upstream (default: the last 24 h)
 uv run meteopack fetch ea --limit 5           # download 5 files - drop --limit for all of them
-uv run meteopack pack ea                      # build packed/ea/rainfall_15min/v1
+uv run meteopack pack ea                      # build packed/stations/ea/rainfall_15min/v1
 uv run meteopack validate ea                  # is it usable?
 uv run meteopack catalog ea                   # what is fetched and packed
 ```
@@ -83,15 +83,15 @@ The same commands work for `dwd`, `dmi`, `belgium`, `meteofrance` and `midas`.
 yearly zips, linked - never copied - into the raw layer:
 
 ```bash
-mkdir -p $METEOPACK_DATA_ROOT/raw/wow_nl
-ln -s /path/to/wow_nl_raw $METEOPACK_DATA_ROOT/raw/wow_nl/reports    # 2015.zip ... 2025.zip
+mkdir -p $METEOPACK_DATA_ROOT/raw/stations/wow_nl
+ln -s /path/to/wow_nl_raw $METEOPACK_DATA_ROOT/raw/stations/wow_nl/reports    # 2015.zip ... 2025.zip
 uv run meteopack pack wow_nl                       # the whole archive: 15-17 min on 48 CPUs
 uv run meteopack pack wow_nl --window 2024/2024    # rebuild one year; other months untouched
 uv run meteopack validate wow_nl
 uv run meteopack derive wow_nl_10min               # regular 10-minute grid per station
 uv run meteopack derive wow_nl_10min --set step_seconds=300 --set name=wow_nl_5min_try
 uv sync --extra qc                                 # titanlib, for the spatial consistency test
-uv run meteopack derive wow_nl_qc                  # QC flags for every report (packed/wow_nl/qc/v1)
+uv run meteopack derive wow_nl_qc                  # QC flags for every report (packed/stations/wow_nl/qc/v1)
 uv run meteopack derive wow_nl_qc --window 2024/2024 --set variables.air_temperature.buddy.pos=2.5 \
     --set name=wow_nl/qc_try                       # any threshold, into a new store
 ```
@@ -107,8 +107,8 @@ because `fetch` copies the tars when the archive is on another filesystem:
 export KNMI_RADAR_ARCHIVE=/path/to/nl_rdr_data_rtcor_5m_tar        # one per product:
 export KNMI_ECHOTOP_ARCHIVE=/path/to/radar_tar_echotopheight_5min   # *_ECHOTOP_*, *_REFL_*
 export KNMI_REFL_ARCHIVE=/path/to/radar_tar_refl_composites
-mkdir -p $METEOPACK_DATA_ROOT/raw/knmi_radar
-ln -s $KNMI_RADAR_ARCHIVE $METEOPACK_DATA_ROOT/raw/knmi_radar/rtcor_5min
+mkdir -p $METEOPACK_DATA_ROOT/raw/radar/knmi_radar
+ln -s $KNMI_RADAR_ARCHIVE $METEOPACK_DATA_ROOT/raw/radar/knmi_radar/rtcor_5min
 
 uv run meteopack pack knmi_radar --product rtcor_5min --window 2024-06-01/2024-06-08
 uv run meteopack validate knmi_radar --product rtcor_5min
@@ -131,11 +131,14 @@ seven days); a bare year or year-month is the whole period, both ends included
 
 ```
 $METEOPACK_DATA_ROOT/
-├── raw/<source>/<product>/        exactly what upstream sent; never modified
-├── packed/<source>/<product>/vN/  one analysis-ready store per product - read this
-├── training/<dataset>/vN/         datasets built from packed/ for model training
+├── raw/<category>/<source>/<product>/       exactly what upstream sent; never modified
+├── packed/<category>/<source>/<product>/vN/ one analysis-ready store per product - read this
+├── training/<category>/<dataset>/vN/        datasets built from packed/ for model training
 └── _bookkeeping/                  what was downloaded, built, and what failed
 ```
+
+Current categories are `stations`, `radar`, and `satellite`. Supporting
+`static_maps/` data remains separate.
 
 Each directory has a README of its own. Nothing is edited in place: every
 stage writes whole files and moves them into position, so a reader never sees
@@ -156,7 +159,7 @@ flowchart LR
 | `parse` | parses raw files and reports what they hold | nothing |
 | `pack` | parses and writes the store | `packed/` |
 | `validate` | asks whether the store is *usable*, not merely present | nothing |
-| `derive` | builds training bricks, station matrices and splits; regularises irregular stores; QC flags for WOW-NL | `training/` (QC: `packed/wow_nl/qc`) |
+| `derive` | builds training bricks, station matrices and splits; regularises irregular stores; QC flags for WOW-NL | `training/` (QC: `packed/stations/wow_nl/qc`) |
 | `catalog <source>` | what is fetched and packed for a source; `--gaps`: what is missing and why | nothing |
 | `credentials` | which keys this machine has, and which are missing | nothing |
 
@@ -216,9 +219,9 @@ Every decision is data, not code:
 
 ```
 configs/
-├── sources/<source>.yaml            endpoints, rate limits, credential locations
-├── products/<source>/<product>.yaml variables, units, encoding, cadence, pinned layouts
-├── derive/<dataset>.yaml            inputs, target grid, tile, shards
+├── sources/<category>/<source>.yaml            endpoints, rate limits, credential locations
+├── products/<category>/<source>/<product>.yaml  variables, units, encoding, cadence, pinned layouts
+├── derive/<category>/<dataset>.yaml             inputs, target grid, tile, shards
 └── grids.yaml                       named grids
 ```
 
@@ -239,9 +242,9 @@ class Source(Protocol):
     def parse(self, raw, cfg) -> pl.DataFrame | xr.Dataset: ...  # canonical names and units
 ```
 
-1. `src/meteopack/sources/<name>.py` implementing it (`dwd.py` is a good model).
-2. `configs/sources/<name>.yaml` and `configs/products/<name>/<product>.yaml`.
-3. Register it in `sources/registry.py`.
+1. `src/meteopack/sources/<category>/<name>.py` implementing it (`stations/dwd.py` is a good model).
+2. `configs/sources/<category>/<name>.yaml` and `configs/products/<category>/<name>/<product>.yaml`.
+3. Add its category in `core/config.py` and register it in `sources/registry.py`.
 
 Rate limiting, retries, atomic writes, the ledger, partitioned and gridded
 stores, validation and the README in each store come with it.

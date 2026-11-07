@@ -226,7 +226,8 @@ def assign(
 
 def store_path(spec: DeriveSpec, root: str | os.PathLike[str], *,
                layer: Layer = "training") -> Path:
-    return layer_path(Path(root), layer, *spec.store_id.split("/"))
+    return layer_path(Path(root), layer, *spec.store_id.split("/"),
+                      category=spec.category)
 
 
 def path_for(spec: DeriveSpec, root: str | os.PathLike[str], *,

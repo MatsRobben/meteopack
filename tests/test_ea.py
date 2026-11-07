@@ -29,7 +29,7 @@ import yaml
 from meteopack.core import http
 from meteopack.core.config import ProductConfig, SourceConfig, StoreConfig, Variable
 from meteopack.sources.base import RawFile, Source, TimeWindow, Unit
-from meteopack.sources.ea import (
+from meteopack.sources.stations.ea import (
     CSV_ROW_CAP,
     PERIOD_SECONDS,
     EaRainfall,
@@ -43,8 +43,8 @@ from meteopack.sources.ea import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "ea.yaml"
-PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "ea" / "rainfall_15min.yaml"
+SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "stations" / "ea.yaml"
+PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "ea" / "rainfall_15min.yaml"
 
 LOCAL_ARCHIVE = Path("/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/ea/rainfall_15min")
 

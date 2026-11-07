@@ -161,7 +161,9 @@ class Context:
 
     @property
     def raw_root(self) -> Path:
-        return self.root / "raw" / self.cfg.source / self.cfg.product
+        from meteopack.core.config import layer_path
+
+        return layer_path(self.root, "raw", self.cfg.source, self.cfg.product)
 
     #: Files that sit in a raw directory without being data. `.part` is our own
     #: half-written download; `station_catalog.json` is a sidecar the previous
@@ -1907,7 +1909,7 @@ def _derive_kind(cfg, root: Path) -> str:
             return "bricks"
     raise SystemExit(
         f"cannot tell what to build for {cfg.name}: none of its inputs "
-        f"({', '.join(cfg.inputs)}) is a packed store under {root / 'canonical'}. "
+        f"({', '.join(cfg.inputs)}) is a packed store under {root / 'packed'}. "
         f"Pack the input first, or set `kind:` in the derive config."
     )
 
@@ -1918,10 +1920,19 @@ def stage_derive(ctx_args: argparse.Namespace) -> int:
     from meteopack.core.store import manifest as manifest_mod
     from meteopack.jobs.plan import config_dir, load_yaml
 
-    path = config_dir(ctx_args.configs) / "derive" / f"{ctx_args.target}.yaml"
-    if not path.exists():
-        print(f"no derive config: {path}")
+    derive_root = config_dir(ctx_args.configs) / "derive"
+    paths = []
+    if derive_root.is_dir():
+        paths = sorted(p for category_dir in derive_root.iterdir() if category_dir.is_dir()
+                       for p in [category_dir / f"{ctx_args.target}.yaml"] if p.is_file())
+    if len(paths) != 1:
+        if not paths:
+            print(f"no derive config under {derive_root} for {ctx_args.target!r}")
+        else:
+            print(f"multiple derive configs named {ctx_args.target!r}: "
+                  + ", ".join(str(p) for p in paths))
         return 1
+    path = paths[0]
 
     raw = load_yaml(path)
     if raw.get("kind") == "regularise":
@@ -2127,7 +2138,7 @@ def _credential_state(name: str, registry) -> tuple[str, str]:
     if name != "midas":
         return "ok", "no local check for this source"
     try:
-        from meteopack.sources import midas
+        from meteopack.sources.stations import midas
     except ImportError as exc:  # pragma: no cover - optional dependency
         return "miss", f"cannot import the midas source: {exc}"
     path = midas.token_file()

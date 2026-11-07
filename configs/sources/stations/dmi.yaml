@@ -5,7 +5,7 @@
 # mention is no longer required and is not sent. One feature per
 # (stationId, parameterId, observed, value), so a tidy frame is built by
 # querying per station x parameter x window and pivoting; see
-# meteopack.sources.dmi.
+# meteopack.sources.stations.dmi.
 #
 # Loads into meteopack.core.config.SourceConfig.
 

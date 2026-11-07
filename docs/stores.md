@@ -1,6 +1,6 @@
 # What is in a store, and how to read it
 
-A store is one product, packed: `packed/<source>/<product>/v<N>/` under the
+A store is one product, packed: `packed/<category>/<source>/<product>/v<N>/` under the
 data root. Everything you need to read it is in the store itself - every store
 directory has a `README.md` generated from its config - so this page is the
 general picture.
@@ -8,7 +8,7 @@ general picture.
 ## Gridded stores (radar, satellite)
 
 ```
-packed/knmi_radar/rtcor_5min/v1/
+packed/radar/knmi_radar/rtcor_5min/v1/
 ├── dataset.zarr/          the data (zarr v3)
 ├── manifest.json          how and when it was built: config hash, code version
 ├── provenance.parquet     one row per raw file that went in
@@ -24,7 +24,7 @@ A time step with no data is still there, flagged (see below).
 ```python
 import xarray as xr
 
-ds = xr.open_zarr("packed/knmi_radar/rtcor_5min/v1/dataset.zarr", consolidated=False)
+ds = xr.open_zarr("packed/radar/knmi_radar/rtcor_5min/v1/dataset.zarr", consolidated=False)
 usable = ~(ds.is_missing_frame | ds.is_corrupt_frame)
 rain = ds.accumulation_mm.sel(time=slice("2024-06-01", "2024-06-02"))
 ```
@@ -96,7 +96,7 @@ was packed from; look it up in `provenance.parquet`:
 
 ```python
 import polars as pl
-prov = pl.read_parquet("packed/knmi_radar/rtcor_5min/v1/provenance.parquet")
+prov = pl.read_parquet("packed/radar/knmi_radar/rtcor_5min/v1/provenance.parquet")
 prov.filter(pl.col("source_record_id") == int(ds.source_record_id.sel(time="2024-06-01T12:00")))
 ```
 
@@ -119,7 +119,7 @@ script that decodes the HDF5 independently of meteopack's own code.
 ## Points stores (station networks)
 
 ```
-packed/dwd/stations_10min/v1/
+packed/stations/dwd/stations_10min/v1/
 ├── observations/year=2024/data.parquet    one file per partition
 ├── stations/                              station metadata (lat, lon, height, name)
 ├── manifest.json
@@ -159,7 +159,7 @@ a separate, slower check.
 
 ## Irregular stores (WOW-NL)
 
-`packed/wow_nl/reports/v1` is a points store with **no cadence**
+`packed/stations/wow_nl/reports/v1` is a points store with **no cadence**
 (`cadence_seconds: null` in its product config): one row per report, at the
 time the station made it, nothing snapped to a grid and nothing dropped for
 being off one. It is the lossless level 1 of the WOW-NL archive - every field
@@ -167,7 +167,7 @@ of every report, exact values, no QC, no gap filling, no rain rule. Regular
 grids are *derived* from it (below), with every choice a parameter.
 
 ```
-packed/wow_nl/reports/v1/
+packed/stations/wow_nl/reports/v1/
 ├── observations/year=2024/month=06/data.parquet   ~7 M reports a month, sorted by (station_id, time)
 ├── hours/year=2024/month=06/data.parquet          one row per zip member, + one per missing hour
 ├── station_segments/year=2024/month=06/...        runs of identical position per site, per month
@@ -225,12 +225,12 @@ reports - one API page - and lost its earliest minutes upstream:
 
 ```python
 import polars as pl
-obs = pl.scan_parquet("packed/wow_nl/reports/v1/observations/**/*.parquet",
+obs = pl.scan_parquet("packed/stations/wow_nl/reports/v1/observations/**/*.parquet",
                       hive_partitioning=False)
 june = (obs.filter(pl.col("time").is_between(pl.datetime(2024, 6, 1), pl.datetime(2024, 7, 1),
                                              closed="left"))
            .select("station_id", "time", "air_temperature", "rainfall_counter").collect())
-hours = pl.read_parquet("packed/wow_nl/reports/v1/hours/**/*.parquet", hive_partitioning=False)
+hours = pl.read_parquet("packed/stations/wow_nl/reports/v1/hours/**/*.parquet", hive_partitioning=False)
 ```
 
 `points.read("wow_nl/reports/v1", root, time_range=..., columns=[...])` works
@@ -250,7 +250,7 @@ pack into a store built from a different config is refused.
 
 `meteopack derive wow_nl_10min` turns the reports into one row per
 (station, bin) on a regular grid. Everything is a parameter in
-`configs/derive/wow_nl_10min.yaml`, and any of them can be changed for one run:
+`configs/derive/stations/wow_nl_10min.yaml`, and any of them can be changed for one run:
 
 ```bash
 meteopack derive wow_nl_10min                                   # as configured
@@ -277,7 +277,7 @@ lists every parameter, its hash, every output column with its causality, and
 how the run went. A run with different parameters will not mix into an
 existing output of the same name (give it a new `name`, or `--refresh`).
 
-Output: `training/<name>/v<version>/observations/year=Y/month=M/data.parquet`
+Output: `training/<category>/<name>/v<version>/observations/year=Y/month=M/data.parquet`
 (sorted by station, time), the points-store layout, so `points.read` and
 `points.to_matrix` (a dense time x station array) read it like any regular
 store. Months are computed independently but read a margin of input on either
@@ -285,7 +285,7 @@ side (at least one step, every tolerance and gap, and two days when rain is
 derived), so the result equals a single pass over the whole archive - a test
 checks exactly that.
 
-## Quality-control flags (`derive`, kind: qc) - `packed/wow_nl/qc/v1`
+## Quality-control flags (`derive`, kind: qc) - `packed/stations/wow_nl/qc/v1`
 
 `meteopack derive wow_nl_qc` judges every WOW-NL report and writes the
 verdicts to a store of their own, **row for row aligned with level 1**: the
@@ -296,7 +296,7 @@ stations are used (no KNMI AWS, radar or model data, which are model inputs
 and targets).
 
 ```
-packed/wow_nl/qc/v1/
+packed/stations/wow_nl/qc/v1/
 ├── observations/year=2024/month=06/data.parquet   one row per level-1 row, same order
 ├── reliability/year=.../month=.../data.parquet    station-month x variable table
 ├── reliability.parquet, stats.parquet             all months (stats: counts per bit)
@@ -402,7 +402,7 @@ flags a month when *fewer than 20 % pass* m2 (including missing values), its
 paper and Napoly 2018 say *more than 20 % fail* - the latter is implemented;
 SCT on hourly snapshots (TITAN's operational cadence) rather than every
 5 min; SO hourly rather than every 5 min. Every threshold is a parameter in
-`configs/derive/wow_nl_qc.yaml`, cited there.
+`configs/derive/stations/wow_nl_qc.yaml`, cited there.
 
 ### Re-running with other settings
 

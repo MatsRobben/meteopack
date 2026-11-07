@@ -9,7 +9,7 @@ review is under way), so none is baked in: a derive config names them, the
 CLI overrides any of them (`--set step_seconds=300`), and the output records
 all of them, so two derived stores can always be told apart.
 
-What a config sets (see `RegulariseConfig`; configs/derive/wow_nl_*.yaml):
+What a config sets (see `RegulariseConfig`; configs/derive/stations/wow_nl_*.yaml):
 
 * `step_seconds` - the grid step (60, 300, 600, 3600 ...).
 * `label` - which instant names a bin. `end` (default): bin T holds
@@ -175,6 +175,13 @@ class RegulariseConfig(BaseModel):
     @property
     def store_id(self) -> str:
         return f"{self.name}/v{self.version}"
+
+    @property
+    def category(self) -> str:
+        from meteopack.core.config import category_for_source
+
+        source = self.input.split("/", 1)[0]
+        return category_for_source(source) or "other"
 
     @property
     def margin(self) -> int:
@@ -591,7 +598,7 @@ def do_month(args: tuple) -> dict:
 
         target = layer_path(Path(root), "training", *cfg.store_id.split("/"),
                             "observations", f"year={lo.year:04d}", f"month={lo.month:02d}",
-                            "data.parquet")
+                            "data.parquet", category=cfg.category)
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
         out.write_parquet(tmp, compression="zstd", compression_level=cfg.compression_level,
@@ -644,7 +651,8 @@ def build(cfg: RegulariseConfig, root: Path, *, window: tuple[datetime, datetime
     from meteopack.core.store import manifest, points
 
     started = time.time()
-    store = layer_path(Path(root), "training", *cfg.store_id.split("/"))
+    store = layer_path(Path(root), "training", *cfg.store_id.split("/"),
+                       category=cfg.category)
     meta_path = store / "regularise.json"
     if meta_path.exists():
         old = json.loads(meta_path.read_text()).get("params_hash")

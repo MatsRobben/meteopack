@@ -2,7 +2,7 @@
 
 The packed WOW-NL store (`wow_nl/reports/v1`, level 1) keeps every report as
 uploaded. This derive judges each report and writes the verdicts to a separate
-store, `packed/wow_nl/qc/v<N>`, row for row aligned with level 1: the same
+store, `packed/stations/wow_nl/qc/v<N>`, row for row aligned with level 1: the same
 month partitions, the same rows in the same order (`l1_row` is the row's
 position in its level-1 month file), so the two are joined by position or by
 `(station_id, time)`. Nothing is deleted or changed; a user decides what to
@@ -25,7 +25,7 @@ Per report: `qc_report` (uint32, `REPORT_BITS`): provenance and metadata -
 near-duplicate report, position jump, duplicate coordinates (CrowdQC+ m1),
 an hour at WOW's 10,000-record page cap, local time inconsistent with UTC.
 
-Tests (literature defaults in configs/derive/wow_nl_qc.yaml, cited there):
+Tests (literature defaults in configs/derive/stations/wow_nl_qc.yaml, cited there):
 
 * within station - range (climatological) and extreme (physically
   impossible), sentinel values, spike, step, persistence (stuck non-zero /
@@ -441,6 +441,13 @@ class QcConfig(BaseModel):
     @property
     def store_id(self) -> str:
         return f"{self.name}/v{self.version}"
+
+    @property
+    def category(self) -> str:
+        from meteopack.core.config import category_for_source
+
+        source = self.input.split("/", 1)[0]
+        return category_for_source(source) or "other"
 
     @property
     def margin(self) -> int:
@@ -1336,7 +1343,8 @@ def _reliability(cfg, fr, s_in, n_s, ids, sm, xs, rows, fail, ne, levels, rep, s
 def _store_path(root: Path, cfg: QcConfig) -> Path:
     from meteopack.core.config import layer_path
 
-    return layer_path(Path(root), cfg.layer, *cfg.store_id.split("/"))
+    return layer_path(Path(root), cfg.layer, *cfg.store_id.split("/"),
+                      category=cfg.category)
 
 
 # ---------------------------------------------------------------- the driver

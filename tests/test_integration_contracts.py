@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from meteopack.core import http
-from meteopack.sources import dwd
+from meteopack.sources.stations import dwd
 from meteopack.sources.base import Source, Unit
 
 
@@ -119,7 +119,7 @@ def test_sources_constructed_without_a_session_can_still_fetch(monkeypatch, tmp_
 
     from meteopack.core import http
     from meteopack.sources.base import RawFile
-    from meteopack.sources.dwd import DwdStations
+    from meteopack.sources.stations.dwd import DwdStations
 
     real_sig = inspect.signature(http.fetch_file)
     captured = {}
@@ -150,7 +150,7 @@ def test_volatile_units_are_actually_refetched(monkeypatch, tmp_path):
 
     from meteopack.core import http
     from meteopack.sources.base import RawFile
-    from meteopack.sources.dwd import DwdStations
+    from meteopack.sources.stations.dwd import DwdStations
 
     real_sig = inspect.signature(http.fetch_file)
     seen: list[bool] = []
@@ -297,7 +297,7 @@ def test_configs_carry_no_machine_specific_absolute_paths():
 
     root = pathlib.Path(__file__).resolve().parents[1] / "configs"
     offenders = []
-    for path in sorted(root.rglob("*.yaml")):
+    for path in sorted(root.rrglob("*.yaml")):
         for n, line in enumerate(path.read_text().splitlines(), 1):
             bare = re.sub(r"\$\{\w+:-[^}]*\}", "", line.split("#", 1)[0])
             if "/vol/" in bare or "/dev/shm" in bare or "/home/" in bare:
@@ -382,7 +382,7 @@ def test_every_credentialed_source_is_in_the_runbook():
 
     repo = pathlib.Path(__file__).resolve().parents[1]
     runbook = (repo / "docs" / "runbooks" / "credentials.md").read_text()
-    for path in sorted((repo / "configs" / "sources").glob("*.yaml")):
+    for path in sorted((repo / "configs" / "sources").rglob("*.yaml")):
         variables = yaml.safe_load(path.read_text()).get("credentials_env") or []
         for variable in variables:
             assert variable in runbook, (

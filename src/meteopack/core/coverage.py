@@ -8,7 +8,7 @@ provider describes but publishes no file for. So `fetch` now writes the
 listing it planned from beside the ledger, and this module sets three things
 against each other:
 
-* the listing (``_bookkeeping/listings/<source>/<product>/``): every unit
+* the listing (``_bookkeeping/listings/<category>/<source>/<product>/``): every unit
   upstream offered, with the station, component and period it stands for, plus
   - where the source can say - what its station catalogue claims should exist;
 * the ledger (`jobs`): the outcome of every attempt, with the reason;
@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import polars as pl
+
+from meteopack.core.config import category_for_source
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -89,7 +91,11 @@ _LISTING_SCHEMA: dict[str, pl.DataType] = {
 
 
 def listings_dir(catalog_root: Path, source: str, product: str) -> Path:
-    return Path(catalog_root) / LISTINGS_DIRNAME / source / product
+    root = Path(catalog_root) / LISTINGS_DIRNAME
+    category = category_for_source(source)
+    if category is None:
+        raise ValueError(f"no storage category configured for source {source!r}")
+    return root / category / source / product
 
 
 def _naive(value: datetime) -> datetime:

@@ -1,6 +1,6 @@
 """Parquet catalog + job ledger: what was fetched, what was built, what is done.
 
-Three tables live under ``<data_root>/catalog/``:
+Three tables live under ``<data_root>/_bookkeeping/``:
 
 * ``files``  — one row per fetched raw file (provenance + checksum).
 * ``stores`` — one row per built store (what it covers, and from which config
@@ -56,10 +56,6 @@ from meteopack.sources.base import RawFile
 Status = Literal["pending", "done", "failed"]
 
 CATALOG_DIRNAME = "_bookkeeping"
-
-#: The pre-rename name. Read from it when it is the only one present, so an
-#: existing data root does not lose its ledger and start redoing finished work.
-LEGACY_CATALOG_DIRNAME = "catalog"
 
 #: Table name -> column schema. Written explicitly on every shard so that a
 #: shard whose column happens to be all-null does not drift to a different type
@@ -270,7 +266,7 @@ def _empty_select(schema: dict[str, pl.DataType]) -> str:
 
 
 class Catalog:
-    """The catalog and ledger rooted at ``<root>/catalog/``.
+    """The catalog and ledger rooted at ``<root>/_bookkeeping/``.
 
     One instance owns one shard per table; it is cheap to create and safe to
     create many, but not safe to share across processes (each process makes its
@@ -545,13 +541,8 @@ class Catalog:
 
 
 def catalog_path(root: str | os.PathLike[str]) -> Path:
-    """The bookkeeping directory, honouring a pre-rename one if that is what exists."""
-    base = Path(root)
-    current = base / CATALOG_DIRNAME
-    legacy = base / LEGACY_CATALOG_DIRNAME
-    if not current.is_dir() and legacy.is_dir():
-        return legacy
-    return current
+    """The bookkeeping directory under the data root."""
+    return Path(root) / CATALOG_DIRNAME
 
 
 __all__ = [

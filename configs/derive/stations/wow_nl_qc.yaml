@@ -1,5 +1,5 @@
 # WOW-NL quality-control flags (level 2, part 1): one verdict per report and
-# variable, aligned row for row with packed/wow_nl/reports/v1. Nothing is
+# variable, aligned row for row with packed/stations/wow_nl/reports/v1. Nothing is
 # deleted or changed: a test that fires sets a bit.
 #
 #   meteopack derive wow_nl_qc                                   # all months

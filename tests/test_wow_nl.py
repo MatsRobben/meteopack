@@ -16,8 +16,8 @@ import pytest
 
 from meteopack.cli import main
 from meteopack.jobs.plan import load_product_config
-from meteopack.sources import wow_nl
-from meteopack.sources.wow_nl import Catalogue, WowNl, decode_member, parse_day
+from meteopack.sources.stations import wow_nl
+from meteopack.sources.stations.wow_nl import Catalogue, WowNl, decode_member, parse_day
 
 
 @pytest.fixture(scope="module")

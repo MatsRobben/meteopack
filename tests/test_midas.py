@@ -30,7 +30,7 @@ import yaml
 from meteopack.core import http
 from meteopack.core.config import ProductConfig, SourceConfig, StoreConfig, Variable
 from meteopack.sources.base import RawFile, Source, TimeWindow, Unit
-from meteopack.sources.midas import (
+from meteopack.sources.stations.midas import (
     ARCHIVE_ROOT,
     DECAMETRE,
     DEFAULT_VERSION,
@@ -55,8 +55,8 @@ from meteopack.sources.midas import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "midas.yaml"
-PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "midas" / "hourly_weather.yaml"
+SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "stations" / "midas.yaml"
+PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "midas" / "hourly_weather.yaml"
 
 LOCAL_ARCHIVE = Path("/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/midas/hourly_weather")
 

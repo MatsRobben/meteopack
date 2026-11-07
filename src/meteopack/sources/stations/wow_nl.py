@@ -797,7 +797,7 @@ class WowNl:
         """Make the zip visible in the raw layer - by a link, never a copy.
 
         The archive is 66 GB, read-only and never rewritten, so the raw layer
-        is a symlink to it (`raw/wow_nl/reports -> <archive>`). Fetch creates
+        is a symlink to it (`raw/stations/wow_nl/reports -> <archive>`). Fetch creates
         that link when the raw directory does not exist yet, and otherwise only
         checks that the zip is there and that its central directory reads.
         The digest recorded is size and mtime, as for the radar tars: hashing

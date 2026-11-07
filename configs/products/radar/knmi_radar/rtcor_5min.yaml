@@ -153,7 +153,7 @@ extra:
   # two tasks writing one shard silently lose frames.
   day_start: "08:05"
 
-  # What calibration_missing_data means. See meteopack.sources.knmi_radar.calibrate.
+  # What calibration_missing_data means. See meteopack.sources.radar.knmi_radar.calibrate.
   #   no_echo_if_zero - the default, and the only one that is right for this
   #                     archive. A sentinel of 0 (every generation before 2023)
   #                     collides with a genuine dry pixel: it means NO ECHO, a

@@ -20,11 +20,26 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 #: derived datasets are for.
 Layer = Literal["raw", "packed", "training"]
 
-#: What each layer used to be called on disk. A data root written before the
-#: rename keeps working: `layer_path` falls back to the old directory when it
-#: exists and the new one does not, so nobody has to migrate a 600 GB tree to
-#: read it. New stores are always written under the new names.
-LEGACY_LAYER_DIRS: dict[str, str] = {"packed": "canonical", "training": "derived"}
+# One taxonomy for source code, raw/packed stores, and bookkeeping. Keep this
+# here rather than in each product config: every product from a source belongs
+# to the same data family.
+SOURCE_CATEGORIES: dict[str, str] = {
+    "belgium": "stations",
+    "dmi": "stations",
+    "dwd": "stations",
+    "ea": "stations",
+    "knmi_insitu": "stations",
+    "meteofrance": "stations",
+    "midas": "stations",
+    "wow_nl": "stations",
+    "knmi_radar": "radar",
+    "eumetsat_seviri": "satellite",
+}
+
+
+def category_for_source(source: str) -> str | None:
+    """Return the enforced data family for a built-in source, if known."""
+    return SOURCE_CATEGORIES.get(source)
 
 _ENV_DATA_ROOT = "METEOPACK_DATA_ROOT"
 
@@ -266,6 +281,11 @@ class ProductConfig(BaseModel):
     def store_id(self) -> str:
         return f"{self.source}/{self.product}/v{self.version}"
 
+    @property
+    def category(self) -> str:
+        """Storage family; source/product IDs stay stable for the CLI/API."""
+        return category_for_source(self.source) or "other"
+
 
 class SourceConfig(BaseModel):
     model_config = {"extra": "forbid"}
@@ -297,6 +317,11 @@ class DeriveConfig(BaseModel):
     shard_samples: Annotated[int, Field(gt=0)] = 64
     splits: dict[str, list[str]] = Field(default_factory=dict)
 
+    @property
+    def category(self) -> str:
+        source = self.inputs[0].split("/", 1)[0] if self.inputs else ""
+        return category_for_source(source) or "other"
+
 
 def data_root(override: str | os.PathLike[str] | None = None, default: str | None = None) -> Path:
     """Resolve the data root: --data-root, then $METEOPACK_DATA_ROOT, then config.
@@ -312,12 +337,19 @@ def data_root(override: str | os.PathLike[str] | None = None, default: str | Non
     )
 
 
-def layer_path(root: Path, layer: Layer, *parts: str) -> Path:
-    """`<root>/<layer>/<parts...>`, honouring a pre-rename directory if present."""
-    current = root.joinpath(layer, *parts)
-    legacy_name = LEGACY_LAYER_DIRS.get(str(layer))
-    if legacy_name and not root.joinpath(layer).is_dir():
-        legacy = root.joinpath(legacy_name)
-        if legacy.is_dir():
-            return legacy.joinpath(*parts)
-    return current
+def layer_path(root: Path, layer: Layer, *parts: str,
+               category: str | None = None) -> Path:
+    """Resolve the canonical categorized path for one layer.
+
+    Source store IDs remain ``source/product/vN``. Their physical path is
+    ``layer/category/source/product/vN``. Derived stores pass their category
+    explicitly because their public name is not necessarily a source name.
+    """
+    parts = tuple(str(part) for part in parts)
+    if len(parts) == 1 and "/" in parts[0]:
+        parts = tuple(p for p in parts[0].split("/") if p)
+    if category is None and parts:
+        category = category_for_source(parts[0])
+    if category:
+        return root.joinpath(layer, category, *parts)
+    return root.joinpath(layer, *parts)

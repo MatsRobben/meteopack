@@ -82,7 +82,7 @@ fetch another. `scripts/refresh-ceda-token.sh` uses it.
 ### Where meteopack looks
 
 In order: `$CEDA_TOKEN_FILE`, then `extra.token_file` in
-`configs/sources/midas.yaml`, then `~/.ceda_token`. The environment wins so one
+`configs/sources/stations/midas.yaml`, then `~/.ceda_token`. The environment wins so one
 job can be pointed at a fresh token without editing a shared config.
 
 ### If it still fails
@@ -130,7 +130,7 @@ path is MTG-I FCI, which uses the same account.
 | `eumetsat_seviri` | local archive (see §2 for how it is filled) |
 
 These are rate-limited rather than authenticated. The limits are in
-`configs/sources/*.yaml` and are enforced in requests per second, not bytes —
+`configs/sources/<category>/*.yaml` and are enforced in requests per second, not bytes —
 KNMI in particular counts requests, which is why one-file-per-observation
 sources are archived into tars on ingest.
 

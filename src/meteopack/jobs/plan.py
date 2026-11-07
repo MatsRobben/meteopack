@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from meteopack.core.catalog import Catalog, job_key
-from meteopack.core.config import ProductConfig, SourceConfig
+from meteopack.core.config import ProductConfig, SourceConfig, category_for_source
 from meteopack.sources.base import Source, TimeWindow, Unit
 
 if TYPE_CHECKING:
@@ -80,7 +80,9 @@ def load_yaml(path: Path) -> dict:
 
 
 def load_source_config(name: str, *, configs: str | Path | None = None) -> SourceConfig:
-    path = config_dir(configs) / "sources" / f"{name}.yaml"
+    base = config_dir(configs) / "sources"
+    category = category_for_source(name)
+    path = base / category / f"{name}.yaml" if category else base / f"{name}.yaml"
     if not path.exists():
         raise FileNotFoundError(f"no source config for {name!r}: {path}")
     return SourceConfig(**load_yaml(path))
@@ -89,12 +91,14 @@ def load_source_config(name: str, *, configs: str | Path | None = None) -> Sourc
 def load_product_config(
     source: str, product: str | None = None, *, configs: str | Path | None = None
 ) -> ProductConfig:
-    """Load `configs/products/<source>/<product>.yaml`.
+    """Load `configs/products/<category>/<source>/<product>.yaml`.
 
     With no product named, a source with exactly one product resolves to it;
     with several, the caller must choose rather than get an arbitrary one.
     """
-    base = config_dir(configs) / "products" / source
+    products = config_dir(configs) / "products"
+    category = category_for_source(source)
+    base = products / category / source if category else products / source
     if not base.is_dir():
         raise FileNotFoundError(f"no product configs for source {source!r}: {base}")
     if product:

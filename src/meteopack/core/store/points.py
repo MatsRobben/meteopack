@@ -1,6 +1,6 @@
 """Partitioned parquet store for station observations, read through DuckDB.
 
-Layout under ``<root>/<layer>/<source>/<product>/v<n>/``::
+Layout under ``<root>/<layer>/<category>/<source>/<product>/v<n>/``::
 
     observations/year=2012/data.parquet      # one file per partition, or
     observations/year=2012/part-00044.parquet  # one per writer, if part_key

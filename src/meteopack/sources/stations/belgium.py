@@ -17,7 +17,7 @@ has already cost something here:
   export is reliable and takes a couple of seconds; several at once return 500,
   and sustained load gets our whole egress IP rate-limited for tens of minutes —
   which on a shared cluster takes out everyone's downloads, not just this job.
-  `configs/sources/belgium.yaml` therefore pins
+  `configs/sources/stations/belgium.yaml` therefore pins
   `rate_limit: {requests_per_second: 1, max_workers: 1}`. That is not politeness,
   it is the only setting observed to work. Fourteen stations x ~25 years is ~350
   requests, so one per second is also perfectly sufficient.

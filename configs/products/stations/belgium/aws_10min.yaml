@@ -208,4 +208,4 @@ extra:
   # The 18th column, `qc_flags`, is a JSON blob of per-variable `validated`
   # booleans. It is deliberately NOT packed: false means "not yet checked", not
   # "wrong", so masking on it would quietly delete the recent tail of every
-  # series. See meteopack.sources.belgium._qc_flags if you want to inspect it.
+  # series. See meteopack.sources.stations.belgium._qc_flags if you want to inspect it.

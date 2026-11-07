@@ -2,9 +2,9 @@
 #
 # This source does not download. The archive was pulled from the WOW API once,
 # as one JSON member per UTC hour inside one zip per year, and is read from
-# disk ever since; see meteopack.sources.wow_nl. `base_url` is therefore a
+# disk ever since; see meteopack.sources.stations.wow_nl. `base_url` is therefore a
 # file:// path, not an endpoint. The archive is read-only: the raw layer is a
-# symlink to it (raw/wow_nl/reports -> $WOW_NL_ARCHIVE), never a copy.
+# symlink to it (raw/stations/wow_nl/reports -> $WOW_NL_ARCHIVE), never a copy.
 #
 # Loads into meteopack.core.config.SourceConfig.
 

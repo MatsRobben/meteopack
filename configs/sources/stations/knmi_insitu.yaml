@@ -4,7 +4,7 @@
 # This source does not download. The KNMI dataplatform publishes ONE netCDF
 # file per ten minutes and meters on request count rather than bytes, so the
 # archive was pulled once into daily tars and is read from disk ever since; see
-# meteopack.sources.knmi_insitu for the full story. `base_url` is therefore a
+# meteopack.sources.stations.knmi_insitu for the full story. `base_url` is therefore a
 # file:// path, not an endpoint.
 #
 # Loads into meteopack.core.config.SourceConfig.

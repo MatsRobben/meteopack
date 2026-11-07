@@ -5,7 +5,7 @@
 # inside a KMDS member, which is exactly what the file calls the column.
 #
 # Every unit is ONE DAY, stored as the daily tar KNMI publishes -- see
-# raw_layout below and meteopack.sources.knmi_insitu for why this feed cannot
+# raw_layout below and meteopack.sources.stations.knmi_insitu for why this feed cannot
 # be fetched as loose files.
 #
 # Missing arrives as NaN (the files' _FillValue), which is nulled before

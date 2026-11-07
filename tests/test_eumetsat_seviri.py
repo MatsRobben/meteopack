@@ -42,7 +42,7 @@ from meteopack.core.config import ProductConfig, SourceConfig, StoreConfig, Vari
 from meteopack.core.store import gridded
 from meteopack.core.timeline import Timeline
 from meteopack.sources.base import RawFile, Source, TimeWindow
-from meteopack.sources.eumetsat_seviri import (
+from meteopack.sources.satellite.eumetsat_seviri import (
     CALIBRATION_UNITS,
     LAYOUT_KEYS,
     EumetsatSeviri,
@@ -63,8 +63,8 @@ from meteopack.sources.eumetsat_seviri import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "eumetsat_seviri.yaml"
-PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "eumetsat_seviri" / "msg15_rss.yaml"
+SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "satellite" / "eumetsat_seviri.yaml"
+PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "satellite" / "eumetsat_seviri" / "msg15_rss.yaml"
 
 #: The two real sample locations. Everything that touches them is skipped when
 #: they are not there, so the suite is green on a machine with no archive.
