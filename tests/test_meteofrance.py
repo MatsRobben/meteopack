@@ -40,7 +40,7 @@ SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "stations" / "meteofrance.yaml
 PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "meteofrance" / "hourly_all.yaml"
 
 LOCAL_ARCHIVE = Path(
-    "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/meteofrance/hourly"
+    "/vol/knmimo-nobackup/users/mrobben/meteopack_data/raw/stations/meteofrance/hourly_all"
 )
 
 

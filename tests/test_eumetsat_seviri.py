@@ -76,7 +76,7 @@ REAL_NAT = Path(
 # otherwise. Overridable so the suite does not assume one user's directory layout.
 REAL_ARCHIVE = Path(os.environ.get(
     "METEOPACK_SEVIRI_ARCHIVE",
-    "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/eumetsat_seviri/msg15_rss",
+    "/vol/knmimo-nobackup/users/mrobben/meteopack_data/raw/satellite/eumetsat_seviri/msg15_rss",
 ))
 
 #: The real registry's test grid. Real, loadable, and small enough to eyeball.

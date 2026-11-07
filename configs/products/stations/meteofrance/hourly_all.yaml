@@ -8,8 +8,8 @@
 # `extra.s3_subdir` / `file_prefix` / `date_column` / `date_format` are what
 # select the product inside the bucket. The 6-minute precipitation-only feed is
 # the same module with BASE/MIN, prefix MN, AAAAMMJJHHMN / %Y%m%d%H%M,
-# cadence_seconds 360 and a one-variable map (RR) -- a sibling YAML, not a
-# second reader.
+# cadence_seconds 360 and a one-variable map (RR), configured in the sibling
+# `precipitation_6min.yaml`.
 #
 # Empty fields mean missing and become null before scale/offset; valid_min and
 # valid_max are expressed in the canonical units below (i.e. post-scale).

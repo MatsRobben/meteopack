@@ -208,6 +208,7 @@ def _root(tmp_path: Path, monkeypatch) -> Path:
     (root / "raw" / "wow_nl").mkdir(parents=True)
     (root / "raw" / "wow_nl" / "reports").symlink_to(arch)
     monkeypatch.setenv("WOW_NL_ARCHIVE", str(arch))
+    monkeypatch.setenv("METEOPACK_DATA_ROOT", str(root))
     monkeypatch.setenv("METEOPACK_SPILL", str(tmp_path / "spill"))
     wow_nl._ZIP_INDEX.clear()
     return root

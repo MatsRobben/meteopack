@@ -20,9 +20,10 @@ it); storage, scheduling, validation and bookkeeping are shared.
 | `dmi/stations_10min` | Danish stations, 10 min, 2012- | **packed and validated**: 75.0 M rows, 115 stations |
 | `belgium/aws_10min` | Belgian AWS, 10 min, 2012- | **packed and validated**: 9.97 M rows, 14 stations |
 | `meteofrance/hourly_all` | French stations near NL, hourly, 2010- | **packed**: 12.2 M rows, 237 stations; direct/diffuse/longwave/UV radiation are empty because no in-domain station measures them |
+| `meteofrance/precipitation_6min` | French precipitation stations near NL, 6 min, 2010-2026 | **raw archive present**: 116 département-period files; product configured, not packed |
 | `midas/hourly_weather` | UK stations, hourly, 2012- | **packed and validated**: 14.0 M rows, 185 stations (positions from the raw file headers when CEDA's token has expired) |
 | `ea/rainfall_15min` | England & Wales rain gauges, 15 min, 2012- | **re-fetched, packed and validated** (2026-11-06): 490 M rows, 993 reporting gauges (995 with metadata), every gauge-year 1 Jan - 31 Dec, to 2026-11-06 |
-| `eumetsat_seviri/msg15_rss` | MSG SEVIRI rapid scan | works; resampled onto the radar grid, 4 of 11 channels |
+| `eumetsat_seviri/msg15_rss` | MSG SEVIRI rapid scan | source configured; local archive was deleted |
 | `wow_nl/reports` | WOW-NL citizen weather reports, every report and field as uploaded, **irregular** in time, 2015-2025 | **packed and validated** (2026-11-06): see [docs/stores.md](docs/stores.md#irregular-stores-wow-nl) |
 | `wow_nl/qc` | WOW-NL quality-control flags, aligned row for row with `wow_nl/reports`: per variable a fail and a not-evaluable bitmask and a level, per report provenance bits, a station-month reliability table; reference-free (within-station and between-WOW-station tests) | **derived** (2026-11-06): 581.6 M reports in 11-22 min as four 12-CPU jobs; `meteopack derive wow_nl_qc`, see [docs/stores.md](docs/stores.md#quality-control-flags-derive-kind-qc---packedwow_nlqcv1) |
 | `training/stations/wow_nl_10min`, `training/stations/wow_nl_5min` | WOW-NL regularised per station: last/mean/max per bin, rain from the counter | **derived** (2026-11-06); every choice is a parameter (`meteopack derive wow_nl_10min --set ...`) |
@@ -79,12 +80,20 @@ uv run meteopack catalog ea                   # what is fetched and packed
 
 The same commands work for `dwd`, `dmi`, `belgium`, `meteofrance` and `midas`.
 
-**WOW-NL** (citizen weather stations) is read from the local archive of
-yearly zips, linked - never copied - into the raw layer:
+Météo-France's six-minute precipitation archive is already in the raw layer.
+Pack or validate it separately from the hourly product:
 
 ```bash
-mkdir -p $METEOPACK_DATA_ROOT/raw/stations/wow_nl
-ln -s /path/to/wow_nl_raw $METEOPACK_DATA_ROOT/raw/stations/wow_nl/reports    # 2015.zip ... 2025.zip
+uv run meteopack pack meteofrance --product precipitation_6min
+uv run meteopack validate meteofrance --product precipitation_6min
+```
+
+**WOW-NL** (citizen weather stations) is read from the local archive of
+yearly zips stored directly in the raw layer:
+
+```bash
+# Place the yearly archive zips (2015.zip ... 2025.zip) in:
+# $METEOPACK_DATA_ROOT/raw/stations/wow_nl/reports
 uv run meteopack pack wow_nl                       # the whole archive: 15-17 min on 48 CPUs
 uv run meteopack pack wow_nl --window 2024/2024    # rebuild one year; other months untouched
 uv run meteopack validate wow_nl

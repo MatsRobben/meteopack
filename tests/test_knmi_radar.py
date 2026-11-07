@@ -57,7 +57,7 @@ SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "radar" / "knmi_radar.yaml"
 PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "radar" / "knmi_radar" / "rtcor_5min.yaml"
 
 ARCHIVE = Path(
-    "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi/nl_rdr_data_rtcor_5m_tar"
+    "/vol/knmimo-nobackup/users/mrobben/meteopack_data/raw/radar/knmi_radar/rtcor_5min"
 )
 
 #: The real registry's test grid. Real, loadable, and small enough to eyeball.

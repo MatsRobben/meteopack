@@ -81,8 +81,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Where the yearly zips live: $WOW_NL_ARCHIVE (the source config sets
-#: `base_url` from it). Read-only: nothing here ever writes into it.
+#: Optional override for direct construction; the source config points at the
+#: archive in the configured meteopack data root. Read-only: nothing writes here.
 ARCHIVE_DIR = os.environ.get("WOW_NL_ARCHIVE", "")
 
 #: `2019/WOW_NL_2019053023.json`. The folder is matched loosely because
@@ -794,20 +794,16 @@ class WowNl:
         return units
 
     def fetch(self, unit: Unit, raw_root: Path) -> RawFile | None:
-        """Make the zip visible in the raw layer - by a link, never a copy.
+        """Validate the archive zip already stored in the raw layer.
 
-        The archive is 66 GB, read-only and never rewritten, so the raw layer
-        is a symlink to it (`raw/stations/wow_nl/reports -> <archive>`). Fetch creates
-        that link when the raw directory does not exist yet, and otherwise only
-        checks that the zip is there and that its central directory reads.
+        The archive is read-only and stored directly under
+        `raw/stations/wow_nl/reports`, so fetch only checks that the zip is
+        present and that its central directory reads.
         The digest recorded is size and mtime, as for the radar tars: hashing
         66 GB over NFS buys nothing a re-read would not.
         """
         src = local_path(unit.url)
         raw_root = Path(raw_root)
-        if not raw_root.exists() and not raw_root.is_symlink():
-            raw_root.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(src.parent, raw_root)
         dest = raw_root / src.name
         if not dest.exists():
             if not src.exists():

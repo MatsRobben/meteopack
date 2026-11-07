@@ -48,8 +48,7 @@ PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "knmi_insitu" /
 
 #: The real archive. Every test that reads it is skipped when it is absent.
 REAL_ARCHIVE = Path(
-    "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi/"
-    "10-minute-in-situ-meteorological-observations_tar"
+    "/vol/knmimo-nobackup/users/mrobben/meteopack_data/raw/stations/knmi_insitu/obs_10min"
 )
 
 #: `seconds since 1950-01-01`, exactly as the files write it.

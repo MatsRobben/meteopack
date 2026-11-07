@@ -46,7 +46,7 @@ SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "stations" / "dmi.yaml"
 PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "dmi" / "stations_10min.yaml"
 
 LOCAL_ARCHIVE = Path(
-    "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/dmi/stations_10min"
+    "/vol/knmimo-nobackup/users/mrobben/meteopack_data/raw/stations/dmi/stations_10min"
 )
 LOCAL_CATALOGUE = LOCAL_ARCHIVE / "station_catalog.json"
 

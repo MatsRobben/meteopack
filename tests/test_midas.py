@@ -58,7 +58,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "stations" / "midas.yaml"
 PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "midas" / "hourly_weather.yaml"
 
-LOCAL_ARCHIVE = Path("/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/midas/hourly_weather")
+LOCAL_ARCHIVE = Path("/vol/knmimo-nobackup/users/mrobben/meteopack_data/raw/stations/midas/hourly_weather")
 
 DATASET_PATH = f"{ARCHIVE_ROOT}/uk-hourly-weather-obs"
 VERSION_PATH = f"{DATASET_PATH}/dataset-version-202607"
