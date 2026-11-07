@@ -232,7 +232,7 @@ def test_every_configured_variable_names_its_units():
 
     from meteopack.core.config import Variable
 
-    for path in sorted(glob.glob("configs/products/*/*.yaml")):
+    for path in sorted(glob.glob("configs/products/*/*/*.yaml")):
         with open(path) as handle:
             spec_file = yaml.safe_load(handle)
         for spec in spec_file.get("variables") or []:

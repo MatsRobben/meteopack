@@ -29,7 +29,7 @@ import yaml
 from meteopack.core import http
 from meteopack.core.config import ProductConfig, SourceConfig, StoreConfig, Variable
 from meteopack.sources.base import RawFile, Source, TimeWindow, Unit
-from meteopack.sources.belgium import (
+from meteopack.sources.stations.belgium import (
     DATA_LAYER,
     STATION_LAYER,
     RmiAws,
@@ -42,8 +42,8 @@ from meteopack.sources.belgium import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "belgium.yaml"
-PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "belgium" / "aws_10min.yaml"
+SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "stations" / "belgium.yaml"
+PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "belgium" / "aws_10min.yaml"
 
 
 # --------------------------------------------------------------------- fixtures

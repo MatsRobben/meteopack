@@ -58,11 +58,45 @@ sbatch --account=<yours> --exclude=cn79 --array=0-29 --cpus-per-task=4 --time=04
 
 Passing `--shard`/`--shards` from the array variables splits the unit list
 without any coordination between tasks (fetch, list and derive; `pack` refuses
-them - give one pack job the cores instead).
+them - give one pack job the cores instead). Each task takes `1/shards` of the
+source's configured `requests_per_second`, so the array as a whole stays at the
+configured rate; more tasks buy parallel checking and disk I/O, not a faster
+upstream. For the station networks one job is usually enough (EA's ~14,400
+station-years take about an hour at 5 requests/s; DWD's ~3,600 ZIPs minutes).
+
+A fetch that is preempted (SIGTERM) writes its ledger before exiting; files
+already on disk pass their check on the next run and are not downloaded again.
+That needs the SIGTERM to reach Python. In an `sbatch` script that runs fetch
+as a plain foreground command, bash dies on the signal first and Slurm then
+SIGKILLs the rest of the step (seen 2026-11-06: the last 16 s of outcomes were
+lost - harmless, the files were re-recorded on the next run, but avoidable).
+Run it in the background and forward the signal:
+
+```bash
+.venv/bin/python -m meteopack.cli fetch ea --window 2012/2026 &
+pid=$!; trap 'kill -TERM $pid' TERM
+wait $pid; while kill -0 $pid 2>/dev/null; do wait $pid; done
+```
+
+## /dev/shm is wiped when any of your jobs on the node ends
+
+Measured 2026-11-06 on cn114: about 10 s after **any** job of yours on a node
+ends - an `srun true` will do - everything you own in that node's `/dev/shm`
+is deleted, including the files of your jobs that are still running there. A
+benchmark lost its output directory this way and a test run lost its
+`TMPDIR` mid-suite. Python's multiprocessing keeps its named semaphores
+there too: a pool worker spawned after a wipe dies at start
+(`SemLock._rebuild: FileNotFoundError`) and the pool waits for it - a re-pack
+hung this way on cn117 when another job ended. `run_pipeline` therefore starts
+all its workers up front and never recycles them. So `/dev/shm` is only safe for a job that is the only one
+of yours on its node for its whole run (no array siblings, no `srun` checks,
+no other agent's jobs); otherwise use node-local `/scratch/$USER`, or keep the
+data in memory. Free space on `/scratch` varies a lot: 18 GB on cn114, 2.6 GB
+on cn117 that day.
 
 ## Conventions that matter
 
-- **Scratch is `/dev/shm`, never `/tmp`.** `/tmp` is small and shared and has
+- **Scratch is `/dev/shm`, never `/tmp`** - but see the section above. `/tmp` is small and shared and has
   filled mid-job before; `/dev/shm` showed 126 GB free on cn79. Point `TMPDIR`
   under `/dev/shm` in your job and remove it on exit. (A points pack's spill is
   different: it goes to node-local `/scratch/$USER` by itself, never to RAM.)

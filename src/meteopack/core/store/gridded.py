@@ -1,6 +1,6 @@
 """zarr v3 store for ``(time, y, x)`` fields: one frame per chunk, a day per shard.
 
-Layout under ``<root>/<layer>/<source>/<product>/v<n>/``: a zarr v3 group holding
+Layout under ``<root>/<layer>/<category>/<source>/<product>/v<n>/``: a zarr v3 group holding
 one array per variable plus a ``time`` coordinate, with the grid in the attrs.
 
 Four decisions worth stating:

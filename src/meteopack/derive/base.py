@@ -152,6 +152,10 @@ class DeriveSpec:
         return f"{self.cfg.name}/v{self.cfg.version}"
 
     @property
+    def category(self) -> str:
+        return self.cfg.category
+
+    @property
     def input_store_ids(self) -> tuple[str, ...]:
         return tuple(self.cfg.inputs)
 

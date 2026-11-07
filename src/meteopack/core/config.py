@@ -11,7 +11,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 #: The three layers data moves through, named after the command that fills
 #: them. "canonical" and "derived" said nothing about what was in them, which
@@ -20,11 +20,26 @@ from pydantic import BaseModel, Field, field_validator
 #: derived datasets are for.
 Layer = Literal["raw", "packed", "training"]
 
-#: What each layer used to be called on disk. A data root written before the
-#: rename keeps working: `layer_path` falls back to the old directory when it
-#: exists and the new one does not, so nobody has to migrate a 600 GB tree to
-#: read it. New stores are always written under the new names.
-LEGACY_LAYER_DIRS: dict[str, str] = {"packed": "canonical", "training": "derived"}
+# One taxonomy for source code, raw/packed stores, and bookkeeping. Keep this
+# here rather than in each product config: every product from a source belongs
+# to the same data family.
+SOURCE_CATEGORIES: dict[str, str] = {
+    "belgium": "stations",
+    "dmi": "stations",
+    "dwd": "stations",
+    "ea": "stations",
+    "knmi_insitu": "stations",
+    "meteofrance": "stations",
+    "midas": "stations",
+    "wow_nl": "stations",
+    "knmi_radar": "radar",
+    "eumetsat_seviri": "satellite",
+}
+
+
+def category_for_source(source: str) -> str | None:
+    """Return the enforced data family for a built-in source, if known."""
+    return SOURCE_CATEGORIES.get(source)
 
 _ENV_DATA_ROOT = "METEOPACK_DATA_ROOT"
 
@@ -88,6 +103,11 @@ class RateLimit(BaseModel):
     max_workers: int = Field(default=8, ge=1)
     max_retries: int = Field(default=5, ge=0)
     backoff_seconds: float = Field(default=1.0, ge=0)
+    #: Extra HTTP statuses this upstream uses to mean "slow down" rather than
+    #: "no". 408, 429 and 5xx are always retried; EA's server also answers a
+    #: share of requests with 403 under load, and the same URL succeeds a
+    #: moment later (measured 2026-11-06: 1,084 of 6,580 at 8 workers).
+    retry_status: list[int] = Field(default_factory=list)
 
 
 #: Canonical names that are also CF standard names, verified individually
@@ -199,6 +219,14 @@ class StoreConfig(BaseModel):
     compressor: str = "zstd"
     compression_level: int = 3
     partition_by: list[str] = Field(default_factory=lambda: ["year"])
+    #: Row order inside each points partition file. Unset keeps the historical
+    #: (time, station_id). An irregular store sorts by (station_id, time) so a
+    #: station's reports are contiguous - what every per-station lag, run or
+    #: regularisation reads.
+    sort_by: list[str] | None = None
+    #: Rows per parquet row group in a points store; unset is polars' default.
+    #: Smaller groups let a reader skip more by their min/max statistics.
+    row_group_rows: Annotated[int, Field(gt=0)] | None = None
 
 
 class ProductConfig(BaseModel):
@@ -212,7 +240,12 @@ class ProductConfig(BaseModel):
     #: One line, for a human opening the data root. Copied into the store's
     #: manifest so the store says what it is without the config beside it.
     description: str | None = None
-    cadence_seconds: Annotated[int, Field(gt=0)] = 600
+    #: The product's fixed time step. `null` declares an IRREGULAR points
+    #: product: reports at whatever time each station sent them, nothing
+    #: snapped, nothing dropped for being off a grid. It has to be said
+    #: explicitly - leaving the field out still means the 600 s default - so a
+    #: regular product can never lose its cadence check by omission.
+    cadence_seconds: Annotated[int, Field(gt=0)] | None = 600
     grid_id: str | None = None
     variables: list[Variable] = Field(default_factory=list)
     store: StoreConfig
@@ -225,13 +258,33 @@ class ProductConfig(BaseModel):
     attrs: dict[str, str] = Field(default_factory=dict)
     extra: dict = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _irregular_needs_points(self) -> ProductConfig:
+        if self.cadence_seconds is None and self.store.kind != "points":
+            raise ValueError("cadence_seconds: null (irregular) is only meaningful for a "
+                             "points store; a gridded store is a regular time axis")
+        return self
+
+    @property
+    def irregular(self) -> bool:
+        """True for a product with no time step (`cadence_seconds: null`)."""
+        return self.cadence_seconds is None
+
     @property
     def cadence(self) -> timedelta:
+        if self.cadence_seconds is None:
+            raise ValueError(f"{self.store_id} is irregular (cadence_seconds: null) and has "
+                             f"no time step; derive a regular product from it instead")
         return timedelta(seconds=self.cadence_seconds)
 
     @property
     def store_id(self) -> str:
         return f"{self.source}/{self.product}/v{self.version}"
+
+    @property
+    def category(self) -> str:
+        """Storage family; source/product IDs stay stable for the CLI/API."""
+        return category_for_source(self.source) or "other"
 
 
 class SourceConfig(BaseModel):
@@ -264,6 +317,11 @@ class DeriveConfig(BaseModel):
     shard_samples: Annotated[int, Field(gt=0)] = 64
     splits: dict[str, list[str]] = Field(default_factory=dict)
 
+    @property
+    def category(self) -> str:
+        source = self.inputs[0].split("/", 1)[0] if self.inputs else ""
+        return category_for_source(source) or "other"
+
 
 def data_root(override: str | os.PathLike[str] | None = None, default: str | None = None) -> Path:
     """Resolve the data root: --data-root, then $METEOPACK_DATA_ROOT, then config.
@@ -279,12 +337,19 @@ def data_root(override: str | os.PathLike[str] | None = None, default: str | Non
     )
 
 
-def layer_path(root: Path, layer: Layer, *parts: str) -> Path:
-    """`<root>/<layer>/<parts...>`, honouring a pre-rename directory if present."""
-    current = root.joinpath(layer, *parts)
-    legacy_name = LEGACY_LAYER_DIRS.get(str(layer))
-    if legacy_name and not root.joinpath(layer).is_dir():
-        legacy = root.joinpath(legacy_name)
-        if legacy.is_dir():
-            return legacy.joinpath(*parts)
-    return current
+def layer_path(root: Path, layer: Layer, *parts: str,
+               category: str | None = None) -> Path:
+    """Resolve the canonical categorized path for one layer.
+
+    Source store IDs remain ``source/product/vN``. Their physical path is
+    ``layer/category/source/product/vN``. Derived stores pass their category
+    explicitly because their public name is not necessarily a source name.
+    """
+    parts = tuple(str(part) for part in parts)
+    if len(parts) == 1 and "/" in parts[0]:
+        parts = tuple(p for p in parts[0].split("/") if p)
+    if category is None and parts:
+        category = category_for_source(parts[0])
+    if category:
+        return root.joinpath(layer, category, *parts)
+    return root.joinpath(layer, *parts)

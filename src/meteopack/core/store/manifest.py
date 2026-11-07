@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import subprocess
+import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,10 +42,21 @@ _DESCRIPTIVE = frozenset({"description", "attrs", "retention"})
 _DESCRIPTIVE_VARIABLE = frozenset({"long_name", "legacy_name", "standard_name"})
 
 
+#: `extra` keys that change how a pack runs, never what it stores.
+_RUNTIME_EXTRA = frozenset({"readme", "spill", "spill_compression", "partition_rss_factor",
+                            "write_workers", "write_threads", "max_spill_gib"})
+
+
 def content_hash(cfg: BaseModel | dict[str, Any]) -> str:
     """`config_hash` over only the settings that change what the store holds."""
     payload = cfg.model_dump(mode="json") if isinstance(cfg, BaseModel) else dict(cfg)
     payload = {k: v for k, v in payload.items() if k not in _DESCRIPTIVE}
+    if isinstance(payload.get("extra"), dict):
+        # README prose a config may carry for its store, and knobs for how a
+        # pack runs rather than what it writes: tuning them must not make a
+        # store "stale" and block a windowed re-pack.
+        payload["extra"] = {k: v for k, v in payload["extra"].items()
+                            if k not in _RUNTIME_EXTRA}
     if isinstance(payload.get("variables"), list):
         payload["variables"] = [
             {k: v for k, v in var.items() if k not in _DESCRIPTIVE_VARIABLE}
@@ -111,7 +123,12 @@ def write(store_path: Path, manifest: Manifest) -> Path:
     store_path.mkdir(parents=True, exist_ok=True)
     dest = store_path / MANIFEST_NAME
     manifest.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
-    tmp = dest.with_suffix(".json.part")
+    # A temp name private to this writer: windowed derives run as parallel
+    # Slurm jobs and finish together, and with one shared `.json.part` the
+    # second rename found the file already moved and the job crashed (QC
+    # rebuild, 2026-11-06). Last writer wins, which is right here: every
+    # writer describes the whole store.
+    tmp = store_path / f".{MANIFEST_NAME}.{os.getpid()}.{uuid.uuid4().hex[:8]}.part"
     tmp.write_text(json.dumps(asdict(manifest), indent=2, sort_keys=True))
     os.replace(tmp, dest)
     return dest

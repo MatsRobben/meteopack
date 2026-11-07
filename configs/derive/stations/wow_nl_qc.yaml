@@ -1,0 +1,242 @@
+# WOW-NL quality-control flags (level 2, part 1): one verdict per report and
+# variable, aligned row for row with packed/stations/wow_nl/reports/v1. Nothing is
+# deleted or changed: a test that fires sets a bit.
+#
+#   meteopack derive wow_nl_qc                                   # all months
+#   meteopack derive wow_nl_qc --window 2024-06/2024-06          # one month
+#   meteopack derive wow_nl_qc --set variables.air_temperature.buddy.pos=2.5 \
+#                              --set name=wow_nl/qc_try          # any parameter, new store
+#
+# Every parameter is recorded in qc.json with its hash; a run with other
+# parameters refuses to mix into an existing store (new `name`, or --refresh).
+# Bits, levels and what each test does: meteopack.derive.qc, docs/stores.md.
+#
+# Sources (abbreviated; full list in docs/stores.md):
+#   CrowdQC+  Fenner et al. 2021, Front. Environ. Sci. 9:720747, code v1.1.2 (cqcp_filter.R)
+#   Napoly    Napoly et al. 2018, Front. Earth Sci. 6:118 (CrowdQC m1-m4)
+#   TITAN     Baserud et al. 2020, Adv. Sci. Res. 17:153; titanlib 0.4 (Lussana et al. 2010 SCT)
+#   PWSQC     de Vos et al. 2019, GRL 46:8820, code LottedeVos/PWSQC (Filtersettings.txt)
+#   deVos17   de Vos et al. 2017, HESS 21:765 (counter increments, spreading, 20-min limit)
+#   Chen      Chen, Saunders & Whan 2021, QJRMS 147:3647 - WOW-NL wind, code jieyu97/QCwind
+#   Cornes    Cornes et al. 2020, Met. Apps 27:e1814 - WOW-NL temperature
+#   Sgoff     Sgoff et al. 2022, QJRMS 148:1752
+#   WOWA      wow_nl_analysis/scripts/align.py (this archive: flag rates measured 2015-2025)
+#   [INF]     engineering judgement, no published value - tune with qc_eval
+
+kind: qc
+name: wow_nl/qc
+version: 1
+layer: packed
+description: >-
+  Quality-control flags for every WOW-NL report and variable: per-test fail and
+  not-evaluable bitmasks and a summary level, aligned row for row with
+  wow_nl/reports/v1. Reference-free: within-station and between-WOW-station
+  tests only (no KNMI, radar or model data).
+input: wow_nl/reports/v1
+
+variables:
+  air_temperature:
+    unit: degC
+    range: [-28, 42]          # NL records -27.4 degC (1942) / 40.7 degC (2019), rounded out
+    extreme: [-50, 50]        # Sgoff: -50..50; TITAN range -50..40
+    sentinels: [-17.7778]     # 0 degF uploaded as "no value" (WOWA sentinels.csv)
+    spike: {threshold: 3.0, max_dt_s: 1200}     # WOWA
+    step: {threshold: 5.0, max_dt_s: 600}       # [INF] loose: 3.2 K in 8 min is real (Clark 2018)
+    persistence: {min_duration_s: 14400}        # Cornes: identical > 4 h removed
+    network_z:                # CrowdQC+ m2: low=qnorm(0.01), high=qnorm(0.95), warm side stricter
+      low: -2.326
+      high: 1.645
+      min_stations: 20        # [INF]
+      min_scale: 0.0
+    month_fraction: {max_fraction: 0.2, min_values: 288}  # Napoly m3 (> 20 % of a month fails m2)
+    month_corr: {min_r: 0.9, min_pairs: 864}              # CrowdQC+ m4 r < 0.9; pairs [INF] 3 days
+    buddy:
+      radius_m: 10000         # CrowdQC+ m5 uses 3 km: at WOW density most stations then have < 5
+      min_buddies: 5          # CrowdQC+ m5 n_buddies; TITAN 4
+      max_buddies: 20
+      pos: 2.0                # TITAN buddy 2 SD, applied to the warm side ...
+      neg: 2.83               # ... and sqrt(8/4) x that on the cold side (TITAN SCT 4:8 variance)
+      min_scale: 1.0          # [INF] K; Davis +-0.5 K, microclimate spread
+    sct:                      # TITAN: pos 4 / neg 8 (warm stricter), eps2 0.5; radii [INF] for NL
+      step_seconds: 3600      # hourly snapshots (TITAN runs hourly); a report gets the nearest one's verdict
+      num_min: 5
+      num_max: 30
+      inner_radius_m: 5000
+      outer_radius_m: 20000
+      num_iterations: 1       # 2 found the same injected errors (2024-06) at twice the cost
+      num_min_prof: 20
+      min_elev_diff_m: 200
+      min_horizontal_scale_m: 1000
+      vertical_scale_m: 200
+      pos: 4.0
+      neg: 8.0
+      eps2: 0.5
+    isolation: {radius_m: 15000, min_neighbours: 5}   # TITAN: < 5 within 15 km
+
+  dew_point_temperature:
+    unit: degC
+    range: [-35, 28]          # [INF] NL
+    extreme: [-60, 40]
+    sentinels: [-17.7778]     # 0 degF (WOWA: 4-36 k per year)
+    spike: {threshold: 4.0, max_dt_s: 1200}     # WOWA
+    step: {threshold: 6.0, max_dt_s: 600}       # WOWA
+    persistence: {min_duration_s: 21600}        # WOWA 6 h
+    network_z: {low: -3.0, high: 3.0, min_stations: 20, min_scale: 0.5}  # [INF] symmetric
+    month_corr: {min_r: 0.8, min_pairs: 864}    # [INF]
+    buddy: {radius_m: 10000, min_buddies: 5, max_buddies: 20, pos: 3.0, neg: 3.0, min_scale: 1.0}
+    isolation: {radius_m: 15000, min_neighbours: 5}
+
+  relative_humidity:
+    unit: "%"
+    range: [5, 100]           # [INF]
+    extreme: [0, 103]
+    sentinels: [0.0]          # RH 0 (WOWA: 10^4-10^5 per year)
+    spike: {threshold: 15.0, max_dt_s: 1200}    # WOWA
+    step: {threshold: 25.0, max_dt_s: 600}      # WOWA
+    persistence: {min_duration_s: 43200}        # WOWA 12 h (fog nights hold 99-100 % for hours)
+    network_z: {low: -3.0, high: 3.0, min_stations: 20, min_scale: 2.0}  # [INF]
+    month_corr: {min_r: 0.8, min_pairs: 864}    # [INF]
+    buddy: {radius_m: 10000, min_buddies: 5, max_buddies: 20, pos: 3.0, neg: 3.0, min_scale: 5.0}
+    isolation: {radius_m: 15000, min_neighbours: 5}
+
+  air_pressure_at_sea_level:
+    unit: hPa
+    range: [940, 1065]        # WOWA (NL extremes ~950-1060)
+    extreme: [850, 1100]
+    sentinels: [0.0]          # 0 hPa / 0 inHg
+    spike: {threshold: 2.0, max_dt_s: 1200}     # WOWA
+    step: {threshold: 3.0, max_dt_s: 600}       # WOWA
+    persistence: {min_duration_s: 21600}        # WOWA 6 h
+    network_z: {low: -3.0, high: 3.0, min_stations: 20, min_scale: 1.0}  # [INF]; Davis +-1 hPa
+    month_corr: {min_r: 0.9, min_pairs: 864}    # [INF]
+    buddy: {radius_m: 10000, min_buddies: 5, max_buddies: 20, pos: 3.0, neg: 3.0, min_scale: 1.0}
+    isolation: {radius_m: 15000, min_neighbours: 5}
+
+  air_pressure:               # station level for most stations: offsets by height, so no buddy
+    unit: hPa
+    range: [900, 1065]        # WOWA
+    extreme: [500, 1100]
+    sentinels: [0.0]
+    spike: {threshold: 2.0, max_dt_s: 1200}
+    step: {threshold: 3.0, max_dt_s: 600}
+    persistence: {min_duration_s: 21600}
+    month_corr: {min_r: 0.9, min_pairs: 864}    # [INF] correlation is blind to the offset
+
+  wind_speed:
+    unit: m s-1
+    range: [0, 35]            # Chen
+    extreme: [0, 75]          # impossible (literature review L1 rule)
+    spike: {threshold: 15.0, max_dt_s: 1200}    # WOWA
+    step: {threshold: 13.88, max_dt_s: 600}     # Chen: largest 10-min change at KNMI stations
+    persistence:              # Chen: non-zero must change within 160 min; zeros > 2 days
+      min_duration_s: 9600
+      zero_min_duration_s: 172800
+      zero_is_special: true
+    censor_zero: true         # Chen: zeros are censored (below detection), not errors
+    month_corr: {min_r: 0.5, min_pairs: 864}    # Chen: r < 0.5 (there with KNMI; here network)
+    isolation: {radius_m: 15000, min_neighbours: 5}
+
+  wind_speed_of_gust:
+    unit: m s-1
+    range: [0, 50]            # [INF] NL gust records ~ 40 m/s
+    extreme: [0, 75]
+    persistence: {min_duration_s: 9600, zero_min_duration_s: 172800, zero_is_special: true}
+    censor_zero: true
+
+  wind_from_direction:
+    unit: degree
+    range: [0, 360]
+    extreme: [0, 360]
+    persistence: {min_duration_s: 43200, zero_min_duration_s: 172800, zero_is_special: true}  # [INF]
+
+  rainfall_rate:
+    unit: mm h-1
+    range: [0, 300]           # [INF]; WOWA counted rates > 200 (0.08 %)
+    extreme: [0, 2000]
+    persistence: {min_duration_s: 7200, zero_is_special: true}    # [INF] stuck non-zero rate
+
+  rainfall_counter:           # the running counter; its tests are under `rain`
+    unit: mm
+    range: [0, 1000]          # rain_counter.py valid range
+
+dew_point:
+  dew_point: dew_point_temperature
+  temperature: air_temperature
+  humidity: relative_humidity
+  gt_t_tolerance: 0.5         # WOWA td > ta + 0.5
+  mismatch_tolerance: 2.0     # [INF] |Td - Td(T, RH)| (Magnus); Davis Td within 1 K (Bell 2015)
+
+stale_repeat:
+  gap_s: 3600                 # WOWA gap_gt_1h; Netatmo repeats its last record (deVos17)
+  fields: [air_temperature, relative_humidity, air_pressure_at_sea_level, wind_speed,
+           wind_from_direction, rainfall_counter]
+
+report:
+  near_duplicate_s: 30        # WOWA near_dup_lt30s
+  position_jump_m: 1000       # WOWA pos_off_1km; Demortier 2024 used 100 m for pressure
+  dup_coords: true            # CrowdQC+ m1, cutOff 1
+  capped_hour: true           # metadata only
+  local_time: true            # metadata only
+  local_timezone: Europe/Amsterdam
+
+network:
+  step_seconds: 300           # 5-min reference field (PWSQC runs on 5-min data)
+  max_age_s: 600              # a value stands for 10 min, so 10-min reporters are in every bin
+  reference_excludes: [range, extreme, sentinel, spike, step, stuck, stuck_zero, td_gt_t,
+                       stale_repeat]
+  use_height: false           # WOW heights: 0 for 99 % of 2015 site-years, unreliable after
+  lapse_rate: 0.0065          # CrowdQC+ (used only with use_height)
+
+rain:
+  counter: rainfall_counter
+  drop_mm: 0.25               # rain_counter.py (robust rule)
+  lookahead: 3
+  valid_min: 0.0
+  valid_max: 1000.0
+  local_timezone: Europe/Amsterdam
+  huge_increment_mm: 20.0     # WOWA rain_inc_gt_20mm_10min
+  huge_increment_max_dt_s: 600
+  spread_max_s: 1200          # deVos17: intervals > 20 min discarded
+  min_coverage: 0.5           # [INF] a 5-min bin needs half its time covered by increments
+  pwsqc:                      # PWSQC Filtersettings.txt
+    radius_m: 10000           # range
+    max_neighbours: 20        # Overeem et al. 2024: up to 20 nearest within 10 km
+    nstat: 5
+    nint: 6                   # > 30 min dry while the neighbours' median is wet
+    hi_thres_a: 0.4           # mm per 5 min
+    hi_thres_b: 10.0
+    so:
+      compare_days: 14        # compareint 4032 x 5 min
+      rainyint: 100
+      matchint: 200
+      corthres: 0.15
+      max_window_days: 28     # [INF] how far back the window may grow for 100 wet intervals
+      eval_step_s: 3600       # PWSQC evaluates every interval; hourly here [INF]
+
+# A value gets the level of the first rule (top down) any of whose bits is set;
+# `default_level` if none; 0 if it has no value. Bits not listed (capped_hour,
+# local_time_inconsistent, near_duplicate) are recorded but never lower a level.
+levels:
+  - level: 1
+    name: bad
+    fail: [range, extreme, sentinel, spike, step, stuck, stuck_zero, td_gt_t, td_mismatch,
+           stale_repeat, rain_transient, rain_spike, rain_reset_off_midnight, rain_huge_increment]
+  - level: 2
+    name: suspect
+    fail: [network_z, month_fraction, month_corr, buddy, sct, rain_faulty_zero, rain_high_influx,
+           rain_station_outlier]
+    report: [position_jump, dup_coords, no_position]
+  - level: 3
+    name: not spatially confirmed
+    ne: [network_z, month_corr, buddy, sct, rain_faulty_zero, rain_high_influx,
+         rain_station_outlier, censored_low, isolated]
+default_level: 4
+
+reliability:
+  core: [air_temperature, relative_humidity, air_pressure_at_sea_level]
+  ok_level: 3
+  tier2_min_fraction: 0.9     # [INF] tier 1 official, 2 private with >= 90 % of core values at level >= 3
+
+write_scores: false
+compression_level: 3
+threads: 3

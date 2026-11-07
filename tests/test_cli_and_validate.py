@@ -571,8 +571,8 @@ def _fetch_run(tmp_path, source):
 
 
 def test_a_unit_fetched_while_still_filling_is_fetched_again_once_it_closes(tmp_path):
-    """E-SOH: an hour harvested at 10:37 was marked done, so 10:37-11:00 was never
-    requested again - from a feed that keeps no archive."""
+    """An hour harvested at 10:37 was marked done, so 10:37-11:00 was never
+    requested again."""
     from meteopack.sources.base import RawFile, Unit
 
     state = {"open": True}
@@ -677,3 +677,268 @@ def test_a_configured_variable_with_no_values_fails(tmp_path, extra):
     report = validate(cfg, tmp_path)
     check = next(c for c in report.checks if c.name == "air_pressure has values")
     assert not check.ok, report.text()
+
+
+def test_a_failed_partition_write_withdraws_the_manifest(tmp_path, monkeypatch, capsys):
+    """Every dwd partition failed to write and pack still wrote a fresh manifest,
+    so `validate` passed on rows left over from an earlier failed run while the
+    catalog recorded 0 records (2026-11-05)."""
+    from meteopack.core.store import points
+    from meteopack.jobs import packing
+
+    raw = tmp_path / "raw" / "dwd" / "stations_10min"
+    raw.mkdir(parents=True)
+    (raw / "a.zip").write_bytes(b"x")
+    store = points.store_path(tmp_path, "dwd/stations_10min/v1")
+    store.mkdir(parents=True)
+    (store / "manifest.json").write_text("{}")
+
+    def fake_run(tasks, fn, **kw):
+        if fn.__name__ == "parse_points":
+            return [{"path": str(raw / "a.zip"), "parts": {"2012": "/nonexistent"}}]
+        return [{"path": t.label, "error": "TypeError: boom"} for t in tasks]
+
+    monkeypatch.setattr(packing, "run", fake_run)
+    code = main(["pack", "dwd", "--data-root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "manifest was withdrawn" in out and "2012" in out
+    assert not (store / "manifest.json").exists()
+
+
+def test_archived_station_ids_are_put_in_the_sources_canonical_form(tmp_path):
+    """MIDAS's archived catalogue says 160 where the observations say 00160:
+    133 of 185 packed stations had no coordinates (2026-11-05)."""
+    import json
+
+    from meteopack import cli
+
+    raw = tmp_path / "raw" / "midas" / "hourly_weather"
+    raw.mkdir(parents=True)
+    (raw / "station_catalog.json").write_text(json.dumps(
+        [{"src_id": 160, "name": "CRAIBSTONE", "lat": 57.187, "lon": -2.215, "elevation": 102.0}]))
+
+    class Ctx:
+        cfg = _cfg()
+        root = tmp_path
+        raw_root = raw
+
+        class src:
+            @staticmethod
+            def stations(cfg):
+                raise RuntimeError("token expired")
+
+            @staticmethod
+            def canonical_station_id(value):
+                return f"{int(value):05d}"
+
+    assert cli._write_station_metadata(Ctx()) == 1
+    back = points.read_stations(_cfg().store_id, tmp_path)
+    assert back["station_id"].to_list() == ["00160"]
+    assert back["lat"][0] == 57.187
+
+
+def test_group_pin_note_counts_only_pinned_groups():
+    """dwd's scan said "6 of 5 pinned group schemas match": extreme_temperature
+    is in the raw data but no variable reads it, so it has no pin."""
+    from types import SimpleNamespace
+
+    from meteopack.cli import _compare_schema
+
+    cfg = SimpleNamespace(extra={"schema_fingerprints": {"wind": "a"}}, schema_fingerprint=None)
+    report = {"variants": [{"group": "wind", "fingerprint": "a"},
+                           {"group": "extreme_temperature", "fingerprint": "b"}]}
+    drifted, note = _compare_schema(cfg, report)
+    assert drifted == []
+    assert note.startswith("1 of 1 pinned") and "extreme_temperature" in note
+
+
+# --------------------------------------------- every unit ends with a reason
+
+
+def _feed(tmp_path, plan: dict, *, expected=()):
+    """A source whose units do what `plan` says: write a file spanning
+    (start, end), write zero bytes, 404, or raise."""
+    from meteopack.core import http
+    from meteopack.sources.base import Content, RawFile, Unit
+
+    calls: list[str] = []
+
+    class Feed:
+        def list(self, window, cfg):
+            return [Unit(key=k, url=f"https://x/{k}",
+                         meta={"station_id": k.split("/")[0], "period_start": f"{k[-4:]}-01-01",
+                               "period_end": f"{k[-4:]}-12-31"})
+                    for k in plan]
+
+        def expected(self, window, cfg):
+            return list(expected)
+
+        def fetch(self, unit, raw_root):
+            calls.append(unit.key)
+            what = plan[unit.key]
+            if what == "404":
+                return None
+            if what == "503":
+                raise http.FetchError(unit.url, "HTTP 503", 503, attempts=6)
+            path = Path(raw_root) / f"{unit.key}.csv"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if what == "empty":
+                path.write_bytes(b"")
+                return RawFile(path, "0" * 64, 0, unit.key, content=Content(0), attempts=1)
+            start, end = what
+            path.write_text("x")
+            return RawFile(path, "0" * 64, 1, unit.key, attempts=1,
+                           content=Content(10, datetime.fromisoformat(start).replace(tzinfo=UTC),
+                                           datetime.fromisoformat(end).replace(tzinfo=UTC)))
+
+    feed = Feed()
+    feed.calls = calls
+    return feed
+
+
+def _ctx(tmp_path, *argv):
+    from meteopack.cli import Context
+
+    return Context(build_parser().parse_args([*argv, "--data-root", str(tmp_path),
+                                              "--window", "2012/2013"]))
+
+
+def test_every_unit_ends_with_an_outcome_and_a_reason(tmp_path):
+    """Absent units were `done` with no source, product or status; a failure
+    kept only its message; an empty answer looked exactly like data."""
+    from meteopack.cli import stage_fetch
+
+    ctx = _ctx(tmp_path, "fetch", "dmi")
+    ctx._src = _feed(tmp_path, {"A/2012": ("2012-01-01T00:00", "2012-12-31T23:50"),
+                                "B/2012": "empty", "C/2012": "404", "D/2012": "503"})
+    assert stage_fetch(ctx) == 1
+    rows = {r["unit_key"]: r for r in ctx.catalog.query(
+        "SELECT unit_key, source, product, status, outcome, http_status, error_class, "
+        "attempts FROM jobs").iter_rows(named=True)}
+    assert {k: (r["status"], r["outcome"]) for k, r in rows.items()} == {
+        "A/2012": ("done", "done"), "B/2012": ("done", "empty"),
+        "C/2012": ("done", "absent"), "D/2012": ("failed", "failed")}
+    assert {r["source"] for r in rows.values()} == {"dmi"}
+    assert (rows["D/2012"]["error_class"], rows["D/2012"]["http_status"],
+            rows["D/2012"]["attempts"]) == ("HTTPError", 503, 6)
+    assert rows["C/2012"]["http_status"] == 404
+
+
+def test_only_the_failed_unit_is_tried_again(tmp_path):
+    from meteopack.cli import stage_fetch
+
+    plan = {"A/2012": ("2012-01-01T00:00", "2012-12-31T23:50"), "D/2012": "503"}
+    ctx = _ctx(tmp_path, "fetch", "dmi")
+    ctx._src = _feed(tmp_path, plan)
+    stage_fetch(ctx)
+    again = _ctx(tmp_path, "fetch", "dmi")
+    again._src = _feed(tmp_path, plan)
+    stage_fetch(again)
+    assert again._src.calls == ["D/2012"]
+
+
+def test_a_listing_that_fails_exits_nonzero_and_says_why(tmp_path, capsys):
+    """It used to escape as a traceback - or, where the source swallowed it,
+    as "0 to do" and exit 0."""
+    from meteopack.cli import stage_fetch
+    from meteopack.sources.common import ListingError
+
+    class Down:
+        def list(self, window, cfg):
+            raise ListingError("directory listing failed for https://x/: ReadTimeout")
+
+    ctx = _ctx(tmp_path, "fetch", "dmi")
+    ctx._src = Down()
+    assert stage_fetch(ctx) == 1
+    assert "listing failed" in capsys.readouterr().out
+
+
+def test_a_done_unit_whose_file_has_gone_is_fetched_again(tmp_path):
+    """The ledger was trusted on its own: a deleted raw file was never re-fetched."""
+    from meteopack.cli import stage_fetch
+
+    plan = {"A/2012": ("2012-01-01T00:00", "2012-12-31T23:50")}
+    ctx = _ctx(tmp_path, "fetch", "dmi")
+    ctx._src = _feed(tmp_path, plan)
+    stage_fetch(ctx)
+    next(ctx.raw_root.rglob("2012.csv")).unlink()
+    again = _ctx(tmp_path, "fetch", "dmi")
+    again._src = _feed(tmp_path, plan)
+    stage_fetch(again)
+    assert again._src.calls == ["A/2012"]
+
+
+def test_an_array_shares_the_configured_rate_between_its_tasks(tmp_path):
+    """Each task used the full rate, so 30 tasks hit upstream at 30x the config."""
+    one = _ctx(tmp_path, "list", "dmi")
+    four = _ctx(tmp_path, "list", "dmi", "--shard", "1", "--shards", "4")
+    assert four.src._limiter._interval == pytest.approx(4 * one.src._limiter._interval)
+
+
+def test_gaps_say_what_is_missing_and_why(tmp_path, capsys):
+    from datetime import date
+
+    from meteopack.cli import stage_catalog, stage_fetch
+
+    plan = {
+        "A/2012": ("2012-01-02T00:00", "2012-12-30T23:45"),   # the old EA bug
+        "A/2013": ("2013-01-01T00:00", "2013-12-31T23:45"),
+        "B/2012": "empty", "C/2012": "404", "D/2012": "503",
+        "E/2012": ("2012-01-01T00:00", "2012-12-31T23:45"),   # never reached: --limit
+    }
+    expected = [{"station_id": "F", "component": "", "start": date(2012, 1, 1),
+                 "end": date(2012, 12, 31)}]
+    ctx = _ctx(tmp_path, "fetch", "dmi", "--limit", "5")
+    ctx._src = _feed(tmp_path, plan, expected=expected)
+    stage_fetch(ctx)
+
+    out = tmp_path / "gaps"
+    cat = _ctx(tmp_path, "catalog", "dmi", "--gaps", "--out", str(out))
+    capsys.readouterr()
+    assert stage_catalog(cat) == 0
+    text = capsys.readouterr().out
+    years = pl.read_csv(out / "dmi_stations_10min_station_years.csv")
+    got = {(r["station_id"], r["year"]): r["reason"] for r in years.iter_rows(named=True)}
+    assert got == {("A", 2012): "partial", ("A", 2013): "complete",
+                   ("B", 2012): "empty upstream", ("C", 2012): "absent upstream",
+                   ("D", 2012): "failed", ("E", 2012): "not downloaded",
+                   ("F", 2012): "not listed upstream"}
+    detail = {(r["station_id"], r["year"]): r["detail"] for r in years.iter_rows(named=True)}
+    assert "2012-01-02" in detail["A", 2012] and "HTTP 503" in detail["D", 2012]
+    assert "HTTPError HTTP 503: 1" in text
+    for reason in ("partial", "not downloaded", "not listed upstream"):
+        assert reason in text
+
+
+def test_sigterm_writes_the_ledger_before_exiting(tmp_path):
+    """Slurm preempts with SIGTERM and kills 30 s later; the ledger was only
+    written as each unit finished, and a buffered ledger would lose its tail."""
+    import _thread
+    import signal
+    import time as _time
+
+    from meteopack.cli import stage_fetch
+    from meteopack.sources.base import RawFile, Unit
+
+    class Feed:
+        def list(self, window, cfg):
+            return [Unit(key="A", url="u"), Unit(key="K", url="u")]
+
+        def fetch(self, unit, raw_root):
+            path = tmp_path / f"{unit.key}.csv"
+            path.write_text("x")
+            if unit.key == "K":
+                _time.sleep(0.2)                           # A is recorded first
+                _thread.interrupt_main(signal.SIGTERM)     # what Slurm does
+                _time.sleep(0.3)
+            return RawFile(path, "0" * 64, 1, unit.key, attempts=1)
+
+    ctx = _ctx(tmp_path, "fetch", "dmi")
+    ctx._src = Feed()
+    before = signal.getsignal(signal.SIGTERM)
+    assert stage_fetch(ctx) == 130
+    rows = Path(ctx.catalog.shard_path("jobs"))
+    assert rows.exists()
+    assert pl.read_parquet(rows).filter(pl.col("unit_key") == "A")["status"].to_list() == ["done"]
+    assert signal.getsignal(signal.SIGTERM) is before             # handler restored

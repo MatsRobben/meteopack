@@ -1,6 +1,6 @@
 """Partitioned parquet store for station observations, read through DuckDB.
 
-Layout under ``<root>/<layer>/<source>/<product>/v<n>/``::
+Layout under ``<root>/<layer>/<category>/<source>/<product>/v<n>/``::
 
     observations/year=2012/data.parquet      # one file per partition, or
     observations/year=2012/part-00044.parquet  # one per writer, if part_key
@@ -72,6 +72,44 @@ _DERIVED = {
     "hour": (lambda c: c.dt.hour(), "{:02d}"),
     "date": (lambda c: c.dt.date(), "{}"),
 }
+
+#: Zero-padding width of each derived key in a partition label, so the label
+#: can be built with vectorised string ops instead of a Python call per row
+#: (`map_elements` cost ~0.2 s per million rows, on every spill of every pack).
+_WIDTH = {"year": 4, "month": 2, "day": 2, "hour": 2}
+
+#: Row order when the config does not set `store.sort_by`.
+DEFAULT_SORT = ("time", "station_id")
+
+
+def sort_keys(cfg: ProductConfig) -> list[str]:
+    """The row order of a partition file: `store.sort_by`, else (time, station_id)."""
+    return list(cfg.store.sort_by or DEFAULT_SORT)
+
+
+def time_partitioned(cfg: ProductConfig) -> bool:
+    """True when every partition key is derived from `time` alone.
+
+    Only then does a time window name a set of whole partitions, which is what
+    makes a windowed re-pack safe: it can replace exactly those partitions and
+    leave every other one alone.
+    """
+    return all(k in _DERIVED for k in cfg.store.partition_by)
+
+
+def partition_label_of(cfg: ProductConfig, when: datetime) -> str:
+    """The partition label a row at `when` gets - the same string `partition_labels` builds."""
+    keys = list(cfg.store.partition_by)
+    if not keys:
+        return "all"
+    if not time_partitioned(cfg):
+        raise ValueError(f"{cfg.store_id}: partition keys {keys} are not all derived from time")
+    parts = []
+    for key in keys:
+        value = {"year": when.year, "month": when.month, "day": when.day,
+                 "hour": when.hour}.get(key)
+        parts.append(_DERIVED[key][1].format(when.date() if key == "date" else value))
+    return "/".join(parts)
 
 _POLARS_TYPE: dict[str, pl.DataType] = {
     "BOOLEAN": pl.Boolean,
@@ -153,10 +191,16 @@ def _naive_utc_time(frame: pl.DataFrame) -> pl.DataFrame:
     return frame.with_columns(expr.cast(pl.Datetime("us")))
 
 
-def _write_atomic(frame: pl.DataFrame, path: Path) -> None:
+def _write_atomic(frame: pl.DataFrame, path: Path, cfg: ProductConfig | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    frame.write_parquet(tmp, statistics=True)
+    options: dict = {}
+    if cfg is not None:
+        options = {"compression": cfg.store.compressor,
+                   "compression_level": cfg.store.compression_level}
+        if cfg.store.row_group_rows:
+            options["row_group_size"] = cfg.store.row_group_rows
+    frame.write_parquet(tmp, statistics=True, **options)
     os.replace(tmp, path)
 
 
@@ -187,6 +231,7 @@ def write_schema(cfg: ProductConfig, root: str | os.PathLike[str], *,
         "product": cfg.product,
         "version": cfg.version,
         "cadence_seconds": cfg.cadence_seconds,
+        "irregular": cfg.irregular,
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         **{k: v for k, v in (cfg.attrs or {}).items() if k != "title"},
         "variables": {
@@ -228,9 +273,8 @@ def partition_labels(frame: pl.DataFrame, cfg: ProductConfig) -> pl.Series:
     parts = []
     for key in keys:
         if key in _DERIVED:
-            expr, fmt = _DERIVED[key]
-            value = expr(pl.col("time"))
-            parts.append(value.map_elements(lambda v, f=fmt: f.format(v), return_dtype=pl.String))
+            value = _DERIVED[key][0](pl.col("time")).cast(pl.String)
+            parts.append(value.str.zfill(_WIDTH[key]) if key in _WIDTH else value)
         elif key in frame.columns:
             parts.append(pl.col(key).cast(pl.String))
         else:
@@ -248,11 +292,15 @@ def write(
     *,
     layer: Layer = DEFAULT_LAYER,
     part_key: str | None = None,
+    presorted: bool = False,
 ) -> list[Path]:
     """Write observations into ``cfg``'s store, replacing the partitions touched.
 
-    ``df`` needs ``time`` and ``station_id`` plus any value columns. Returns the
-    files written, which is what the caller records in the catalog.
+    ``df`` needs ``time`` and ``station_id`` plus any value columns. Rows are
+    sorted by ``store.sort_by`` unless the caller says they already are
+    (``presorted``): re-sorting a 7-million-row month that a source has just
+    sorted by a longer key costs seconds and changes nothing. Returns the files
+    written, which is what the caller records in the catalog.
     """
     if cfg.store.kind != "points":
         raise ValueError(f"{cfg.store_id} is a {cfg.store.kind} store, not points")
@@ -267,9 +315,14 @@ def write(
     base = store_path(root, cfg.store_id, layer=layer) / OBSERVATIONS_DIR
     filename = "data.parquet" if part_key is None else f"part-{_slug(part_key)}.parquet"
 
+    order = sort_keys(cfg)
+
+    def ordered(f: pl.DataFrame) -> pl.DataFrame:
+        return f if presorted else f.sort(order)
+
     if not keys:
         target = base / filename
-        _write_atomic(frame.sort("time", "station_id"), target)
+        _write_atomic(ordered(frame), target, cfg)
         return [target]
 
     helpers = []
@@ -292,7 +345,7 @@ def write(
             fmt = _DERIVED[key][1] if key in _DERIVED else "{}"
             parts.append(f"{key}={_slug(fmt.format(value))}")
         target = base.joinpath(*parts, filename)
-        _write_atomic(group.drop(helper_names).sort("time", "station_id"), target)
+        _write_atomic(ordered(group.drop(helper_names)), target, cfg)
         written.append(target)
     return sorted(written)
 
@@ -323,7 +376,12 @@ def write_stations(
         frame = frame.with_columns(
             pl.lit(datetime.now(UTC).replace(tzinfo=None)).alias("updated_at")
         )
-    frame = frame.select(list(STATIONS_SCHEMA)).cast(STATIONS_SCHEMA)  # type: ignore[arg-type]
+    # The schema columns are enforced; anything else a source knows about its
+    # stations (WOW: when a site reported, whether it is official) rides along
+    # after them rather than being thrown away.
+    extras = [c for c in stations.columns if c not in STATIONS_SCHEMA]
+    frame = frame.select(list(STATIONS_SCHEMA) + extras).cast(
+        STATIONS_SCHEMA)  # type: ignore[arg-type]
     name = "data.parquet" if part_key is None else f"part-{_slug(part_key)}.parquet"
     target = store_path(root, store_id, layer=layer) / STATIONS_DIR / name
     _write_atomic(frame.unique(subset=["station_id"], keep="last"), target)
@@ -387,7 +445,7 @@ def summarise(store_id: str, root: str | os.PathLike[str], cfg: ProductConfig, *
         "min(time) AS time_min",
         "max(time) AS time_max",
     ]
-    cadence = int(cfg.cadence_seconds)
+    cadence = int(cfg.cadence_seconds or 0)        # 0: irregular, nothing is off-grid
     if cadence > 0:
         pieces.append(
             f"count(*) FILTER (WHERE CAST(epoch(time) AS BIGINT) % {cadence} <> 0) AS off_grid"
@@ -402,8 +460,11 @@ def summarise(store_id: str, root: str | os.PathLike[str], cfg: ProductConfig, *
     out = dict(zip(names, row, strict=True))
     # Which stations reported, not just how many: a station table can hold the
     # right number of rows for the wrong stations.
-    out["station_ids"] = sorted(
-        str(r[0]) for r in con.execute(f"SELECT DISTINCT station_id FROM {src}").fetchall())
+    ids = [r[0] for r in con.execute(f"SELECT DISTINCT station_id FROM {src}").fetchall()]
+    out["station_ids"] = sorted(str(i) for i in ids if i is not None)
+    if any(i is None for i in ids):
+        out["null_station_rows"] = int(con.execute(
+            f"SELECT count(*) FROM {src} WHERE station_id IS NULL").fetchone()[0])
 
     # Duplicates are counted one partition at a time, not across the store. A
     # (time, station_id) pair belongs to exactly one partition - the partition
@@ -413,7 +474,9 @@ def summarise(store_id: str, root: str | os.PathLike[str], cfg: ProductConfig, *
     shards = sorted(
         (store_path(root, store_id, layer=layer) / OBSERVATIONS_DIR).rglob("*.parquet")
     )
-    out["duplicates"] = sum(
+    # An irregular store may hold two rows per (time, station) by design; its
+    # source checks for repeated reports instead (`validate_store`).
+    out["duplicates"] = 0 if cfg.irregular else sum(
         int(con.execute(
             "SELECT count(*) FROM (SELECT time, station_id FROM "
             f"read_parquet('{shard}', hive_partitioning=false) "
@@ -436,7 +499,9 @@ def read_stations(
     shards = sorted(directory.glob("*.parquet"))
     if not shards:
         return pl.DataFrame(schema=STATIONS_SCHEMA)
-    frame = pl.read_parquet(shards)
+    # Diagonal: a shard written with extra columns must not stop the others
+    # from reading.
+    frame = pl.concat([pl.read_parquet(p) for p in shards], how="diagonal_relaxed")
     return (
         frame.sort("updated_at")
         .unique(subset=["station_id"], keep="last")

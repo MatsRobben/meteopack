@@ -20,7 +20,7 @@ import yaml
 
 from meteopack.core.config import ProductConfig, SourceConfig, Variable
 from meteopack.sources.base import RawFile, Source, TimeWindow, Unit
-from meteopack.sources.dwd import (
+from meteopack.sources.stations.dwd import (
     GROUPS_BY_KEY,
     DwdStations,
     SchemaDriftError,
@@ -32,8 +32,8 @@ from meteopack.sources.dwd import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "dwd.yaml"
-PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "dwd" / "stations_10min.yaml"
+SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "stations" / "dwd.yaml"
+PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "dwd" / "stations_10min.yaml"
 
 
 # --------------------------------------------------------------------- fixtures
@@ -546,7 +546,7 @@ def test_fingerprint_moves_when_a_column_is_added_or_renamed():
 
 
 def test_pinned_fingerprints_match_the_live_schema_captured_in_the_fixtures():
-    # These are the values written into configs/products/dwd/stations_10min.yaml.
+    # These are the values written into configs/products/stations/dwd/stations_10min.yaml.
     assert schema_fingerprint(
         PRODUKT_TU.split(b"\r\n")[0].decode("latin-1").split(";")
     ) == "267791e758f02936"
@@ -709,3 +709,98 @@ def test_a_backfill_lists_stations_that_have_since_closed(monkeypatch, src, prod
     today = src.stations(product, window=TimeWindow(datetime(2026, 10, 30, tzinfo=UTC),
                                                     datetime(2026, 10, 31, tzinfo=UTC)))
     assert "00099" not in today["station_id"].to_list()
+
+
+# ------------------------------------------------- integrity and loud listings
+
+
+def test_the_check_reads_a_station_zip_and_the_span_it_holds(tmp_path):
+    raw = _zip(tmp_path, "a.zip", "produkt_zehn_now_tu_20261031_20261031_00044.txt", PRODUKT_TU)
+    content = DwdStations.check_raw(raw.path)
+    assert content.n_records == 4
+    assert content.time_min == datetime(2026, 10, 31, 9, 50, tzinfo=UTC)
+    assert content.time_max == datetime(2026, 10, 31, 10, 20, tzinfo=UTC)
+
+
+def test_the_check_rejects_a_truncated_zip_and_a_cut_last_row(tmp_path):
+    from meteopack.core.http import IntegrityError
+
+    raw = _zip(tmp_path, "a.zip", "produkt_zehn_now_tu_x_00044.txt", PRODUKT_TU)
+    whole = raw.path.read_bytes()
+    raw.path.write_bytes(whole[: len(whole) // 2])
+    with pytest.raises(IntegrityError, match="unreadable ZIP"):
+        DwdStations.check_raw(raw.path)
+
+    cut = _zip(tmp_path, "b.zip", "produkt_zehn_now_tu_x_00044.txt", PRODUKT_TU[:-20])
+    with pytest.raises(IntegrityError, match="cut short"):
+        DwdStations.check_raw(cut.path)
+
+
+def test_the_check_calls_a_zip_without_produkt_empty(tmp_path):
+    raw = _zip(tmp_path, "a.zip", "Metadaten_Geographie_00044.txt", b"x")
+    assert DwdStations.check_raw(raw.path).n_records == 0
+
+
+def test_a_listing_that_cannot_be_read_is_raised_not_read_as_empty(monkeypatch, src, product):
+    """A failed `historical/` listing used to be logged and treated as an empty
+    directory, so every archive in it silently left the plan."""
+    from meteopack.core import http
+    from meteopack.sources.common import ListingError
+
+    def fake_get(url: str, *, encoding: str = "utf-8") -> str:
+        if url.endswith("Beschreibung_Stationen.txt"):
+            return STATION_DESC.decode(encoding)
+        raise http.FetchError(url, "ReadTimeout: read timed out", attempts=6,
+                              error_class="ReadTimeout")
+
+    monkeypatch.setattr(src, "_get_text", fake_get)
+    with pytest.raises(ListingError, match="ReadTimeout"):
+        src.list(TimeWindow(datetime(2012, 1, 1, tzinfo=UTC), datetime(2013, 1, 1, tzinfo=UTC)),
+                 product)
+
+
+def test_a_directory_that_does_not_exist_is_empty(monkeypatch, src):
+    from meteopack.core import http
+
+    def gone(url: str, *, encoding: str = "utf-8") -> str:
+        raise http.NotFoundError(url, "404 not found", 404)
+
+    monkeypatch.setattr(src, "_get_text", gone)
+    assert src.list_directory("https://x/solar/now/") == []
+    assert src.description(GROUPS_BY_KEY["solar"], "now") == []
+
+
+def test_a_station_catalogue_that_cannot_be_read_is_raised(monkeypatch, src, product):
+    from meteopack.core import http
+    from meteopack.sources.common import ListingError
+
+    def down(url: str, *, encoding: str = "utf-8") -> str:
+        raise http.FetchError(url, "HTTP 502", 502, attempts=6)
+
+    monkeypatch.setattr(src, "_get_text", down)
+    with pytest.raises(ListingError, match="502"):
+        src.stations(product)
+
+
+def test_units_carry_their_period_and_expected_lists_closed_stations(monkeypatch, src,
+                                                                     product):
+    """The gap report sets `expected` (the catalogues) against the units."""
+    closed = (b"00099 19900101 20121231             20     52.2000    7.0000 "
+              b"Gronau                                   Nordrhein-Westfalen"
+              b"                      Frei\r\n")
+
+    def fake_get(url: str, *, encoding: str = "utf-8") -> str:
+        if url.endswith("Beschreibung_Stationen.txt"):
+            return (STATION_DESC + (closed if "/historical/" in url else b"")).decode(encoding)
+        if url.endswith("/air_temperature/historical/"):
+            return '<a href="10minutenwerte_TU_00044_20100101_20191231_hist.zip">x</a>'
+        return ""
+
+    monkeypatch.setattr(src, "_get_text", fake_get)
+    w = TimeWindow(datetime(2010, 1, 1, tzinfo=UTC), datetime(2013, 1, 1, tzinfo=UTC))
+    units = src.list(w, product)
+    hist = next(u for u in units if u.meta["subdir"] == "historical")
+    assert (hist.meta["period_start"], hist.meta["period_end"]) == ("2010-01-01", "2019-12-31")
+    assert hist.meta["component"] == "air_temperature"
+    rows = [r for r in src.expected(w, product) if r["station_id"] == "00099"]
+    assert rows and all(r["end"] == date(2012, 12, 31) for r in rows)

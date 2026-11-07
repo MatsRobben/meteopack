@@ -23,7 +23,7 @@ import yaml
 
 from meteopack.core.config import ProductConfig, SourceConfig, Variable
 from meteopack.sources.base import RawFile, Source, TimeWindow, Unit
-from meteopack.sources.meteofrance import (
+from meteopack.sources.stations.meteofrance import (
     DEPARTEMENTS,
     MeteoFranceStations,
     SchemaDriftError,
@@ -36,11 +36,11 @@ from meteopack.sources.meteofrance import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "meteofrance.yaml"
-PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "meteofrance" / "hourly_all.yaml"
+SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "stations" / "meteofrance.yaml"
+PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "stations" / "meteofrance" / "hourly_all.yaml"
 
 LOCAL_ARCHIVE = Path(
-    "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/meteofrance/hourly"
+    "/vol/knmimo-nobackup/users/mrobben/meteopack_data/raw/stations/meteofrance/hourly_all"
 )
 
 
@@ -709,7 +709,7 @@ def test_the_pinned_fingerprints_match_the_real_files(product):
     If this fails, Météo-France changed the header and the variable map needs
     looking at before the pin is moved.
     """
-    from meteopack.sources.meteofrance import _header_columns, _token_of
+    from meteopack.sources.stations.meteofrance import _header_columns, _token_of
 
     pinned = product.extra["schema_fingerprints"]
     checked = 0

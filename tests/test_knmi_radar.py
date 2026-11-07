@@ -39,7 +39,7 @@ from meteopack.core.encoding import Encoding
 from meteopack.core.store import gridded
 from meteopack.core.timeline import Timeline
 from meteopack.sources.base import RawFile, Source, TimeWindow
-from meteopack.sources.knmi_radar import (
+from meteopack.sources.radar.knmi_radar import (
     ImageSpec,
     KnmiRadar,
     SchemaDriftError,
@@ -53,11 +53,11 @@ from meteopack.sources.knmi_radar import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "knmi_radar.yaml"
-PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "knmi_radar" / "rtcor_5min.yaml"
+SOURCE_YAML = REPO_ROOT / "configs" / "sources" / "radar" / "knmi_radar.yaml"
+PRODUCT_YAML = REPO_ROOT / "configs" / "products" / "radar" / "knmi_radar" / "rtcor_5min.yaml"
 
 ARCHIVE = Path(
-    "/vol/knmimo-nobackup/users/mrobben/data_raw/data/raw/knmi/nl_rdr_data_rtcor_5m_tar"
+    "/vol/knmimo-nobackup/users/mrobben/meteopack_data/raw/radar/knmi_radar/rtcor_5min"
 )
 
 #: The real registry's test grid. Real, loadable, and small enough to eyeball.
@@ -1001,7 +1001,7 @@ def test_a_frame_with_no_images_is_corrupt_not_drift(tmp_path, monkeypatch):
     """
     import numpy as np
 
-    from meteopack.sources import knmi_radar
+    from meteopack.sources.radar import knmi_radar
 
     assert knmi_radar.layout_id({}) == knmi_radar.LAYOUT_UNKNOWN
     source = inspect.getsource(knmi_radar.KnmiRadar.parse)
@@ -1069,7 +1069,7 @@ def test_parse_stage_summarises_gridded_files_instead_of_concatenating(tmp_path,
 @pytest.mark.parametrize(("parameter", "code"), [("HEIGHT_[KM]", 6), ("REFLECTIVITY_[DBZ]", 7)])
 def test_echotop_and_reflectivity_frames_have_a_layout(parameter, code):
     """Every echotop frame in the store used to be 2, 'unknown'."""
-    from meteopack.sources.knmi_radar import LAYOUT_NAMES, layout_id
+    from meteopack.sources.radar.knmi_radar import LAYOUT_NAMES, layout_id
 
     spec = ImageSpec("image1", parameter, 0.5, -32.0, 0.0, 255.0, "uint8", (NY, NX))
     assert layout_id({parameter: spec}) == code
@@ -1082,7 +1082,7 @@ def test_a_frame_with_a_calibration_listed_as_corrupt_is_withheld(tmp_path):
     neighbours with tens of thousands. Decoded, they claimed "no echo top
     anywhere"; they are failed products, and the store must say so.
     """
-    from meteopack.sources.knmi_radar import (
+    from meteopack.sources.radar.knmi_radar import (
         LAYOUT_CORRUPT,
         _image_specs,
         product_fingerprint,

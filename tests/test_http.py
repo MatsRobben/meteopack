@@ -376,3 +376,162 @@ def test_concurrent_writers_never_publish_a_mangled_tar(tmp_path):
     assert members, "a tar should have been published"
     for name in members:
         assert h.read_member(dest, name) == payloads[name]
+
+
+# ------------------------------------------- why a download failed, and checks
+
+
+def test_a_final_failure_says_how_many_attempts_and_what_failed(server, session, tmp_path):
+    """The ledger used to get "FetchError: url: HTTP 503" and nothing else."""
+    server.script["/f"] = [503] * 10
+    with pytest.raises(FetchError) as ei:
+        _fetch(server, "/f", tmp_path / "f.bin", session, retries=2)
+    assert (ei.value.attempts, ei.value.status, ei.value.error_class) == (3, 503, "HTTPError")
+
+
+def test_a_transient_transport_error_is_classed_by_its_type(server, session, tmp_path):
+    server.script["/f"] = ["truncate"] * 10
+    with pytest.raises(FetchError) as ei:
+        _fetch(server, "/f", tmp_path / "f.bin", session, retries=1)
+    assert ei.value.attempts == 2
+    assert ei.value.status is None
+    assert ei.value.error_class == "ChunkedEncodingError"
+
+
+def _check_failing(times: int):
+    calls = {"n": 0}
+
+    def check(path):
+        calls["n"] += 1
+        assert path.exists()                      # runs on the finished .part
+        if calls["n"] <= times:
+            raise h.IntegrityError("not a zip")
+        return h.Content(n_records=7)
+
+    return check, calls
+
+
+def test_a_file_failing_its_check_is_downloaded_again_and_not_published(server, session,
+                                                                        tmp_path):
+    check, calls = _check_failing(1)
+    dest = tmp_path / "f.bin"
+    raw = _fetch(server, "/f", dest, session, check=check)
+    assert server.hits["/f"] == 2 and calls["n"] == 2
+    assert raw.content == h.Content(n_records=7)
+    assert raw.attempts == 2
+
+
+def test_a_file_that_never_passes_its_check_fails_as_an_integrity_error(server, session,
+                                                                        tmp_path):
+    check, _ = _check_failing(99)
+    dest = tmp_path / "f.bin"
+    with pytest.raises(FetchError) as ei:
+        _fetch(server, "/f", dest, session, retries=2, check=check)
+    assert ei.value.error_class == "IntegrityError"
+    assert ei.value.attempts == 3
+    assert not dest.exists()                       # a broken file is never published
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_a_broken_file_already_on_disk_is_replaced_not_trusted(server, session, tmp_path):
+    """Before, existence was enough: a truncated file left by an older fetcher
+    was re-hashed and recorded as fetched."""
+    dest = tmp_path / "f.bin"
+    dest.write_bytes(b"truncated")
+
+    def check(path):
+        if path.read_bytes() == b"truncated":
+            raise h.IntegrityError("cut short")
+        return h.Content(n_records=1)
+
+    raw = _fetch(server, "/f", dest, session, check=check)
+    assert server.hits["/f"] == 1
+    assert dest.read_bytes() == PAYLOAD
+    assert raw.content.n_records == 1
+
+
+def test_a_good_file_already_on_disk_is_checked_and_not_downloaded(server, session, tmp_path):
+    dest = tmp_path / "f.bin"
+    dest.write_bytes(b"fine")
+    raw = _fetch(server, "/f", dest, session, check=lambda p: h.Content(n_records=4))
+    assert server.hits == {}
+    assert raw.attempts == 0
+    assert raw.content.n_records == 4
+
+
+def test_listings_are_retried_rather_than_read_as_empty(server, session):
+    """A listing GET used to be one bare request; its failure became an empty list."""
+    server.script["/dir/"] = [503, (429, {"Retry-After": "0"})]
+    resp = h.get_with_retry(server.base + "/dir/", session=session, backoff=0.01)
+    assert resp.status_code == 200 and server.hits["/dir/"] == 3
+
+
+def test_a_listing_that_keeps_failing_raises(server, session):
+    server.script["/dir/"] = [500] * 10
+    with pytest.raises(FetchError) as ei:
+        h.get_with_retry(server.base + "/dir/", session=session, retries=1, backoff=0.01)
+    assert ei.value.attempts == 2
+    server.script["/gone/"] = [404]
+    with pytest.raises(NotFoundError):
+        h.get_with_retry(server.base + "/gone/", session=session, backoff=0.01)
+    assert server.hits["/gone/"] == 1
+
+
+def test_a_source_s_throttle_status_is_retried(server, session, tmp_path):
+    """EA refuses ~16% of requests with 403 under load; asked again, they succeed."""
+    server.script["/f"] = [403, 403]
+    raw = _fetch(server, "/f", tmp_path / "f.bin", session, retry_status=[403])
+    assert server.hits["/f"] == 3 and raw.n_bytes == len(PAYLOAD)
+
+
+class _RecordingLimiter:
+    def __init__(self):
+        self.paused: list[tuple[str, float]] = []
+
+    def acquire(self, host):
+        pass
+
+    def pause(self, host, seconds):
+        self.paused.append((host, seconds))
+
+
+@pytest.mark.parametrize("step,extra", [((429, {"Retry-After": "0"}), ()), (503, ()),
+                                        (403, (403,))])
+def test_a_throttle_pauses_the_whole_host(server, session, tmp_path, step, extra):
+    """One thread backing off while the other workers carry on is not backing off."""
+    server.script["/f"] = [step]
+    limiter = _RecordingLimiter()
+    _fetch(server, "/f", tmp_path / "f.bin", session, limiter=limiter, retry_status=extra)
+    assert len(limiter.paused) == 1 and limiter.paused[0][0].startswith("127.0.0.1")
+
+
+def test_a_plain_server_error_does_not_pause_the_host(server, session, tmp_path):
+    server.script["/f"] = [500]
+    limiter = _RecordingLimiter()
+    _fetch(server, "/f", tmp_path / "f.bin", session, limiter=limiter)
+    assert limiter.paused == []
+
+
+def test_a_pause_holds_back_every_later_caller():
+    now = [100.0]
+    sleeps: list[float] = []
+    rl = RateLimiter(10.0, clock=lambda: now[0], sleep=sleeps.append)
+    rl.pause("h", 5.0)
+    rl.acquire("h")
+    rl.acquire("h")
+    assert sleeps == [pytest.approx(5.0), pytest.approx(5.1)]
+
+
+def test_stale_part_files_are_removed_and_fresh_ones_kept(tmp_path):
+    old = tmp_path / "a" / "x.zip.123.abcd.part"
+    fresh = tmp_path / "a" / "y.zip.456.ef01.part"
+    real = tmp_path / "a" / "z.zip"
+    for p in (old, fresh, real):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    import os
+
+    os.utime(old, (1000.0, 1000.0))
+    os.utime(real, (1000.0, 1000.0))
+    assert h.remove_stale_parts(tmp_path, now=1000.0 + h.STALE_PART_SECONDS + 1) == 1
+    assert not old.exists() and fresh.exists() and real.exists()

@@ -42,13 +42,36 @@ class Unit:
 
 
 @dataclass(frozen=True, slots=True)
+class Content:
+    """What a downloaded file holds, read by a source's integrity check.
+
+    Recorded beside the checksum in the `files` table so that the gap report
+    can tell a file that spans its period from one that does not, without
+    re-reading the raw layer. That is the check that would have caught EA's
+    station-years running 01-02..12-30 the day they were fetched instead of
+    a year later. `n_records == 0` is an empty answer from upstream.
+    """
+
+    n_records: int
+    time_min: datetime | None = None
+    time_max: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RawFile:
-    """A fetched unit on local disk, with the checksum recorded at fetch time."""
+    """A fetched unit on local disk, with the checksum recorded at fetch time.
+
+    `content` is filled when the source checked the file (`fetch_file(check=)`)
+    and None otherwise. `attempts` is how many HTTP requests this fetch took;
+    0 means the file was already on disk and nothing was downloaded.
+    """
 
     path: Path
     sha256: str
     n_bytes: int
     unit_key: str
+    content: Content | None = None
+    attempts: int = 0
 
 
 @runtime_checkable

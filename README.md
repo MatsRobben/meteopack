@@ -15,13 +15,21 @@ it); storage, scheduling, validation and bookkeeping are shared.
 | `knmi_radar/rtcor_5min` | radar rainfall accumulation, quality, gauge adjustment, 2018- | **packed and verified** against the raw files (2026-11-01) |
 | `knmi_radar/echotop_5min` | radar echo top height, 2008- | **packed and verified** |
 | `knmi_radar/refl_5min` | radar reflectivity composite, 2008- | **packed and verified** |
-| `knmi_insitu/obs_10min` | KNMI automatic weather stations | code working; store to be rebuilt |
-| `dwd`, `dmi`, `belgium`, `meteofrance`, `midas`, `ea` | station networks around NL | code fixed 2026-11-01; **re-fetch before trusting** (EA dropped 1 Jan / 31 Dec, DWD missed closed stations) |
-| `esoh/observations` | pan-European real-time stations (24 h rolling upstream) | works; wind selectors do not yet match DWD's E-SOH labelling |
-| `eumetsat_seviri/msg15_rss` | MSG SEVIRI rapid scan | works; resampled onto the radar grid, 4 of 11 channels |
+| `knmi_insitu/obs_10min` | KNMI automatic weather stations, 2012- | **packed and validated** (2026-11-05): 49.0 M rows, 73 stations |
+| `dwd/stations_10min` | German stations inside the radar footprint, 10 min, 2010- | **re-fetched, packed and validated** (2026-11-06): 390 M rows, 539 reporting stations (568 with metadata), closed stations included, to 2026-11-06 |
+| `dmi/stations_10min` | Danish stations, 10 min, 2012- | **packed and validated**: 75.0 M rows, 115 stations |
+| `belgium/aws_10min` | Belgian AWS, 10 min, 2012- | **packed and validated**: 9.97 M rows, 14 stations |
+| `meteofrance/hourly_all` | French stations near NL, hourly, 2010- | **packed**: 12.2 M rows, 237 stations; direct/diffuse/longwave/UV radiation are empty because no in-domain station measures them |
+| `meteofrance/precipitation_6min` | French precipitation stations near NL, 6 min, 2010-2026 | **raw archive present**: 116 département-period files; product configured, not packed |
+| `midas/hourly_weather` | UK stations, hourly, 2012- | **packed and validated**: 14.0 M rows, 185 stations (positions from the raw file headers when CEDA's token has expired) |
+| `ea/rainfall_15min` | England & Wales rain gauges, 15 min, 2012- | **re-fetched, packed and validated** (2026-11-06): 490 M rows, 993 reporting gauges (995 with metadata), every gauge-year 1 Jan - 31 Dec, to 2026-11-06 |
+| `eumetsat_seviri/msg15_rss` | MSG SEVIRI rapid scan | source configured; local archive was deleted |
+| `wow_nl/reports` | WOW-NL citizen weather reports, every report and field as uploaded, **irregular** in time, 2015-2025 | **packed and validated** (2026-11-06): see [docs/stores.md](docs/stores.md#irregular-stores-wow-nl) |
+| `wow_nl/qc` | WOW-NL quality-control flags, aligned row for row with `wow_nl/reports`: per variable a fail and a not-evaluable bitmask and a level, per report provenance bits, a station-month reliability table; reference-free (within-station and between-WOW-station tests) | **derived** (2026-11-06): 581.6 M reports in 11-22 min as four 12-CPU jobs; `meteopack derive wow_nl_qc`, see [docs/stores.md](docs/stores.md#quality-control-flags-derive-kind-qc---packedwow_nlqcv1) |
+| `training/stations/wow_nl_10min`, `training/stations/wow_nl_5min` | WOW-NL regularised per station: last/mean/max per bin, rain from the counter | **derived** (2026-11-06); every choice is a parameter (`meteopack derive wow_nl_10min --set ...`) |
 
-On the ICIS/DAS cluster the packed radar stores live under
-`/vol/knmimo-nobackup/users/mrobben/meteopack_data/packed/knmi_radar/` -
+On the ICIS/DAS cluster every store above lives under
+`/vol/knmimo-nobackup/users/mrobben/meteopack_data/packed/` -
 read them directly, there is no need to rebuild them.
 
 ## Reading a store
@@ -29,7 +37,7 @@ read them directly, there is no need to rebuild them.
 ```python
 import xarray as xr
 
-ds = xr.open_zarr(".../packed/knmi_radar/rtcor_5min/v1/dataset.zarr", consolidated=False)
+ds = xr.open_zarr(".../packed/radar/knmi_radar/rtcor_5min/v1/dataset.zarr", consolidated=False)
 usable = ~(ds.is_missing_frame | ds.is_corrupt_frame)     # frames with data
 rain = ds.accumulation_mm.sel(time=slice("2024-06-01", "2024-06-02"))
 ```
@@ -65,12 +73,37 @@ rain gauges - each file is one gauge's year:
 ```bash
 uv run meteopack list ea                      # what exists upstream (default: the last 24 h)
 uv run meteopack fetch ea --limit 5           # download 5 files - drop --limit for all of them
-uv run meteopack pack ea                      # build packed/ea/rainfall_15min/v1
+uv run meteopack pack ea                      # build packed/stations/ea/rainfall_15min/v1
 uv run meteopack validate ea                  # is it usable?
 uv run meteopack catalog ea                   # what is fetched and packed
 ```
 
 The same commands work for `dwd`, `dmi`, `belgium`, `meteofrance` and `midas`.
+
+Météo-France's six-minute precipitation archive is already in the raw layer.
+Pack or validate it separately from the hourly product:
+
+```bash
+uv run meteopack pack meteofrance --product precipitation_6min
+uv run meteopack validate meteofrance --product precipitation_6min
+```
+
+**WOW-NL** (citizen weather stations) is read from the local archive of
+yearly zips stored directly in the raw layer:
+
+```bash
+# Place the yearly archive zips (2015.zip ... 2025.zip) in:
+# $METEOPACK_DATA_ROOT/raw/stations/wow_nl/reports
+uv run meteopack pack wow_nl                       # the whole archive: 15-17 min on 48 CPUs
+uv run meteopack pack wow_nl --window 2024/2024    # rebuild one year; other months untouched
+uv run meteopack validate wow_nl
+uv run meteopack derive wow_nl_10min               # regular 10-minute grid per station
+uv run meteopack derive wow_nl_10min --set step_seconds=300 --set name=wow_nl_5min_try
+uv sync --extra qc                                 # titanlib, for the spatial consistency test
+uv run meteopack derive wow_nl_qc                  # QC flags for every report (packed/stations/wow_nl/qc/v1)
+uv run meteopack derive wow_nl_qc --window 2024/2024 --set variables.air_temperature.buddy.pos=2.5 \
+    --set name=wow_nl/qc_try                       # any threshold, into a new store
+```
 With `--limit` on a network that reports several variables in separate files
 (DWD), `validate` will say the variables you did not fetch are missing - it
 checks the store against everything the product config promises.
@@ -83,8 +116,8 @@ because `fetch` copies the tars when the archive is on another filesystem:
 export KNMI_RADAR_ARCHIVE=/path/to/nl_rdr_data_rtcor_5m_tar        # one per product:
 export KNMI_ECHOTOP_ARCHIVE=/path/to/radar_tar_echotopheight_5min   # *_ECHOTOP_*, *_REFL_*
 export KNMI_REFL_ARCHIVE=/path/to/radar_tar_refl_composites
-mkdir -p $METEOPACK_DATA_ROOT/raw/knmi_radar
-ln -s $KNMI_RADAR_ARCHIVE $METEOPACK_DATA_ROOT/raw/knmi_radar/rtcor_5min
+mkdir -p $METEOPACK_DATA_ROOT/raw/radar/knmi_radar
+ln -s $KNMI_RADAR_ARCHIVE $METEOPACK_DATA_ROOT/raw/radar/knmi_radar/rtcor_5min
 
 uv run meteopack pack knmi_radar --product rtcor_5min --window 2024-06-01/2024-06-08
 uv run meteopack validate knmi_radar --product rtcor_5min
@@ -107,11 +140,14 @@ seven days); a bare year or year-month is the whole period, both ends included
 
 ```
 $METEOPACK_DATA_ROOT/
-├── raw/<source>/<product>/        exactly what upstream sent; never modified
-├── packed/<source>/<product>/vN/  one analysis-ready store per product - read this
-├── training/<dataset>/vN/         datasets built from packed/ for model training
+├── raw/<category>/<source>/<product>/       exactly what upstream sent; never modified
+├── packed/<category>/<source>/<product>/vN/ one analysis-ready store per product - read this
+├── training/<category>/<dataset>/vN/        datasets built from packed/ for model training
 └── _bookkeeping/                  what was downloaded, built, and what failed
 ```
+
+Current categories are `stations`, `radar`, and `satellite`. Supporting
+`static_maps/` data remains separate.
 
 Each directory has a README of its own. Nothing is edited in place: every
 stage writes whole files and moves them into position, so a reader never sees
@@ -128,18 +164,32 @@ flowchart LR
 |---|---|---|
 | `scan` | reports every schema variant in `raw/` and compares it with the pinned one | nothing |
 | `list` | what exists upstream and what is still to do | nothing |
-| `fetch` | downloads, in parallel, atomically, rate-limited | `raw/`, `_bookkeeping/` |
+| `fetch` | downloads, in parallel, atomically, rate-limited, retried, integrity-checked; records why each unit ended | `raw/`, `_bookkeeping/` |
 | `parse` | parses raw files and reports what they hold | nothing |
 | `pack` | parses and writes the store | `packed/` |
 | `validate` | asks whether the store is *usable*, not merely present | nothing |
-| `derive` | builds training bricks, station matrices and splits | `training/` |
-| `catalog <source>` | what is fetched and packed for a source | nothing |
+| `derive` | builds training bricks, station matrices and splits; regularises irregular stores; QC flags for WOW-NL | `training/` (QC: `packed/stations/wow_nl/qc`) |
+| `catalog <source>` | what is fetched and packed for a source; `--gaps`: what is missing and why | nothing |
 | `credentials` | which keys this machine has, and which are missing | nothing |
 
 `fetch` skips what it already has, and downloads again only what is still
 changing upstream (the current year, an open hour, DWD's `recent/`) - over the
 old copy, which survives a failed download. `pack` rebuilds a store from all
 the raw files it is given; it is not incremental.
+
+**Every unit ends with a reason.** Transient errors (timeouts, resets, 5xx,
+429 with its Retry-After) are retried with exponential backoff; a file is
+checked before it is published (EA: a whole CSV; DWD: a ZIP whose CRC and
+last row are intact). The ledger then records `done`, `empty` (upstream had
+nothing), `absent` (404) or `failed` - with the error class, HTTP status,
+message and number of attempts. Only `done` is skipped next time, so running
+`fetch` again retries the failures. A listing that cannot be read fails the
+run instead of planning nothing. To see what is missing from the raw layer:
+
+```bash
+uv run meteopack catalog ea --gaps              # per file and per station x year, with the reason
+uv run meteopack catalog ea --gaps --out gaps/  # ... and the full tables as CSV
+```
 
 **Schema drift fails loudly.** Upstream formats change without notice. Each
 product config pins the layouts it has been checked against; a frame in any
@@ -160,7 +210,8 @@ sbatch --account=<yours> --exclude=cn79 --array=0-29 --cpus-per-task=4 --time=04
 ```
 
 `--shard/--shards` split `fetch`, `list` and `derive` across array tasks with
-no coordination. `pack` refuses them - two packs of one store would race on
+no coordination; the source's configured request rate is shared between the
+tasks, so an array is no harder on upstream than one job. `pack` refuses them - two packs of one store would race on
 the same files - so give one pack job the cores instead; it uses all of them.
 
 Worth knowing (details in [docs/runbooks/cluster.md](docs/runbooks/cluster.md)):
@@ -177,9 +228,9 @@ Every decision is data, not code:
 
 ```
 configs/
-├── sources/<source>.yaml            endpoints, rate limits, credential locations
-├── products/<source>/<product>.yaml variables, units, encoding, cadence, pinned layouts
-├── derive/<dataset>.yaml            inputs, target grid, tile, shards
+├── sources/<category>/<source>.yaml            endpoints, rate limits, credential locations
+├── products/<category>/<source>/<product>.yaml  variables, units, encoding, cadence, pinned layouts
+├── derive/<category>/<dataset>.yaml             inputs, target grid, tile, shards
 └── grids.yaml                       named grids
 ```
 
@@ -200,9 +251,9 @@ class Source(Protocol):
     def parse(self, raw, cfg) -> pl.DataFrame | xr.Dataset: ...  # canonical names and units
 ```
 
-1. `src/meteopack/sources/<name>.py` implementing it (`dwd.py` is a good model).
-2. `configs/sources/<name>.yaml` and `configs/products/<name>/<product>.yaml`.
-3. Register it in `sources/registry.py`.
+1. `src/meteopack/sources/<category>/<name>.py` implementing it (`stations/dwd.py` is a good model).
+2. `configs/sources/<category>/<name>.yaml` and `configs/products/<category>/<name>/<product>.yaml`.
+3. Add its category in `core/config.py` and register it in `sources/registry.py`.
 
 Rate limiting, retries, atomic writes, the ledger, partitioned and gridded
 stores, validation and the README in each store come with it.

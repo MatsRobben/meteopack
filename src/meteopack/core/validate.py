@@ -98,12 +98,21 @@ def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") 
     report.add("has time column", "time" in columns, ", ".join(columns))
     report.add("has station_id", "station_id" in columns)
 
-    duplicates = int(summary["duplicates"])
-    report.add("no duplicate (time, station)", duplicates == 0, f"{duplicates} duplicates")
+    if cfg.irregular:
+        # Two reports a station sent in the same second are two reports, and
+        # there is no grid to be on. What an irregular store must not hold is
+        # the same report twice; which columns identify a report is the
+        # source's knowledge, so that check is the source's `validate_store`.
+        report.stats["cadence"] = "irregular (cadence_seconds: null)"
+        if summary.get("null_station_rows"):
+            report.stats["rows_without_station_id"] = int(summary["null_station_rows"])
+    else:
+        duplicates = int(summary["duplicates"])
+        report.add("no duplicate (time, station)", duplicates == 0, f"{duplicates} duplicates")
 
-    off_grid = int(summary.get("off_grid") or 0)
-    report.add("all times on cadence", off_grid == 0,
-               f"{off_grid} rows off the {cfg.cadence_seconds}s grid")
+        off_grid = int(summary.get("off_grid") or 0)
+        report.add("all times on cadence", off_grid == 0,
+                   f"{off_grid} rows off the {cfg.cadence_seconds}s grid")
 
     # Observations without positions are unusable for anything spatial, and the
     # failure is silent downstream: a dense matrix just drops those stations.
@@ -112,8 +121,7 @@ def validate_points(cfg: ProductConfig, root: Path, *, layer: Layer = "packed") 
     # Every configured variable must be in the store and have at least one
     # value. A selector that matches nothing upstream produces a column of
     # nulls, or no column, and passed silently: air_pressure was 0 of 237,600
-    # rows in one quickstart, and E-SOH's wind selectors match nothing DWD
-    # publishes.
+    # rows in one quickstart.
     for var in cfg.variables:
         if var.name not in columns:
             report.add(f"{var.name} has values", False,

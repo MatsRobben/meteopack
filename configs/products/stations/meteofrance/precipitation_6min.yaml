@@ -1,0 +1,65 @@
+# Météo-France BASE six-minute precipitation observations, clipped to the
+# KNMI radar footprint.
+#
+# This is the MIN feed handled by the same reader as hourly_all. The RR field
+# is the precipitation amount for each native six-minute interval.
+
+source: meteofrance
+description: >-
+  Météo-France six-minute precipitation observations for departments inside
+  the KNMI radar footprint.
+product: precipitation_6min
+version: 1
+
+cadence_seconds: 360
+grid_id: knmi_1km_stereo
+
+store:
+  kind: points
+  chunks:
+    time: 6720                 # four weeks at six-minute cadence
+    station: 64
+  compressor: zstd
+  compression_level: 3
+  partition_by: [year]
+
+raw_layout:
+  archive: none
+  granularity: year
+
+retention:
+  raw:
+    keep: true
+    tier: cold
+  canonical:
+    keep: true
+  derived:
+    keep: true
+
+variables:
+  - name: precipitation_amount
+    source_key: RR
+    units: mm
+    long_name: Precipitation amount during the preceding six-minute interval
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 500.0
+
+extra:
+  s3_subdir: MIN
+  file_prefix: MN
+  date_column: AAAAMMJJHHMN
+  date_format: "%Y%m%d%H%M"
+
+  # Keep the same in-domain département filter as hourly_all.
+  departements:
+    ["02", "08", "10", "14", "21", "25", "27", "28", "35", "41", "45", "49",
+     "50", "51", "52", "53", "54", "55", "57", "59", "60", "61", "62", "67",
+     "68", "70", "72", "76", "77", "78", "80", "88", "89", "90", "91", "92",
+     "93", "94", "95"]
+
+  # No fingerprint is pinned yet; the parser checks drift after fingerprints
+  # are collected from the MIN feed.
+  schema_fingerprints: {}
+  missing_sentinels: []
+  drop_off_cadence: true

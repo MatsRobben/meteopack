@@ -217,3 +217,43 @@ def test_explicit_stage_still_wins(tmp_path):
     cat = Catalog(tmp_path)
     cat.mark("fetch:x", "done", stage="override", unit_key="u")
     assert cat.jobs().row(0, named=True)["stage"] == "override"
+
+
+def test_a_failure_is_recorded_with_its_reason_and_retried(tmp_path: Path):
+    cat = Catalog(tmp_path)
+    key = job_key("fetch", "dwd/x/2015")
+    cat.mark(key, "failed", outcome="failed", error_class="ReadTimeout", http_status=None,
+             attempts=6, error="read timed out")
+    row = cat.query("SELECT outcome, error_class, attempts, error FROM jobs").row(0)
+    assert row == ("failed", "ReadTimeout", 6, "read timed out")
+    assert cat.pending("fetch", [key]) == [key]
+
+
+def test_an_unknown_outcome_is_refused(tmp_path: Path):
+    with pytest.raises(ValueError, match="outcome"):
+        Catalog(tmp_path).mark(job_key("fetch", "u"), "done", outcome="ok")
+
+
+def test_the_file_content_from_the_check_is_recorded(tmp_path: Path):
+    from meteopack.sources.base import Content
+
+    cat = Catalog(tmp_path)
+    t0, t1 = datetime(2023, 1, 1, tzinfo=UTC), datetime(2023, 12, 31, 23, 45, tzinfo=UTC)
+    raw = RawFile(Path("/raw/a.csv"), "0" * 64, 9, "a", content=Content(35040, t0, t1))
+    cat.record_file(raw, source="ea", product="p", url="u")
+    row = cat.query("SELECT n_records, time_min, time_max FROM files").row(0)
+    assert row == (35040, datetime(2023, 1, 1), datetime(2023, 12, 31, 23, 45))
+
+
+def test_shards_written_before_the_outcome_columns_still_read(tmp_path: Path):
+    """A data root keeps its old ledger shards; the new columns read as null."""
+    import polars as pl
+
+    old = Catalog(tmp_path)
+    old.mark(job_key("fetch", "u"), "done")
+    path = old.shard_path("jobs")
+    pl.read_parquet(path).drop("outcome", "http_status", "error_class").write_parquet(path)
+    new = Catalog(tmp_path)
+    new.mark(job_key("fetch", "v"), "failed", outcome="failed", http_status=503)
+    rows = dict(new.query("SELECT unit_key, http_status FROM jobs").iter_rows())
+    assert rows == {"u": None, "v": 503}

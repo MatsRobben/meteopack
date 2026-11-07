@@ -32,6 +32,9 @@ Four directories, in the order data moves through them.
 | `training/` | Datasets built *from* `packed/` and shaped for model training. | `meteopack derive` | Yes — rebuildable from `packed/`. |
 | `_bookkeeping/` | Bookkeeping: what has been downloaded, what has been built, what failed. No observations. | every command | Yes, but then the pipeline no longer knows what it already did and will redo it. |
 
+Within `raw/`, `packed/` and `training/`, datasets are grouped by category:
+`stations/`, `radar/` and `satellite/`. Provider or derived dataset names sit
+inside the category. `static_maps/` remains a separate supporting-data layer.
 Each directory has its own README with the detail.
 
 Nothing here is edited in place by hand. Every stage rewrites whole files and
@@ -40,7 +43,7 @@ moves them into position, so a reader always sees a complete file.
 
 _RAW = """# raw/ — as downloaded, byte for byte
 
-Layout: `raw/<source>/<product>/...`, below which the upstream server's own
+Layout: `raw/<category>/<source>/<product>/...`, below which the upstream server's own
 layout is kept. Nothing here is renamed, converted or cleaned, so a file can
 always be compared against what the provider still serves.
 
@@ -54,7 +57,7 @@ it.
 
 _CANONICAL = """# packed/ — the datasets you read
 
-Layout: `packed/<source>/<product>/v<n>/`, one store per product, versioned
+Layout: `packed/<category>/<source>/<product>/v<n>/`, one store per product, versioned
 so a schema change does not overwrite the old one.
 
 Two kinds of store, named by `store.kind` in the product config:
@@ -97,7 +100,7 @@ validate <source>` checks a store against it.
 
 _DERIVED = """# training/ — built from packed/, shaped for a model
 
-Layout: `training/<name>/v<n>/`, one per entry in `configs/derive/`.
+Layout: `training/<category>/<name>/v<n>/`, one per entry in `configs/derive/`.
 
 These are not new observations. Each one is a reshaping of `packed/` for a
 specific consumer — a model, a plot, an evaluation — and exists so that work is
@@ -115,9 +118,19 @@ Three tables, each a *directory* of Parquet files rather than one file:
 
 | table     | one row per | used for |
 |-----------|-------------|----------|
-| `jobs/`   | unit of work at one stage | skipping what is already done on a re-run |
-| `files/`  | raw file fetched | finding which file covers which time |
+| `jobs/`   | unit of work at one stage | skipping what is already done on a re-run, and why each unit ended |
+| `files/`  | raw file fetched | finding which file covers which time (rows and first/last time, from the fetch-time check) |
 | `stores/` | store built | what exists, from which config, how many records |
+
+A fetch's `jobs` row says what happened in `outcome`: `done`, `empty` (upstream
+answered with nothing), `absent` (404) or `failed` - with `error_class`,
+`http_status`, `error` and `attempts` (requests made). Only `status = done` is
+skipped by the next run, so failures are retried by running fetch again.
+
+`listings/<category>/<source>/<product>/` holds, per fetch run, the listing it planned
+from: every unit upstream offered and, where the source can say, what its
+station catalogue claims should exist. Set against `jobs` and `files`, that is
+what `meteopack catalog <source> --gaps` reports as missing, and why.
 
 **Why the odd filenames.** Each writing process owns one file, named
 `<when>-<host>-<pid>-t<task>-<nonce>.parquet`: the time it was first written,
@@ -130,6 +143,7 @@ the newest row per key, so duplicates across files are expected and harmless.
 Do not edit these by hand. To read them:
 
     meteopack catalog <source>          # a summary
+    meteopack catalog <source> --gaps   # what is missing from raw/, and why
     duckdb -c "select * from read_parquet('_bookkeeping/jobs/*.parquet')"
 
 Deleting `_bookkeeping/` loses no observations. The pipeline simply forgets what it
@@ -158,8 +172,11 @@ def store_readme(cfg, store_path: Path | str, info: dict | None = None) -> Path 
         "",
         (cfg.description or "").strip() or f"{cfg.source} {cfg.product}.",
         "",
-        f"- source: `{cfg.source}`   product: `{cfg.product}`   version: {cfg.version}",
-        f"- cadence: {cfg.cadence_seconds} s",
+        f"- category: `{cfg.category}`   source: `{cfg.source}`   product: `{cfg.product}`   version: {cfg.version}",
+        f"- storage path: `packed/{cfg.category}/{cfg.store_id}`",
+        (f"- cadence: {cfg.cadence_seconds} s" if cfg.cadence_seconds is not None else
+         "- cadence: irregular - one row per report, at the time it was made; nothing "
+         "snapped to a grid"),
     ]
     if cfg.grid_id:
         lines.append(f"- grid: `{cfg.grid_id}`")
@@ -235,6 +252,11 @@ def store_readme(cfg, store_path: Path | str, info: dict | None = None) -> Path 
             "",
             "Station coordinates are in `stations/`, joined on `station_id` (text).",
         ]
+        # What only this product needs said (its side tables, its provenance
+        # columns): from the config, so it travels with the store's definition.
+        extra = cfg.extra.get("readme")
+        if extra:
+            lines += ["", str(extra).rstrip()]
     text = "\n".join(lines) + "\n"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

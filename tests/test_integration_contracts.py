@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import inspect
 import pathlib
-import sys
 import tempfile
 from pathlib import Path
 from typing import ClassVar
 
 from meteopack.core import http
-from meteopack.sources import dwd
+from meteopack.sources.stations import dwd
 from meteopack.sources.base import Source, Unit
 
 
@@ -120,8 +119,7 @@ def test_sources_constructed_without_a_session_can_still_fetch(monkeypatch, tmp_
 
     from meteopack.core import http
     from meteopack.sources.base import RawFile
-    from meteopack.sources.dwd import DwdStations
-    from meteopack.sources.esoh import EsohObservations
+    from meteopack.sources.stations.dwd import DwdStations
 
     real_sig = inspect.signature(http.fetch_file)
     captured = {}
@@ -139,11 +137,6 @@ def test_sources_constructed_without_a_session_can_still_fetch(monkeypatch, tmp_
     DwdStations().fetch(unit, tmp_path)
     assert captured["session"] is not None, "DwdStations passed a None session"
 
-    captured.clear()
-    esoh_unit = Unit(key="k", url="https://example.invalid/x.json", meta={})
-    EsohObservations().fetch(esoh_unit, tmp_path)
-    assert captured["session"] is not None, "EsohObservations passed a None session"
-
 
 def test_volatile_units_are_actually_refetched(monkeypatch, tmp_path):
     """A volatile unit must hit the network again, not just the ledger.
@@ -157,7 +150,7 @@ def test_volatile_units_are_actually_refetched(monkeypatch, tmp_path):
 
     from meteopack.core import http
     from meteopack.sources.base import RawFile
-    from meteopack.sources.dwd import DwdStations
+    from meteopack.sources.stations.dwd import DwdStations
 
     real_sig = inspect.signature(http.fetch_file)
     seen: list[bool] = []
@@ -233,7 +226,7 @@ def test_schema_drift_is_one_exception_across_every_source():
 
     from meteopack.sources.common import SchemaDriftError, SourceError
 
-    names = ["dwd", "esoh", "belgium", "dmi", "ea", "knmi_insitu",
+    names = ["dwd", "belgium", "dmi", "ea", "knmi_insitu",
              "knmi_radar", "meteofrance", "midas", "eumetsat_seviri"]
     for name in names:
         mod = importlib.import_module(f"meteopack.sources.{name}")
@@ -304,7 +297,7 @@ def test_configs_carry_no_machine_specific_absolute_paths():
 
     root = pathlib.Path(__file__).resolve().parents[1] / "configs"
     offenders = []
-    for path in sorted(root.rglob("*.yaml")):
+    for path in sorted(root.rrglob("*.yaml")):
         for n, line in enumerate(path.read_text().splitlines(), 1):
             bare = re.sub(r"\$\{\w+:-[^}]*\}", "", line.split("#", 1)[0])
             if "/vol/" in bare or "/dev/shm" in bare or "/home/" in bare:
@@ -344,7 +337,11 @@ def test_derive_cli_calls_its_builders_the_way_they_are_declared():
     assert "task" in bricks_params and "n_tasks" in bricks_params
     assert "shard" not in bricks_params
 
-    src = inspect.getsource(sys.modules["meteopack.cli"].stage_derive)
+    # Imported here rather than looked up in sys.modules: that relied on some
+    # earlier test having imported the CLI, and failed when run on its own.
+    import meteopack.cli
+
+    src = inspect.getsource(meteopack.cli.stage_derive)
     assert "builder.build(spec, root, task=" in src, "bricks must get task=/n_tasks="
     assert "DeriveSpec(cfg, timeline)" in src, "builders take a DeriveSpec, not a DeriveConfig"
     assert "splits_mod.write(spec, root)" in src, "a brick store needs its split index"
@@ -385,7 +382,7 @@ def test_every_credentialed_source_is_in_the_runbook():
 
     repo = pathlib.Path(__file__).resolve().parents[1]
     runbook = (repo / "docs" / "runbooks" / "credentials.md").read_text()
-    for path in sorted((repo / "configs" / "sources").glob("*.yaml")):
+    for path in sorted((repo / "configs" / "sources").rglob("*.yaml")):
         variables = yaml.safe_load(path.read_text()).get("credentials_env") or []
         for variable in variables:
             assert variable in runbook, (
@@ -419,7 +416,7 @@ def test_a_source_fits_out_the_session_the_cli_hands_it():
     from meteopack.jobs.plan import load_source_config
     from meteopack.sources import registry
 
-    for name in ("dwd", "belgium", "dmi", "ea", "esoh", "meteofrance"):
+    for name in ("dwd", "belgium", "dmi", "ea", "meteofrance"):
         cfg = load_source_config(name)
         src = registry.build(name, cfg, session=requests.Session())
         session = src._requests_session()

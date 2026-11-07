@@ -1,0 +1,61 @@
+# WOW-NL reports on a regular 5-minute grid, per station (long format).
+#
+# Every line below is a choice, and every one can be overridden for a run:
+#   meteopack derive wow_nl_10min --set step_seconds=300 --set name=wow_nl_5min
+#   meteopack derive wow_nl_10min --set label=centre --set rain.rule=naive --set name=...
+# The parameters are written to training/<category>/<name>/v<version>/regularise.json,
+# with every output column marked causal or not. A run whose parameters differ
+# from an existing store of the same name refuses to mix into it.
+# See meteopack.derive.regularise for what each method means.
+
+kind: regularise
+name: wow_nl_5min
+version: 1
+description: >-
+  WOW-NL citizen reports per station on a 5-minute grid, bins (T-5min, T]
+  like KNMI radar; last/mean/max per variable, rain from the counter by the
+  robust rule. No QC.
+input: wow_nl/reports/v1
+
+step_seconds: 300
+# end: bin T holds (T - step, T]   (KNMI radar's convention; causal)
+# start: [T, T + step)   centre: [T - step/2, T + step/2)
+label: end
+# Epoch-aligned: bins at :00, :10, ... A radar day (08:05 UTC start) is the
+# same grid for any step that divides 5 minutes' offset; for daily bins use
+# origin: 2000-01-01T08:05:00Z.
+origin: 1970-01-01T00:00:00Z
+
+variables:
+  air_temperature: {methods: [last, mean]}
+  dew_point_temperature: {methods: [last]}
+  relative_humidity: {methods: [last]}
+  air_pressure_at_sea_level: {methods: [last]}
+  air_pressure: {methods: [last]}
+  wind_speed: {methods: [last, mean]}
+  wind_speed_of_gust: {methods: [max]}
+  # A mean of directions is not a direction (359 and 1 average to 180), so
+  # only `last` is offered here.
+  wind_from_direction: {methods: [last]}
+  rainfall_rate: {methods: [max]}
+  # Non-causal alternatives, for comparison:
+  # air_temperature: {methods: [nearest, linear], tolerance_s: 120, max_gap_s: 1200}
+
+rain:
+  counter: rainfall_counter
+  rule: robust          # or naive (wow_nl_analysis/scripts/rain_counter.py)
+  output: rainfall_amount
+  drop_mm: 0.25
+  lookahead: 3
+  valid_min: 0.0
+  valid_max: 1000.0
+  max_gap_s: null       # increments over longer gaps: not attributed (and counted)
+
+# Per-report stages before binning, in order. None by default: QC thresholds
+# and homogenisation are being decided by the literature review. Example:
+# stages:
+#   - {kind: range_mask, variable: air_temperature, min: -40, max: 50}
+stages: []
+
+dtype: float32          # float64 keeps every value exactly; float32 halves the store
+threads: 2              # polars threads per worker; workers = CPUs / threads

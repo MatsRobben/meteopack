@@ -1,0 +1,33 @@
+# UK Environment Agency Hydrology API (environment.data.gov.uk/hydrology).
+#
+# Keyless, Open Government Licence, plain HTTPS: a JSON station catalogue and a
+# `readings.csv` bulk endpoint. The quality-controlled ("qualified") 15-minute
+# rainfall series goes back to about 1990, which makes this the longest
+# high-cadence gauge archive available to us without a contract.
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: ea
+
+base_url: https://environment.data.gov.uk/hydrology
+
+rate_limit:
+  # A station-year CSV is ~1-6 MB and takes ~0.8 s, so the cost here is
+  # genuinely per request. The service publishes no quota and sends no 429.
+  # It throttles with 403 instead: with 8 workers, 1,084 of 6,580 requests
+  # (16%) were refused on 2026-11-06, and every one of them succeeded when
+  # asked again. So 403 is retried, a 403 pauses the whole host (see
+  # core.http), and the concurrency is halved.
+  requests_per_second: 5.0
+  max_workers: 4
+  max_retries: 6
+  backoff_seconds: 2.0
+  retry_status: [403]
+
+# Open data: nothing to authenticate with.
+credentials_env: []
+
+extra:
+  # A year's CSV is a few MB and the server is not fast; 120 s is not generous.
+  timeout_seconds: 120
+  user_agent: "meteopack/0.1 (+ea-hydrology)"

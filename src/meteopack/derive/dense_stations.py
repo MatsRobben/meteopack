@@ -49,7 +49,8 @@ _NOT_VARIABLES = {"time", "station_id"}
 
 def store_path(spec: DeriveSpec, root: str | os.PathLike[str], *,
                layer: Layer = DEFAULT_LAYER) -> Path:
-    return layer_path(Path(root), layer, *spec.store_id.split("/"))
+    return layer_path(Path(root), layer, *spec.store_id.split("/"),
+                      category=spec.category)
 
 
 def matrix_path(spec: DeriveSpec, root: str | os.PathLike[str], *,

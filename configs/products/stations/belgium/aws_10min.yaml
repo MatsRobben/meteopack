@@ -1,0 +1,211 @@
+# RMI Belgium 10-minute AWS observations, clipped to the KNMI radar footprint.
+#
+# Loads into meteopack.core.config.ProductConfig. The variable map is the whole
+# of the source-specific knowledge: `source_key` is the CSV column name in the
+# `aws:aws_10min` WFS export, which is exactly what the layer calls the field.
+#
+# Missing arrives as an empty field, which is nulled before scale/offset, and
+# valid_min / valid_max are expressed in the canonical units below (i.e.
+# post-scale).
+#
+# THE RANGES BELOW ARE LOAD BEARING. RMI publishes RAW, un-QC'd observations:
+# pressures near 500 hPa, humidity above 100 %, negative radiation all occur in
+# the archive. Everywhere else in this package the valid range is a guard
+# against a corrupt download; here it is the only quality control there is. The
+# bounds are deliberately wide so that genuine extremes survive -- the Uccle
+# series really does reach 35.9 degC (2022-07-19, verified live).
+
+source: belgium
+description: >-
+  Belgian RMI automatic weather stations, 10-minute observations (open synoptic network).
+product: aws_10min
+version: 1
+
+cadence_seconds: 600          # the layer's native 10-minute step
+grid_id: knmi_1km_stereo      # stations outside this footprint are dropped
+
+store:
+  kind: points
+  chunks:
+    time: 4032                # 4 weeks of 10-minute steps
+    station: 64
+  compressor: zstd
+  compression_level: 3
+  partition_by: [year]
+
+raw_layout:
+  archive: none               # one CSV per station-year is already coarse
+  granularity: year           # enough; 14 stations x ~25 years is ~350 files
+
+retention:
+  raw:
+    keep: true
+    tier: cold                # a few MB per station-year, and re-pulling means
+                              # going back to a server that must not be rushed
+  canonical:
+    keep: true
+  derived:
+    keep: true
+
+variables:
+  - name: air_temperature
+    source_key: temp_dry_shelter_avg
+    units: degC
+    long_name: Air temperature in shelter, 10-minute mean
+    dtype: float32
+    valid_min: -60.0
+    valid_max: 60.0
+
+  - name: relative_humidity
+    source_key: humidity_rel_shelter_avg
+    units: "%"
+    long_name: Relative humidity in shelter, 10-minute mean
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 100.5          # raw: a saturated sensor reports just over 100
+                              # and clipping it to null would gap every fog event
+
+  - name: air_pressure
+    source_key: pressure
+    units: hPa
+    long_name: Air pressure
+    dtype: float32
+    valid_min: 800.0          # raw: ~504 hPa readings occur and are nonphysical
+    valid_max: 1100.0
+
+  - name: precipitation_amount
+    source_key: precip_quantity
+    units: mm
+    long_name: Precipitation sum over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 200.0
+
+  - name: wind_speed
+    source_key: wind_speed_10m
+    units: m s-1
+    long_name: Wind speed at 10 m
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 120.0
+
+  - name: wind_speed_30m
+    source_key: wind_speed_avg_30m
+    units: m s-1
+    long_name: Wind speed at 30 m, 10-minute mean
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 120.0
+
+  - name: wind_from_direction
+    source_key: wind_direction
+    units: degree
+    long_name: Wind direction
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 360.0
+
+  - name: wind_speed_of_gust
+    source_key: wind_gusts_speed
+    units: m s-1
+    long_name: Maximum wind gust over the preceding 10 minutes
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 150.0
+
+  - name: sunshine_duration
+    source_key: sun_duration
+    units: s
+    long_name: Sunshine duration over the preceding 10 minutes
+    dtype: float32
+    scale: 60.0               # RMI publishes sun_duration in minutes: a fully
+                              # sunny 10-minute interval reads exactly 10
+                              # (Uccle 2022-07-19T11:00Z, verified live)
+    valid_min: 0.0
+    valid_max: 600.0
+
+  - name: surface_downwelling_shortwave_flux
+    source_key: short_wave_from_sky_avg
+    units: W m-2
+    long_name: Global short-wave radiation, 10-minute mean
+    dtype: float32
+    valid_min: -50.0          # raw: the pyranometer's night offset drifts a few
+                              # W/m2 negative; clipping at 0 would null every
+                              # night rather than record it as ~zero
+    valid_max: 1600.0
+
+  - name: direct_shortwave_flux
+    source_key: sun_int_avg
+    units: W m-2
+    long_name: Direct sunshine intensity, 10-minute mean
+    dtype: float32
+    valid_min: 0.0
+    valid_max: 2000.0
+
+  - name: grass_temperature
+    source_key: temp_grass_pt100_avg
+    units: degC
+    long_name: Grass (PT100) temperature, 10-minute mean
+    dtype: float32
+    valid_min: -70.0
+    valid_max: 80.0
+
+  - name: soil_temperature
+    source_key: temp_soil_avg
+    units: degC
+    long_name: Soil temperature, 10-minute mean
+    dtype: float32
+    valid_min: -40.0
+    valid_max: 60.0
+
+  - name: soil_temperature_5cm
+    source_key: temp_soil_avg_5cm
+    units: degC
+    long_name: Soil temperature at 5 cm, 10-minute mean
+    dtype: float32
+    valid_min: -40.0
+    valid_max: 60.0
+
+  - name: soil_temperature_10cm
+    source_key: temp_soil_avg_10cm
+    units: degC
+    long_name: Soil temperature at 10 cm, 10-minute mean
+    dtype: float32
+    valid_min: -40.0
+    valid_max: 60.0
+
+  - name: soil_temperature_20cm
+    source_key: temp_soil_avg_20cm
+    units: degC
+    long_name: Soil temperature at 20 cm, 10-minute mean
+    dtype: float32
+    valid_min: -40.0
+    valid_max: 60.0
+
+  - name: soil_temperature_50cm
+    source_key: temp_soil_avg_50cm
+    units: degC
+    long_name: Soil temperature at 50 cm, 10-minute mean
+    dtype: float32
+    valid_min: -40.0
+    valid_max: 60.0
+
+# Pinned on 2026-10-31 from a live aws:aws_10min CSV export. `scan` reports the
+# fingerprint it sees; re-pin here only after looking at what moved. The
+# structural columns FID and the_geom are excluded from the hash -- FID is a
+# per-request GeoServer id, and the_geom is the lon/lat-SWAPPED duplicate of the
+# station layer, which is why coordinates come from aws:aws_station instead.
+schema_fingerprint: "0032a9985144cfe9"
+
+extra:
+  # Missing arrives as an empty field; this is here for a numeric sentinel.
+  # Applied before scale/offset.
+  missing_sentinels: []
+
+  # Drop observations that are not on the 600 s grid rather than snapping them.
+  drop_off_cadence: true
+
+  # The 18th column, `qc_flags`, is a JSON blob of per-variable `validated`
+  # booleans. It is deliberately NOT packed: false means "not yet checked", not
+  # "wrong", so masking on it would quietly delete the recent tail of every
+  # series. See meteopack.sources.stations.belgium._qc_flags if you want to inspect it.

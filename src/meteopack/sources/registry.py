@@ -21,16 +21,16 @@ _GROUP = "meteopack.sources"
 
 #: name -> "module:attribute"
 BUILTIN: dict[str, str] = {
-    "dwd": "meteopack.sources.dwd:DwdStations",
-    "esoh": "meteopack.sources.esoh:EsohObservations",
-    "knmi_radar": "meteopack.sources.knmi_radar:KnmiRadar",
-    "belgium": "meteopack.sources.belgium:RmiAws",
-    "dmi": "meteopack.sources.dmi:DmiStations",
-    "ea": "meteopack.sources.ea:EaRainfall",
-    "eumetsat_seviri": "meteopack.sources.eumetsat_seviri:EumetsatSeviri",
-    "knmi_insitu": "meteopack.sources.knmi_insitu:KnmiInsitu",
-    "meteofrance": "meteopack.sources.meteofrance:MeteoFranceStations",
-    "midas": "meteopack.sources.midas:MidasOpen",
+    "dwd": "meteopack.sources.stations.dwd:DwdStations",
+    "knmi_radar": "meteopack.sources.radar.knmi_radar:KnmiRadar",
+    "belgium": "meteopack.sources.stations.belgium:RmiAws",
+    "dmi": "meteopack.sources.stations.dmi:DmiStations",
+    "ea": "meteopack.sources.stations.ea:EaRainfall",
+    "eumetsat_seviri": "meteopack.sources.satellite.eumetsat_seviri:EumetsatSeviri",
+    "knmi_insitu": "meteopack.sources.stations.knmi_insitu:KnmiInsitu",
+    "meteofrance": "meteopack.sources.stations.meteofrance:MeteoFranceStations",
+    "midas": "meteopack.sources.stations.midas:MidasOpen",
+    "wow_nl": "meteopack.sources.stations.wow_nl:WowNl",
 }
 
 

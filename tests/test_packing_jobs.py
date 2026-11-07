@@ -193,3 +193,62 @@ def test_validate_flags_a_frame_whose_file_is_not_in_the_table(tmp_path, monkeyp
     pl.read_parquet(path).filter(pl.col("file") == "day0").write_parquet(path)
     report = validate(cfg, tmp_path)
     assert not report.ok and "provenance table" in report.text()
+
+
+def test_a_dead_partition_writer_is_reported_by_its_label():
+    """A dwd pack lost a partition writer to the OOM killer and then crashed in
+    the error path itself: PartitionTask has no raw_path (2026-11-05)."""
+    from meteopack.jobs import packing
+
+    tasks = [packing.PartitionTask(label=f"year={2020 + i}", files=(), source="s",
+                                   product="p", root="/tmp") for i in range(3)]
+    results = packing.run(tasks, _suicide, workers=2, stall_timeout=60)
+    assert len(results) == len(tasks)
+    assert {r["path"] for r in results} == {t.label for t in tasks}
+    assert all("worker died" in r["error"] or "not attempted" in r["error"] for r in results)
+
+
+def test_partitions_are_written_only_as_many_at_once_as_memory_allows():
+    """Seventeen dwd partitions written together reached 127 GB in a 110 GB job."""
+    from meteopack.jobs import packing
+
+    gib = 1 << 30
+    tasks = [packing.PartitionTask(label=str(i), files=(), source="s", product="p",
+                                   root="/tmp", n_bytes=2 * gib) for i in range(17)]
+    # 7x expansion -> 14 GiB each; 70% of 110 GiB = 77 GiB -> 5 at once
+    assert packing.partition_workers(tasks, 24, limit=110 * gib) == 5
+    assert packing.partition_workers(tasks, 4, limit=110 * gib) == 4
+    # one partition bigger than the budget still gets a worker, and fails on its own
+    huge = [packing.PartitionTask(label="x", files=(), source="s", product="p",
+                                  root="/tmp", n_bytes=100 * gib)]
+    assert packing.partition_workers(huge, 24, limit=110 * gib) == 1
+    assert packing.memory_limit_bytes() is None or packing.memory_limit_bytes() > 0
+
+
+def test_write_partition_merges_real_spill_files(tmp_path):
+    """The partition writer had no test of its own: a bad keyword to read_ipc
+    failed every partition of the first real pack after it was edited."""
+    from datetime import UTC, datetime
+
+    import polars as pl
+
+    from meteopack.core.store import points
+    from meteopack.jobs import packing
+
+    times = [datetime(2020, 6, 1, 0, 10 * i, tzinfo=UTC) for i in range(3)]
+    frame = pl.DataFrame({"time": times, "station_id": ["6447"] * 3,
+                          "air_temperature": [10.0, 11.0, 12.0]})
+    frame = frame.with_columns(pl.col("time").dt.cast_time_unit("us"))
+    spills = []
+    for i, part in enumerate((frame.select("time", "station_id", "air_temperature"),
+                              frame.select("time", "station_id"))):
+        f = tmp_path / f"{i}.arrow"
+        part.write_ipc(f)
+        spills.append(str(f))
+    task = packing.PartitionTask(label="2020", files=tuple(spills), source="belgium",
+                                 product="aws_10min", root=str(tmp_path / "root"))
+    out = packing.write_partition(task)
+    assert out["rows"] == 3 and out["merged"] == 6, out   # both rows of each pair count
+    assert out["peak_rss"] > 0
+    back = points.read("belgium/aws_10min/v1", tmp_path / "root")
+    assert back.sort("time")["air_temperature"].to_list() == [10.0, 11.0, 12.0]

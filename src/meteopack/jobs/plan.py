@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from meteopack.core.catalog import Catalog, job_key
-from meteopack.core.config import ProductConfig, SourceConfig
+from meteopack.core.config import ProductConfig, SourceConfig, category_for_source
 from meteopack.sources.base import Source, TimeWindow, Unit
 
 if TYPE_CHECKING:
@@ -80,7 +80,9 @@ def load_yaml(path: Path) -> dict:
 
 
 def load_source_config(name: str, *, configs: str | Path | None = None) -> SourceConfig:
-    path = config_dir(configs) / "sources" / f"{name}.yaml"
+    base = config_dir(configs) / "sources"
+    category = category_for_source(name)
+    path = base / category / f"{name}.yaml" if category else base / f"{name}.yaml"
     if not path.exists():
         raise FileNotFoundError(f"no source config for {name!r}: {path}")
     return SourceConfig(**load_yaml(path))
@@ -89,12 +91,14 @@ def load_source_config(name: str, *, configs: str | Path | None = None) -> Sourc
 def load_product_config(
     source: str, product: str | None = None, *, configs: str | Path | None = None
 ) -> ProductConfig:
-    """Load `configs/products/<source>/<product>.yaml`.
+    """Load `configs/products/<category>/<source>/<product>.yaml`.
 
     With no product named, a source with exactly one product resolves to it;
     with several, the caller must choose rather than get an arbitrary one.
     """
-    base = config_dir(configs) / "products" / source
+    products = config_dir(configs) / "products"
+    category = category_for_source(source)
+    base = products / category / source if category else products / source
     if not base.is_dir():
         raise FileNotFoundError(f"no product configs for source {source!r}: {base}")
     if product:
@@ -201,6 +205,30 @@ def shard_units(
     return [unit for bucket in mine for unit in groups[bucket]]
 
 
+def _vanished(catalog: Catalog, cfg: ProductConfig, keys: set[str], todo: set[str],
+              stage: str) -> set[str]:
+    """Job keys the ledger calls done whose recorded file no longer exists.
+
+    The ledger is trusted to skip work, so a raw file deleted after it was
+    fetched - by hand, by a clean-up, by a raw directory swapped for a fresh
+    one - would otherwise never be fetched again, and the gap would show up
+    only as a hole in the packed store. One `stat` per done unit is cheap
+    next to the request it saves being forgotten.
+    """
+    done = [k for k in keys if job_key(stage, k) not in todo]
+    if not done:
+        return set()
+    src = cfg.source.replace("'", "''")
+    prod = cfg.product.replace("'", "''")
+    rows = catalog.query(
+        f"SELECT unit_key, path FROM files WHERE source = '{src}' AND product = '{prod}'")
+    paths = dict(zip(rows["unit_key"].to_list(), rows["path"].to_list(), strict=True)) \
+        if len(rows) else {}
+    wanted = set(done)
+    return {job_key(stage, k) for k, p in paths.items()
+            if k in wanted and p and not Path(p).exists()}
+
+
 @dataclass(slots=True)
 class Plan:
     stage: str
@@ -210,16 +238,22 @@ class Plan:
     listed: int = 0
     skipped_done: int = 0
     volatile: int = 0
+    #: Everything `list` returned, before the ledger and the shard took their
+    #: share - what the gap report compares the raw layer against.
+    listed_units: list[Unit] = field(default_factory=list)
+    #: Units the ledger had as done whose file has since disappeared.
+    vanished: int = 0
 
     @property
     def n(self) -> int:
         return len(self.units)
 
     def summary(self) -> str:
+        gone = f", {self.vanished} done but gone from disk" if self.vanished else ""
         return (
             f"{self.stage} {self.source}/{self.product}: {self.n} to do "
             f"({self.listed} listed, {self.skipped_done} already done, "
-            f"{self.volatile} volatile and always refreshed)"
+            f"{self.volatile} volatile and always refreshed{gone})"
         )
 
 
@@ -236,7 +270,8 @@ def build_plan(
 ) -> Plan:
     """List remotely, drop what the ledger has, then take this task's stride."""
     units = list(src.list(window, cfg))
-    plan = Plan(stage=stage, source=cfg.source, product=cfg.product, listed=len(units))
+    plan = Plan(stage=stage, source=cfg.source, product=cfg.product, listed=len(units),
+                listed_units=list(units))
 
     volatile = {u.key for u in units if is_volatile(u, cfg)}
     plan.volatile = len(volatile)
@@ -244,6 +279,10 @@ def build_plan(
     if catalog is not None and not refresh:
         keys = [job_key(stage, u.key) for u in units]
         todo = set(catalog.pending(stage, keys))
+        if stage == "fetch":
+            vanished = _vanished(catalog, cfg, {u.key for u in units} - volatile, todo, stage)
+            plan.vanished = len(vanished)
+            todo |= vanished
         units = [u for u in units if job_key(stage, u.key) in todo or u.key in volatile]
         plan.skipped_done = plan.listed - len(units)
 
