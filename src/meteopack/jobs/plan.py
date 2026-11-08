@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from meteopack.core import raw_compression
 from meteopack.core.catalog import Catalog, job_key
 from meteopack.core.config import ProductConfig, SourceConfig, category_for_source
 from meteopack.sources.base import Source, TimeWindow, Unit
@@ -226,7 +227,7 @@ def _vanished(catalog: Catalog, cfg: ProductConfig, keys: set[str], todo: set[st
         if len(rows) else {}
     wanted = set(done)
     return {job_key(stage, k) for k, p in paths.items()
-            if k in wanted and p and not Path(p).exists()}
+            if k in wanted and p and not raw_compression.stored_path(p).exists()}
 
 
 @dataclass(slots=True)

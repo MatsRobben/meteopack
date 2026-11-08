@@ -91,6 +91,10 @@ class RawLayout(BaseModel):
 
     archive: Literal["none", "tar"] = "none"
     granularity: Literal["day", "month", "year"] = "day"
+    #: Lossless storage compression of each fetched file, which is kept as
+    #: `<name>.xz`; parsers still get the original bytes under the original
+    #: name. See `meteopack.core.raw_compression`.
+    compression: Literal["none", "xz"] = "none"
 
 
 class RateLimit(BaseModel):

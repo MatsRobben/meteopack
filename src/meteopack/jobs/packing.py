@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from meteopack.core import raw_compression
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,9 +122,11 @@ def parse_points(task: PackTask) -> dict[str, Any]:
     if task.part is not None:
         # The source returns rows plus whatever it wants recorded about the
         # piece (WOW: one row per hour member for its hours table).
-        frame, records = src.parse_part(list(task.paths), task.part, cfg)
+        with raw_compression.materialized_all(task.paths) as paths:
+            frame, records = src.parse_part([str(p) for p in paths], task.part, cfg)
     else:
-        frame = src.parse(_raw_file(task.raw_path), cfg)
+        with raw_compression.materialized(task.raw_path) as path:
+            frame = src.parse(_raw_file(str(path)), cfg)
     t_parse = time.time() - started
     if frame is None or not len(frame):
         return {"path": task.raw_path, "part": task.part, "rows": 0, "ipc": None, "parts": {},
@@ -394,7 +398,8 @@ def write_gridded(task: PackTask) -> dict[str, Any]:
     for raw_path in task.paths:
         t = time.perf_counter()
         try:
-            ds = src.parse(_raw_file(raw_path), cfg)
+            with raw_compression.materialized(raw_path) as path:
+                ds = src.parse(_raw_file(str(path)), cfg)
         except Exception as exc:  # noqa: BLE001 - reported per file, never silent
             # A config that disagrees with itself fails here too - for every
             # file, before any frame is written, and every one is reported.
@@ -481,7 +486,8 @@ def scan_files(task: PackTask) -> dict[str, Any]:
     scan = getattr(src, "scan", None)
     if scan is None:
         return {"error": f"{task.source} does not implement scan()"}
-    return scan([_raw_file(p) for p in task.paths])
+    with raw_compression.materialized_all(task.paths) as paths:
+        return scan([_raw_file(str(p)) for p in paths])
 
 
 #: Tasks per worker before it is replaced. 32 came from the radar benchmark,

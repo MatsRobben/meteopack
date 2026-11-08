@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from meteopack.core import raw_compression
 from meteopack.core.config import RateLimit
 from meteopack.sources.base import Content, RawFile
 
@@ -293,14 +294,17 @@ def fetch_file(
     never leave something that looks like a finished download.
     """
     dest = Path(dest)
-    if dest.exists() and not overwrite:
-        digest, n = _sha256_file(dest)
+    # An earlier fetch may have stored it compressed (raw_layout.compression).
+    existing = raw_compression.stored_path(dest)
+    if existing.exists() and not overwrite:
+        digest, n = raw_compression.digest(existing)
         try:
-            content = check(dest) if check is not None else None
+            with raw_compression.materialized(existing) as readable:
+                content = check(readable) if check is not None else None
         except IntegrityError as exc:
-            logger.warning("%s exists but fails its check (%s); downloading it again", dest, exc)
+            logger.warning("%s exists but fails its check (%s); downloading it again", existing, exc)
         else:
-            return RawFile(path=dest, sha256=digest, n_bytes=n, unit_key=unit_key,
+            return RawFile(path=existing, sha256=digest, n_bytes=n, unit_key=unit_key,
                            content=content, attempts=0)
 
     dest.parent.mkdir(parents=True, exist_ok=True)

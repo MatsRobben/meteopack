@@ -38,9 +38,11 @@ raw_layout:
   # The motivating case for archive: tar. KNMI publishes one file per ten
   # minutes and meters on request count, so 14 years of this feed is ~750k
   # members -- un-downloadable loose, and a filesystem no metadata server
-  # wants. One tar per day is the unit, and `parse` reads members out of it.
+  # wants. One tar per day is the unit; lossless xz compression keeps that
+  # daily unit and `parse` reads the decompressed tar directly.
   archive: tar
   granularity: day
+  compression: xz
 
 retention:
   raw:

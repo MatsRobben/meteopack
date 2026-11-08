@@ -28,7 +28,7 @@ import polars as pl
 import pytest
 import yaml
 
-from meteopack.core import http
+from meteopack.core import http, raw_compression
 from meteopack.core.config import ProductConfig, SourceConfig, StoreConfig, Variable
 from meteopack.sources.base import RawFile, Source, TimeWindow, Unit
 from meteopack.sources.stations.knmi_insitu import (
@@ -390,6 +390,38 @@ def test_fetch_puts_the_whole_tar_in_the_raw_layer_never_loose_members(tmp_path)
     # It really is the archive's tar, readable as one.
     with tarfile.open(raw.path) as tar:
         assert len(tar.getmembers()) == 3
+
+
+def test_compressed_daily_tar_parses_to_the_same_rows(tmp_path):
+    archive = tmp_path / "archive"
+    tar_path = write_day(archive, datetime(2020, 6, 1, tzinfo=UTC))
+    src = source(archive)
+    cfg = product()
+    expected = src.parse(raw_of(tar_path), cfg)
+
+    stored = raw_compression.compress(tar_path)
+    assert stored.name == tar_path.name + ".xz"
+    with raw_compression.materialized(stored) as readable:
+        actual = src.parse(raw_of(readable), cfg)
+
+    assert actual.equals(expected)
+
+
+def test_fetch_recognises_a_day_already_stored_as_tar_xz(tmp_path):
+    """Re-fetching must not download a day again because it was compressed."""
+    archive = tmp_path / "archive"
+    write_day(archive, datetime(2020, 6, 1, tzinfo=UTC))
+    src = source(archive)
+    raw_root = tmp_path / "raw"
+    unit = src.list(window(datetime(2020, 6, 1, tzinfo=UTC)), product())[0]
+    first = src.fetch(unit, raw_root)
+    stored = raw_compression.compress(first.path)
+
+    again = src.fetch(unit, raw_root)
+
+    assert again.path == stored
+    assert (again.sha256, again.n_bytes) == (first.sha256, first.n_bytes)
+    assert not first.path.exists()
 
 
 def test_fetch_is_idempotent_and_re_hashes_rather_than_re_copying(tmp_path):

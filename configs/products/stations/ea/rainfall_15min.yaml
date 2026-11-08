@@ -33,6 +33,7 @@ store:
 raw_layout:
   archive: none               # one CSV per station-year is already coarse enough
   granularity: year
+  compression: xz              # cold raw CSV; lossless xz after fetch
 
 retention:
   raw:

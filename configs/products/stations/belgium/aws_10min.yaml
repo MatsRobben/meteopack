@@ -36,6 +36,7 @@ store:
 raw_layout:
   archive: none               # one CSV per station-year is already coarse
   granularity: year           # enough; 14 stations x ~25 years is ~350 files
+  compression: xz              # raw CSV is cold; xz -3 is lossless and compact
 
 retention:
   raw:

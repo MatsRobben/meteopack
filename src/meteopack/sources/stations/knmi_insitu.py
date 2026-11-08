@@ -63,7 +63,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 
-from meteopack.core import grids
+from meteopack.core import grids, raw_compression
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
 from meteopack.sources.base import RawFile, TimeWindow, Unit
@@ -478,9 +478,10 @@ class KnmiInsitu:
         dest = Path(raw_root) / meta.get("year", "unknown") / meta.get(
             "filename", f"{unit.key.rsplit('/', 1)[-1]}.tar"
         )
-        if dest.exists():
-            digest, n = _sha256_file(dest)
-            return RawFile(path=dest, sha256=digest, n_bytes=n, unit_key=unit.key)
+        existing = raw_compression.stored_path(dest)  # may be stored as .tar.xz
+        if existing.exists():
+            digest, n = raw_compression.digest(existing)
+            return RawFile(path=existing, sha256=digest, n_bytes=n, unit_key=unit.key)
 
         dest.parent.mkdir(parents=True, exist_ok=True)
         part = dest.with_suffix(f"{dest.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.part")

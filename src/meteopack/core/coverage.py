@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 import polars as pl
 
+from meteopack.core import raw_compression
 from meteopack.core.config import category_for_source
 
 if TYPE_CHECKING:
@@ -195,7 +196,7 @@ def unit_status(catalog: Catalog, listing: pl.DataFrame) -> pl.DataFrame:
         .join(files, on="unit_key", how="left")
     )
     paths = frame["path"].to_list()
-    on_disk = [bool(p) and Path(p).exists() for p in paths]
+    on_disk = [bool(p) and raw_compression.stored_path(p).exists() for p in paths]
     frame = frame.with_columns(pl.Series("on_disk", on_disk, dtype=pl.Boolean))
     reasons, details = [], []
     for row in frame.iter_rows(named=True):

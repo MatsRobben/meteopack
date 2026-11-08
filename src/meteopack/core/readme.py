@@ -41,18 +41,22 @@ Nothing here is edited in place by hand. Every stage rewrites whole files and
 moves them into position, so a reader always sees a complete file.
 """
 
-_RAW = """# raw/ — as downloaded, byte for byte
+_RAW = """# raw/ — provider data, losslessly stored
 
 Layout: `raw/<category>/<source>/<product>/...`, below which the upstream server's own
-layout is kept. Nothing here is renamed, converted or cleaned, so a file can
-always be compared against what the provider still serves.
+layout and file names are kept. By default files remain byte-for-byte as
+downloaded. Products with `raw_layout.compression: xz` store each file
+xz-compressed under its own name plus `.xz` (`2019.csv.xz`, `....tar.xz`);
+`xz -dc` gives back the download byte for byte, and the checksums in
+`_bookkeeping/files` are those of the uncompressed download.
 
 Some sources arrive as one file per observation time. Those are stored as a tar
 per day (`raw_layout.archive: tar` in the product config) because hundreds of
 thousands of tiny files are what actually breaks a shared filesystem.
 
-This is the only layer that cannot be rebuilt. Everything else is a function of
-it.
+This is the only layer that cannot be rebuilt from other project data. A
+file is compressed only after its round trip is verified, and the original is
+removed only then.
 """
 
 _CANONICAL = """# packed/ — the datasets you read

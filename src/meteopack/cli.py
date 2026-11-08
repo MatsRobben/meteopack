@@ -20,6 +20,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from meteopack.core import raw_compression
+
 if TYPE_CHECKING:
     from meteopack.sources.base import RawFile, TimeWindow
 
@@ -174,10 +176,15 @@ class Context:
     SIDECARS = frozenset({"station_catalog.json"})
 
     def raw_files(self) -> list[Path]:
-        return sorted(
+        files = {
             p for p in self.raw_root.rglob("*")
             if p.is_file() and p.suffix != ".part" and p.name not in self.SIDECARS
-        )
+        }
+        # `compress` publishes the verified .xz before it removes the original,
+        # so a crash in between leaves both; they hold the same bytes.
+        return sorted(p for p in files
+                      if raw_compression.compressed_path(p) == p
+                      or raw_compression.compressed_path(p) not in files)
 
     def plan(self, stage: str):
         from meteopack.jobs.plan import build_plan
@@ -214,6 +221,12 @@ def _outcome_of(raw) -> str:
     if raw.n_bytes == 0 or (content is not None and content.n_records == 0):
         return "empty"
     return "done"
+
+
+def _fetch_and_store(src, unit, raw_root: Path, codec: str):
+    """Fetch one unit and apply the product's storage compression to it."""
+    raw = src.fetch(unit, raw_root)
+    return None if raw is None else raw_compression.compress_raw(raw, codec)
 
 
 def _failure_fields(exc: BaseException) -> dict:
@@ -305,7 +318,9 @@ def stage_fetch(ctx: Context) -> int:
         previous = None
     pool = cf.ThreadPoolExecutor(max_workers=workers)
     try:
-        futures = {pool.submit(ctx.src.fetch, u, ctx.raw_root): (u, changing)
+        codec = ctx.cfg.raw_layout.compression
+        futures = {pool.submit(_fetch_and_store, ctx.src, u, ctx.raw_root, codec):
+                   (u, changing)
                    for u, changing in units}
         for future in cf.as_completed(futures):
             unit, changing = futures[future]
@@ -412,7 +427,8 @@ def _parse_gridded(ctx: Context, files: list[Path]) -> int:
     failed = 0
     for raw in _as_raw(files):
         try:
-            ds = ctx.src.parse(raw, ctx.cfg)
+            with raw_compression.materialized_raw(raw) as readable:
+                ds = ctx.src.parse(readable, ctx.cfg)
         except Exception as exc:                          # noqa: BLE001
             logger.error("parse failed for %s: %s", Path(raw.path).name, exc)
             failed += 1
@@ -431,7 +447,8 @@ def _parse_all(ctx: Context, files: list[Path]):
     for raw in _as_raw(files):
         path = raw.path
         try:
-            frame = ctx.src.parse(raw, ctx.cfg)
+            with raw_compression.materialized_raw(raw) as readable:
+                frame = ctx.src.parse(readable, ctx.cfg)
         except Exception as exc:                          # noqa: BLE001
             logger.error("parse failed for %s: %s", path.name, exc)
             continue
@@ -772,7 +789,8 @@ def _span_of(ctx: Context, path: Path):
     if not callable(reader):
         return None
     try:
-        return reader(path, cfg=ctx.cfg) if _takes_cfg(reader) else reader(path)
+        logical = raw_compression.logical_path(path)  # spans are read off the name
+        return reader(logical, cfg=ctx.cfg) if _takes_cfg(reader) else reader(logical)
     except Exception:  # noqa: BLE001 - an unreadable name is just one less span
         return None
 
@@ -1630,7 +1648,8 @@ def _run_scan(ctx: Context, files: list[Path], scan) -> dict:
     """
     workers = ctx.args.workers or len(os.sched_getaffinity(0))
     if workers <= 1 or len(files) < workers * 2:
-        return scan(_as_raw(files))
+        with raw_compression.materialized_all(files) as readable:
+            return scan(_as_raw(readable))
 
     from meteopack.jobs import packing
 
