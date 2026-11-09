@@ -1,0 +1,143 @@
+# KNMI 3D radar reflectivity composite (KDP dataset `3d-radar-composite` v1.0).
+#
+# Unlike the other knmi_radar products this one is not read from a local tar
+# archive: it is STREAMED from the KNMI Data Platform day by day -
+#   list -> download 288 files -> check schema -> pack -> delete raw -> status
+# - by `meteopack stream knmi_radar --product composite3d_5min`
+# (meteopack.jobs.stream_kdp), so the ~1 TB of raw NetCDF never accumulates.
+# `fetch`/`pack` refuse this product. Reader: meteopack.sources.radar.knmi_radar_3d.
+#
+# The dataset holds 8 products per timestamp; only 3D_RADAR_COMPOSITE_*.nc is
+# taken. First file in the archive (listing, 2026-11-09):
+# 3D_RADAR_COMPOSITE_202405070850.nc - the documented 2023-11-01 start is not
+# what the API serves.
+source: knmi_radar
+description: >-
+  KNMI 3D radar reflectivity composite over the Netherlands, 5-minute, 32 levels
+  from 0.375 to 15.875 km every 500 m, uint8 dBZ on the 765x700 national grid
+  (north-up, pixel-aligned with rtcor_5min).
+product: composite3d_5min
+version: 1
+
+cadence_seconds: 300
+grid_id: knmi_1km_stereo
+
+# Every second native level: indices 1, 3, ..., 63 of the file's 64 levels at
+# 0.125 + 0.25 k km. Subsampled, not averaged - each kept level is exactly the
+# native level at that height.
+levels:
+  units: km
+  long_name: height of the level centre (z coordinate of the KNMI 3D composite)
+  positive: up
+  values: [0.375, 0.875, 1.375, 1.875, 2.375, 2.875, 3.375, 3.875, 4.375, 4.875,
+           5.375, 5.875, 6.375, 6.875, 7.375, 7.875, 8.375, 8.875, 9.375, 9.875,
+           10.375, 10.875, 11.375, 11.875, 12.375, 12.875, 13.375, 13.875, 14.375,
+           14.875, 15.375, 15.875]
+  source_indices: [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35,
+                   37, 39, 41, 43, 45, 47, 49, 51, 53, 55, 57, 59, 61, 63]
+
+store:
+  kind: gridded
+  # One time step per chunk with every level and the whole frame: a training
+  # read of one time step is one chunk. One UTC day (288 steps) per shard, so
+  # one stream day writes exactly one shard file and never shares it.
+  chunks: {time: 1, z: 32, y: 765, x: 700}
+  shard: {time: 288, z: 32, y: 765, x: 700}
+  compressor: zstd
+  compression_level: 3
+  partition_by: [year]
+
+raw_layout: {archive: none, granularity: day}
+
+retention:
+  # Raw files live only for the day being packed: deleted once it is packed.
+  # A file that fails its schema check is kept in raw/.../quarantine/.
+  raw: {keep: false, after: pack}
+  canonical: {keep: true}
+  derived: {keep: true}
+
+attrs:
+  title: KNMI 3D radar reflectivity composite over the Netherlands, 5-minute, 32 levels
+  institution: Royal Netherlands Meteorological Institute (KNMI)
+  source: >-
+    KNMI Data Platform dataset 3d-radar-composite v1.0, files
+    3D_RADAR_COMPOSITE_YYYYMMDDHHMM.nc: 3D composite of the Herwijnen and Den
+    Helder C-band radars, 64 levels 0.125-15.875 km.
+  references: https://dataplatform.knmi.nl/dataset/3d-radar-composite-1-0
+  comment: >-
+    uint8 codes on the calibration of KNMI's 2D reflectivity product (refl_5min):
+    dBZ = 0.5 * code - 32. Code 0 is NO ECHO (the native -30 dBZ floor, native
+    code 0), deliberately not code 4 (= -30 dBZ), so no echo stays distinct from
+    a weak echo just above the floor and means the same as in refl_5min. Codes
+    1-3 never occur. 254 = not observed (native fill: beyond the radars' reach at
+    that height, or outside the composite); 255 = no data for this frame
+    (missing or unusable file; see is_missing_frame / is_corrupt_frame). The
+    store keeps every second native level (z) and is flipped to north-up so it
+    is pixel-aligned with rtcor_5min.
+
+variables:
+  - name: reflectivity_dbz
+    source_key: reflectivity
+    units: dBZ
+    standard_name: equivalent_reflectivity_factor
+    long_name: Radar equivalent reflectivity factor (3D composite)
+    valid_min: -32.0
+    valid_max: 94.5
+    no_echo: -32.0   # native code 0 (-30 dBZ floor) -> code 0, refl_5min's "no echo"
+    encoding:
+      dtype: uint8
+      scale: 0.5
+      offset: -32.0
+      # Reversed from the 2D products on purpose: 255 is the store's fill, so a
+      # frame nobody wrote reads 255 ("no data for this frame"), and 254 is the
+      # per-pixel "not observed" the native file marks with 65535.
+      missing: 255
+      out_of_image: 254
+
+# Fingerprint of the structural schema every file is checked against
+# (knmi_radar_3d.check_schema descriptor: variables, dtype, shape, dims,
+# chunking, filters, fill, units, offset, z, grid, projection). A file with a
+# different fingerprint that still passes every check is packed and reported
+# as drift; one that fails a check is never packed.
+schema_fingerprint: bd10c99d7dfca853   # all 257 local samples, 2024-05-10 .. 2026-11-06
+
+extra:
+  stream: kdp
+  # The store's time axis starts at the first available day (00:00 UTC) and
+  # grows day by day; a day is one shard.
+  timeline_origin: "2024-05-07T00:00:00Z"
+  kdp:
+    base_url: https://api.dataplatform.knmi.nl/open-data/v1
+    dataset: 3d-radar-composite
+    version: "1.0"
+    filename_prefix: 3D_RADAR_COMPOSITE_
+    # Walked in order at every day boundary; the first file that exists wins
+    # ($KNMI_API_KEY_FILE overrides). Dropping a bulk key at ~/.knmi_bulk_key
+    # switches a running stream to it at its next day.
+    api_key_files: ["~/.knmi_bulk_key", "~/.knmi_api_key"]
+    # Requests/s per key file. The quota is read from the X-Ratelimit headers,
+    # so it needs no setting: regular 1000/hour, bulk = files in the dataset.
+    # Documented ceilings: regular 200/s, bulk 100/s.
+    requests_per_second:
+      "~/.knmi_bulk_key": 20.0
+    default_requests_per_second: 2.0
+    quota_reserve: 5
+    download_workers: 8
+  # What every file must look like (knmi_radar_3d.Schema). x/y are not listed:
+  # they must equal the knmi_1km_stereo grid's cell centres (y south-up in the
+  # file).
+  source_schema:
+    n_levels: 64
+    z_first_km: 0.125
+    z_step_km: 0.25
+    fill_value: 65535
+    add_offset: -30.0
+    add_offset_tolerance: 0.001   # files carry -30.00001 (float32)
+    units: dBZ
+    # The scale is set per file so its maximum reaches ~65534: 0.0012-0.0017
+    # seen. This range admits a file maximum of -2..134 dBZ.
+    scale_factor_range: [0.0004, 0.0025]
+    proj4_params: "+proj=stere +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378140 +b=6356750 +x_0=0 +y_0=0 +units=km"
+    semi_major_axis: 6378140.0
+    semi_minor_axis: 6356750.0
+    coord_tolerance_km: 0.001
