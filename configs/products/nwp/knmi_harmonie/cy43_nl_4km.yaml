@@ -45,8 +45,12 @@ store:
   # stream day writes exactly one shard file per field and never shares it.
   chunks: {time: 1, lead_time: 12, y: 256, x: 256}
   shard: {time: 24, lead_time: 12, y: 256, x: 256}
+  # Blosc-zstd with byte shuffle, as OPERA, but at level 9: on the trial runs
+  # 8.8 % smaller than level 5 (3.89 -> ~3.55 MB a run, ~79 -> ~72 GB for
+  # 2024-06 .. 2026-11), at a write cost that is noise next to the KDP quota.
+  # (The 2026-11-09 trial store was written at level 5.)
   compressor: blosc
-  compression_level: 5
+  compression_level: 9
   partition_by: [year]
 
 raw_layout: {archive: none, granularity: day}
@@ -76,7 +80,8 @@ attrs:
 # what the model resolves and what the 2 km -> 4 km averaging keeps (0.1 hPa,
 # 0.05 K, 0.1 % RH, 0.05-0.1 m/s, 2-10 m), and set the store's size: on the
 # first trial day the finer steps first chosen (1 Pa, 0.01 K, 1e-4, 0.01 m/s,
-# 0.25-1 m) cost 4.7 MB a run against 3.3 MB for these (blosc-zstd 5).
+# 0.25-1 m) cost 4.7 MB a run against 3.3 MB for these (blosc-zstd 5; 3.9 MB
+# averaged over all eleven trial days, winter and wet days being larger).
 # Precipitation keeps 0.01 mm. `source_key` is the NetCDF
 # parameter (file name part); how each field is read from each packaging is
 # under extra.harmonie.fields. valid_min/valid_max are sanity limits on the
