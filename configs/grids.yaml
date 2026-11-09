@@ -31,6 +31,20 @@ opera_2km_laea_nl:
   shape: [880, 880]          # rows (y), cols (x)
   extent: {x: [778000.0, 2538000.0], y: [-3272000.0, -1512000.0]}
 
+# The 4 km stage of the RainPro-NL model: 1024 km square on the KNMI
+# polar-stereographic projection (the RTCOR one), centred on x = 350 km,
+# y = -4032 km (~52.2N 5.3E), north-up. Edges are whole km, so every 4 km cell
+# is exactly 4 x 4 knmi_1km_stereo pixels where the two overlap (RTCOR x/y
+# edges are integers: x 0..700, y -4415..-3650), and every 4 km edge is an edge
+# of the 2 km stage (512 km square, x 94..606, y -4288..-3776).
+knmi_4km_stereo_1024:
+  description: >-
+    4 km model grid, 256 x 256, 1024 km square centred on (350, -4032) km of the
+    KNMI radar stereographic projection; HARMONIE NL is packed on it
+  proj4: "+proj=stere +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378140 +b=6356750 +x_0=0 +y_0=0 +units=km +no_defs"
+  shape: [256, 256]          # rows (y), cols (x)
+  extent_km: {x: [-162.0, 862.0], y: [-4544.0, -3520.0]}
+
 # Placeholders — fill when the corresponding source lands.
 # msg_rss_nl_crop:
 # harmonie_p1:
