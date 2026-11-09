@@ -103,6 +103,40 @@ Without `--window` it streams from `extra.stream_start` (2023-11-01) to the
 start of today; rerunning later adds only the new days. Extend it back with
 `--window 2013-01-01/2023-11-01`: the store's axis already starts in 2013.
 
+### HARMONIE Cy43 NL forecasts (`knmi_harmonie/cy43_nl_4km`)
+
+Same script, same pattern (measured 2026-11-09 on 6 CPUs, regular KDP key):
+
+```bash
+mkdir -p /path/to/logs
+METEOPACK_DATA_ROOT=/vol/knmimo-nobackup/users/mrobben/meteopack_data \
+METEOPACK_REPO=/path/to/pinned/checkout STREAM_LOG_DIR=/path/to/logs \
+sbatch --output=/path/to/logs/%x-%j.out scripts/stream_kdp.slurm knmi_harmonie --product cy43_nl_4km
+```
+
+Without `--window` it streams 2024-06-25 to the start of today. The **KDP
+request quota (1000 an hour on a regular key, shared by every job using the
+key)** sets the pace, not the network or the CPU:
+
+| era | runs | API requests | quota-bound wall time |
+|---|---|---|---|
+| NetCDF (to 2026-01-07) | ~13,100 | 9 a run + 9 a month of listings, ~118,000 | ~118 h |
+| P1 (from 2026-01-08) | ~7,330 | 1 a run + 1-10 a month, ~7,700 | ~8 h (the downloads, ~190 MB a run by Range reads at ~110 MB/s, and the packing take ~50 s a day) |
+
+So about 5.2 days: three chained 2-day jobs. The limiter reads the quota
+from the API's headers and waits for the hourly reset by itself ("quota down
+to its reserve ... waiting N s"). A KDP bulk key for
+`uwcw_extra_lv_ha43_nl_2km` (100 requests/s) would make the NetCDF era
+bandwidth-bound instead: ~2.6 TB at the measured ~45 MB/s over 6 connections
+is ~16 h, so the whole run would take about one day. Put it in
+`~/.knmi_bulk_key_harmonie` (not `~/.knmi_bulk_key`, the 3D composite's) and
+remove it before the stream reaches 2026-01-08: a dataset bulk key is refused
+for P1 (the stream then stops with exit 2; nothing is lost).
+
+After a hard kill (SIGKILL, node loss) the store's `.stream.lock` (an NFS
+`flock`) stayed held for about a minute; a rerun started 10 s after the kill
+stopped with "another stream holds ...". Rerun it a minute later.
+
 ## /dev/shm is wiped when any of your jobs on the node ends
 
 Measured 2026-11-06 on cn114: about 10 s after **any** job of yours on a node
