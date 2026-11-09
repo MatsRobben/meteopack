@@ -366,9 +366,12 @@ def get_with_retry(
     backoff: float = 1.0,
     timeout: float = 60.0,
     retry_status: Iterable[int] = (),
+    headers: dict[str, str] | None = None,
 ) -> requests.Response:
     """GET a small document - a directory listing, a station catalogue - with
     the same retry policy as `fetch_file`.
+
+    `headers` go with every attempt (a ``Range`` for a byte-range read).
 
     Listings used to be a single bare GET whose failure was logged and turned
     into an empty list. A timeout on DWD's `historical/` listing then meant
@@ -384,7 +387,8 @@ def get_with_retry(
         retry_after: float | None = None
         throttled = False
         try:
-            resp = session.get(url, timeout=timeout)
+            resp = (session.get(url, timeout=timeout, headers=headers) if headers
+                    else session.get(url, timeout=timeout))
             resp.content  # noqa: B018 - read the body inside the retry
         except _TRANSIENT as e:
             err = FetchError(url, f"{type(e).__name__}: {e}", attempts=attempt + 1,
