@@ -232,7 +232,18 @@ _NON_FIELD = frozenset({TIME_NAME, LEVEL_NAME, *COORD_NAMES, *PROVENANCE})
 
 
 def _data_arrays(group: zarr.Group) -> list[str]:
-    return [name for name, _ in group.arrays() if name not in _NON_FIELD]
+    return [name for name, array in group.arrays()
+            if name not in _NON_FIELD and _dims_of(array) != (TIME_NAME,)]
+
+
+def _frame_arrays(group: zarr.Group) -> list[str]:
+    """The product's own per-frame arrays (`ProductConfig.frame_variables`).
+
+    Any ``(time,)`` array that is neither the axis nor a provenance flag. Told
+    apart by shape, not by config, so a store describes itself.
+    """
+    return [name for name, array in group.arrays()
+            if name not in _NON_FIELD and _dims_of(array) == (TIME_NAME,)]
 
 
 def initialise(
@@ -300,6 +311,7 @@ def initialise(
     if levels is not None:
         _create_levels(group, levels)
     _create_provenance(group, shape[0], shards[0] if shards else chunks[0])
+    _create_frame_variables(group, cfg, shape[0], shards[0] if shards else chunks[0])
 
     declared = {v.name: v for v in cfg.variables}
     for name in names:
@@ -359,7 +371,7 @@ def _root_attrs(cfg: ProductConfig, grid, timeline: Timeline, n_times: int) -> d
                 "time_start", "time_end", "n_times", "dims", "n_levels"}
     declared.update({k: v for k, v in (cfg.attrs or {}).items() if k not in reserved})
     mapping = {
-        "grid_mapping_name": "polar_stereographic",
+        "grid_mapping_name": grid.grid_mapping_name,
         "proj4_params": grid.proj4,
         "shape": [grid.ny, grid.nx],
         "corners_lonlat": [list(c) for c in (grid.corners_lonlat or ())],
@@ -511,6 +523,31 @@ def _create_provenance(group: zarr.Group, n_times: int, chunk: int) -> None:
         )
 
 
+def _frame_variable_attrs(spec) -> dict:
+    attributes: dict = {"long_name": spec.long_name}
+    if spec.units:
+        attributes["units"] = spec.units
+    if spec.flag_values is not None:
+        attributes["flag_values"] = [int(v) for v in spec.flag_values]
+        attributes["flag_meanings"] = " ".join(spec.flag_meanings or [])
+    return attributes
+
+
+def _create_frame_variables(group: zarr.Group, cfg: ProductConfig, n_times: int,
+                            chunk: int) -> None:
+    """The product's per-frame arrays, chunked like the provenance flags."""
+    for spec in cfg.frame_variables:
+        group.create_array(
+            spec.name,
+            shape=(n_times,),
+            chunks=(max(1, min(n_times, chunk)),),
+            dtype=spec.dtype,
+            fill_value=spec.fill_value,
+            dimension_names=(TIME_NAME,),
+            attributes=_frame_variable_attrs(spec),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class WriteResult:
     """What a write actually did, as opposed to what it was handed.
@@ -564,7 +601,7 @@ def write(
     if TIME_NAME not in ds.coords and TIME_NAME not in ds.variables:
         raise ValueError("gridded dataset needs a time coordinate")
 
-    present = set(_data_arrays(group)) | set(PROVENANCE)
+    present = set(_data_arrays(group)) | set(_frame_arrays(group)) | set(PROVENANCE)
     unknown = sorted(str(n) for n in ds.data_vars if str(n) not in present)
     if unknown:
         raise ValueError(f"{cfg.store_id} has no array for {unknown}; present: {sorted(present)}")
@@ -770,6 +807,9 @@ def refresh_attrs(
             group[name].attrs.update({"long_name": description})
     if layout_names and "source_layout_id" in present:
         group["source_layout_id"].attrs.update(_layout_flags(layout_names))
+    for spec in cfg.frame_variables:
+        if spec.name in present:
+            group[spec.name].attrs.update(_frame_variable_attrs(spec))
     grid = grids.get(cfg.grid_id) if cfg.grid_id else None
     if grid is None:
         return
@@ -841,7 +881,7 @@ def extend(
     # dropped every provenance write past the old end. New space reads as each
     # array's fill value - is_missing_frame=True - which is what it is.
     present = {name for name, _ in group.arrays()}
-    for name in [*arrays, *(n for n in PROVENANCE if n in present)]:
+    for name in [*arrays, *(n for n in PROVENANCE if n in present), *_frame_arrays(group)]:
         array = group[name]
         array.resize((need, *array.shape[1:]))
 
@@ -920,7 +960,7 @@ def read(
     # per-frame metadata, and a consumer asked for `data_vars` means the
     # fields - putting four bookkeeping arrays in there made `derive` try to
     # build training bricks out of is_corrupt_frame.
-    for name in PROVENANCE:
+    for name in [*PROVENANCE, *_frame_arrays(group)]:
         if name in present:
             coords[name] = ((TIME_NAME,), np.asarray(group[name][lo:hi]),
                             dict(group[name].attrs))

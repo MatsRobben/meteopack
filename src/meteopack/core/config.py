@@ -33,6 +33,7 @@ SOURCE_CATEGORIES: dict[str, str] = {
     "midas": "stations",
     "wow_nl": "stations",
     "knmi_radar": "radar",
+    "opera": "radar",
     "eumetsat_seviri": "satellite",
 }
 
@@ -263,6 +264,35 @@ class Levels(BaseModel):
         return self
 
 
+class FrameVariable(BaseModel):
+    """A per-frame value stored beside the fields: one entry per time step.
+
+    For what a source says about each frame that the imagery cannot - which
+    processing chain made it, how many radars contributed - and that a reader
+    filters on before touching a pixel. Stored as a 1-D ``(time,)`` array next
+    to the provenance flags; `fill_value` is what a frame nobody wrote reads.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    name: str
+    dtype: str
+    fill_value: int | float | bool
+    long_name: str
+    units: str | None = None
+    #: CF flags for a coded value: the codes and one word per code.
+    flag_values: list[int] | None = None
+    flag_meanings: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _flags_pair(self) -> FrameVariable:
+        if (self.flag_values is None) != (self.flag_meanings is None) or (
+                self.flag_values is not None
+                and len(self.flag_values) != len(self.flag_meanings or [])):
+            raise ValueError(f"{self.name}: flag_values and flag_meanings must pair up")
+        return self
+
+
 class ProductConfig(BaseModel):
     """One (source, product) pair: what to pull, how to name it, where it lands."""
 
@@ -285,6 +315,9 @@ class ProductConfig(BaseModel):
     #: keeps the ``(time, y, x)`` layout. See `Levels`.
     levels: Levels | None = None
     variables: list[Variable] = Field(default_factory=list)
+    #: Per-frame values of a gridded store, beside the provenance flags. Unset
+    #: for every product before the OPERA composite. See `FrameVariable`.
+    frame_variables: list[FrameVariable] = Field(default_factory=list)
     store: StoreConfig
     retention: RetentionConfig = RetentionConfig()
     raw_layout: RawLayout = RawLayout()
@@ -302,6 +335,8 @@ class ProductConfig(BaseModel):
                              "points store; a gridded store is a regular time axis")
         if self.levels is not None and self.store.kind != "gridded":
             raise ValueError("levels (a vertical axis) only applies to a gridded store")
+        if self.frame_variables and self.store.kind != "gridded":
+            raise ValueError("frame_variables only apply to a gridded store")
         return self
 
     @property

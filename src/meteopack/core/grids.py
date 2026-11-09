@@ -118,11 +118,27 @@ class Grid:
         lon, lat = inv.transform(xx, yy)
         return np.asarray(lon, dtype="float32"), np.asarray(lat, dtype="float32")
 
+    @property
+    def grid_mapping_name(self) -> str:
+        """The CF grid_mapping_name of this grid's projection."""
+        proj = next((p.split("=", 1)[1] for p in self.proj4.split()
+                     if p.startswith("+proj=")), "")
+        return _CF_GRID_MAPPINGS.get(proj, proj or "unknown")
+
     def bbox(self) -> tuple[float, float, float, float]:
         ring = self._ring()
         lons = [p[0] for p in ring]
         lats = [p[1] for p in ring]
         return min(lons), min(lats), max(lons), max(lats)
+
+
+#: PROJ projection name -> CF grid_mapping_name, for the ones in grids.yaml.
+_CF_GRID_MAPPINGS = {
+    "stere": "polar_stereographic",
+    "laea": "lambert_azimuthal_equal_area",
+    "lcc": "lambert_conformal_conic",
+    "longlat": "latitude_longitude",
+}
 
 
 @functools.lru_cache(maxsize=64)
@@ -153,7 +169,9 @@ def load_registry(path: str | None = None) -> dict[str, Grid]:
     out: dict[str, Grid] = {}
     for gid, spec in raw.items():
         corners = spec.get("product_corners_lonlat")
-        extent = spec.get("extent_km")
+        # `extent_km` predates grids in metres; `extent` is in the
+        # projection's own units, whatever +units says.
+        extent = spec.get("extent") or spec.get("extent_km")
         out[gid] = Grid(
             id=gid,
             proj4=spec["proj4"],

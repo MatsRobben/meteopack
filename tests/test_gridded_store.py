@@ -954,3 +954,38 @@ def test_unset_levels_leave_existing_config_hashes_unchanged():
     assert manifest.content_hash(cfg) == manifest.content_hash(payload)
     assert manifest.config_hash(make_cfg_3d()) != manifest.config_hash(
         make_cfg_3d().model_copy(update={"levels": None}))
+
+
+def test_frame_variables_are_per_frame_arrays_that_grow_and_read_as_coordinates(
+        tmp_path: Path):
+    """A product's own per-frame values (the OPERA chain, radar counts) live beside
+    the provenance flags: created with the store, grown by `extend`, written by
+    `write`, returned by `read` as coordinates - never mistaken for a field."""
+    from meteopack.core.config import FrameVariable
+
+    cfg = make_cfg().model_copy(update={"frame_variables": [
+        FrameVariable(name="chain", dtype="uint8", fill_value=0, long_name="chain",
+                      flag_values=[0, 1, 2], flag_meanings=["none", "a", "b"]),
+        FrameVariable(name="n_radars", dtype="int16", fill_value=-1, long_name="radars"),
+    ]})
+    timeline = make_timeline()
+    first = Timeline(start=timeline.start, end=timeline.start + timedelta(days=1),
+                     cadence=timeline.cadence)
+    gridded.initialise(cfg, tmp_path, first)
+    assert gridded.info(cfg.store_id, tmp_path)["variables"].keys() == {"rain"}
+    gridded.extend(cfg, tmp_path, timeline)
+    rows = np.arange(FRAMES_PER_DAY, 2 * FRAMES_PER_DAY)
+    ds = dataset(timeline.values()[rows], block(rows))
+    ds["chain"] = (("time",), np.full(rows.size, 2, dtype="uint8"))
+    ds["n_radars"] = (("time",), np.arange(rows.size, dtype="int16"))
+    result = gridded.write(ds, cfg, tmp_path)
+    assert result.written == rows.size
+
+    back = gridded.read(cfg.store_id, tmp_path)
+    assert list(back.data_vars) == ["rain"]
+    assert back["chain"].dims == ("time",) and back.sizes["time"] == len(timeline)
+    np.testing.assert_array_equal(back["chain"].values[rows], 2)
+    assert (back["chain"].values[:FRAMES_PER_DAY] == 0).all()
+    np.testing.assert_array_equal(back["n_radars"].values[rows], np.arange(rows.size))
+    assert (back["n_radars"].values[:FRAMES_PER_DAY] == -1).all()
+    assert back["chain"].attrs["flag_meanings"] == "none a b"
