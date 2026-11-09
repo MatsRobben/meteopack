@@ -31,8 +31,11 @@ store:
   # writes exactly one shard file and never shares it.
   chunks: {time: 1, y: 440, x: 440}
   shard: {time: 96, y: 880, x: 880}
-  compressor: zstd
-  compression_level: 3
+  # Blosc-zstd 5 with byte shuffle (zarr's choice for uint16): 18-20 % smaller
+  # than plain zstd 3 at the same write and read speed, measured on a wet, a
+  # mixed and a dry day (31.7 / 7.9 / 3.1 MB against 38.5 / 9.8 / 3.9 MB a day).
+  compressor: blosc
+  compression_level: 5
   partition_by: [year]
 
 raw_layout: {archive: none, granularity: day}
@@ -104,6 +107,24 @@ frame_variables:
     flag_meanings: [no_frame, absent, present]
 
 extra:
+  # Appended to the store's README.md.
+  readme: |
+    ## OPERA specifics
+
+    - **Two chains, one break.** `chain` 1 = ODYSSEY (`QIND_RATE.h5`, up to and
+      including 2024-07-05 06:00, data window T-10..T+5 min), 2 = NIMBUS
+      (`RATE.h5`, from 06:15, instantaneous). Values are as the files give them;
+      calibrate each chain separately.
+    - Codes: 0 = no rain (the file's undetect), 65535 = no radar coverage (nodata),
+      65534 = no data for this frame; rates above 655.33 mm/h are clipped
+      (`n_clipped` in provenance.parquet).
+    - Native OPERA 2 km LAEA grid, not resampled: store pixel [i, j] is native
+      pixel [756 + i, 389 + j] (`attrs["opera_window"]`).
+    - `n_radars`, `has_nldhl`, `has_nlhrw` come from the file's /how/nodes
+      (-1 = no frame); provenance.parquet holds the full node list per file.
+    - The time axis starts 2013-01-01; days never streamed read as missing frames.
+      `days/<YYYY>/<date>.json` says per day what was streamed and what is
+      missing upstream.
   stream: s3
   stream_format: opera_odim
   # The store's time axis starts here and grows forward day by day. It is set
