@@ -624,9 +624,22 @@ def _write_fields(group, ds, cfg, keep, hit, order, breaks) -> None:
                     f"casting here would silently round every value."
                 )
             block = block.astype(array.dtype, copy=False)
-        block = block[keep]
+        if not keep.all():
+            block = block[keep]
         for run, picks in zip(np.split(hit, breaks), np.split(order, breaks), strict=True):
-            array[int(run[0]) : int(run[-1]) + 1] = block[picks]
+            array[int(run[0]) : int(run[-1]) + 1] = block[_as_slice(picks)]
+
+
+def _as_slice(picks: np.ndarray) -> slice | np.ndarray:
+    """`picks` as a slice when it is a contiguous ascending run, so indexing is a view.
+
+    The common case - a day of frames handed over in order - otherwise copies
+    the whole block, and a day of a 32-level radar volume is 4.9 GB.
+    """
+    if picks.size and picks[-1] - picks[0] + 1 == picks.size and (
+            picks.size == 1 or bool(np.all(np.diff(picks) == 1))):
+        return slice(int(picks[0]), int(picks[-1]) + 1)
+    return picks
 
 
 #: The per-file provenance table, beside dataset.zarr. One row per raw file.
