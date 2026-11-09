@@ -14,10 +14,26 @@ knmi_1km_stereo:
     - [10.856429, 55.388977]
     - [9.009279, 48.895298]
 
+# A window of the EUMETNET OPERA 2 km composite grid (1900 x 2200, LAEA,
+# upper-left CORNER at projected (0, 0), rows running south), kept natively -
+# no resampling - around the 1536 km KNMI polar-stereographic training square
+# centred on 52.2N 5.3E. That square's edges, densified and projected to LAEA,
+# span native cols 408.4-1249.4 and rows 775.0-1616.3 (pixels 408-1249,
+# 775-1616: 842 x 842); the window adds 19 px on every side to 880 x 880:
+# rows 756-1635, cols 389-1268. Extent in metres (the projection's units).
+# Must agree with configs/products/radar/opera/rate_15min.yaml extra.opera.window,
+# which the stream checks at start-up.
+opera_2km_laea_nl:
+  description: >-
+    OPERA 2 km composite grid, native window rows 756-1635, cols 389-1268
+    (880 x 880) around the 1536 km KNMI training square
+  proj4: "+proj=laea +lat_0=55.0 +lon_0=10.0 +x_0=1950000.0 +y_0=-2100000.0 +units=m +ellps=WGS84"
+  shape: [880, 880]          # rows (y), cols (x)
+  extent: {x: [778000.0, 2538000.0], y: [-3272000.0, -1512000.0]}
+
 # Placeholders — fill when the corresponding source lands.
 # msg_rss_nl_crop:
 # harmonie_p1:
-# opera_2km_europe:
 
 # A tiny grid for tests and examples. Real, loadable, and cheap: 8x6 cells over
 # the North Sea. Exists so initialise/write can be exercised through the real

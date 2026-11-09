@@ -1,0 +1,24 @@
+# EUMETNET OPERA European radar composites, from the public archive bucket.
+#
+# Nothing here is fetched with `meteopack fetch`: the products are STREAMED
+# day by day (`meteopack stream opera --product rate_15min`, see the product
+# config), so there is no raw archive and no Source class. This file exists
+# because every source has one: it names the host and the polite rate.
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: opera
+
+base_url: https://s3.waw3-1.cloudferro.com/openradar-archive
+
+rate_limit:
+  # Anonymous S3 (CloudFerro WAW3-1). 8 parallel downloads measured 48 MB/s,
+  # 33 files/s from a compute node (2026-11-09); the stream's own setting is
+  # extra.s3.download_workers in the product config.
+  requests_per_second: 50.0
+  max_workers: 8
+  max_retries: 5
+  backoff_seconds: 2.0
+
+# Public bucket, CC BY 4.0: no credentials.
+credentials_env: []
