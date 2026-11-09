@@ -1777,7 +1777,8 @@ def stage_validate(ctx: Context) -> int:
     # What only the source knows how to check - for WOW-NL, that every hour of
     # the archive is accounted for and no report is stored twice. Optional,
     # like scan(); it adds checks and stats to the same report.
-    extra = getattr(ctx.src, "validate_store", None)
+    # A streamed product (extra.stream) has no Source class to ask.
+    extra = None if ctx.cfg.extra.get("stream") else getattr(ctx.src, "validate_store", None)
     if callable(extra) and report.checks and report.checks[0].ok:
         try:
             extra(ctx.cfg, ctx.root, report, raw_root=ctx.raw_root)
