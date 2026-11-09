@@ -31,6 +31,19 @@ opera_2km_laea_nl:
   shape: [880, 880]          # rows (y), cols (x)
   extent: {x: [778000.0, 2538000.0], y: [-3272000.0, -1512000.0]}
 
+# The RainPro-NL 16 km model frame: a 1536 km square on the KNMI radar
+# polar-stereographic projection (same proj4 as knmi_1km_stereo), centred on the
+# RTCOR crop at x = 350 km, y = -4032 km (~52.2N 5.3E). 96 x 96 cells of 16 km,
+# north-up (row 0 is the northern edge). Cell edges x -418 .. 1118 km,
+# y -4800 .. -3264 km. The NWP inputs (GFS) are regridded onto it.
+knmi_stereo_16km_1536:
+  description: >-
+    1536 km x 1536 km model frame at 16 km (96 x 96) on the KNMI polar-stereographic
+    projection, centred x = 350 km, y = -4032 km
+  proj4: "+proj=stere +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378140 +b=6356750 +x_0=0 +y_0=0 +units=km +no_defs"
+  shape: [96, 96]            # rows (y), cols (x)
+  extent: {x: [-418.0, 1118.0], y: [-4800.0, -3264.0]}
+
 # Placeholders — fill when the corresponding source lands.
 # msg_rss_nl_crop:
 # harmonie_p1:
