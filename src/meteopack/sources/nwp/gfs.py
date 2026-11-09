@@ -172,6 +172,110 @@ def coalesce(entries: Sequence[IdxEntry], max_gap: int = 0) -> list[list[IdxEntr
     return groups
 
 
+class StaleIndex(Exception):
+    """A file's ``.idx`` does not describe the GRIB file beside it.
+
+    Seen in the archive: the GRIB files of 2022-11-29 18z .. 2022-11-30 06z were
+    uploaded again hours after their indexes, at other byte offsets, and the
+    old indexes stayed. The offsets then point into the middle of messages.
+    """
+
+
+def message_ok(blob: bytes) -> bool:
+    """True if `blob` is exactly one whole GRIB2 message (section 0 length, 7777 end)."""
+    return (len(blob) >= 16 and blob[:4] == b"GRIB" and blob[7] == 2
+            and int.from_bytes(blob[8:16], "big") == len(blob) and blob[-4:] == b"7777")
+
+
+def _scaled(scale: int, value: int) -> float | None:
+    if scale == 0xFF or value == 0xFFFFFFFF:
+        return None
+    factor = -(scale & 0x7F) if scale & 0x80 else scale
+    return round(value * 10.0 ** -factor, 6)
+
+
+@dataclass(frozen=True, slots=True)
+class MessageHeader:
+    """What a GRIB2 message is, read from its first bytes (sections 0-4), and where."""
+
+    start: int
+    end: int
+    signature: tuple
+    template: int
+    #: Instantaneous: (lead, lead). Template 4.8 time mean: (start, end) hours.
+    window: tuple[int, int]
+    statistic: int | None
+
+    @property
+    def is_instant(self) -> bool:
+        return self.template == 0
+
+    @property
+    def is_average(self) -> bool:
+        return self.template == 8 and self.statistic == 0
+
+
+def parse_header(head: bytes, start: int) -> MessageHeader:
+    """Sections 0-4 of one GRIB2 message (`head` = its first bytes) -> `MessageHeader`."""
+    if head[:4] != b"GRIB" or head[7] != 2:
+        raise StaleIndex(f"no GRIB2 message at byte {start}")
+    discipline = head[6]
+    total = int.from_bytes(head[8:16], "big")
+    p = 16
+    while p + 5 <= len(head):
+        length = int.from_bytes(head[p:p + 4], "big")
+        number = head[p + 4]
+        if number == 4:
+            sec = head[p:p + length]
+            if len(sec) < 34:
+                break
+            template = int.from_bytes(sec[7:9], "big")
+            unit = sec[17]
+            ftime = int.from_bytes(sec[18:22], "big")
+            # Hours as GFS writes them; minutes rescaled; anything else never matches.
+            ftime = ftime if unit == 1 else ftime // 60 if unit == 0 else -1
+            sig = (discipline, sec[9], sec[10], sec[22], _scaled(sec[23], int.from_bytes(
+                sec[24:28], "big")), sec[28], _scaled(sec[29], int.from_bytes(sec[30:34], "big")))
+            if sig[5] == 255:
+                sig = (*sig[:6], None)
+            statistic = None
+            window = (ftime, ftime)
+            if template == 8 and len(sec) >= 53:
+                statistic = sec[46]
+                span = int.from_bytes(sec[49:53], "big")
+                span = span if sec[48] == 1 else span // 60 if sec[48] == 0 else -1
+                window = (ftime, ftime + span)
+            return MessageHeader(start, start + total - 1, sig, template, window, statistic)
+        if length <= 0:
+            break
+        p += length
+    raise StaleIndex(f"message at byte {start}: no product definition in its first bytes")
+
+
+def scan_headers(read, size: int, head_bytes: int = 4096) -> list[MessageHeader]:
+    """Walk a GRIB2 file message by message with `read(start, end)` byte-range reads."""
+    out = []
+    offset = 0
+    while offset < size:
+        h = parse_header(read(offset, min(size, offset + head_bytes) - 1), offset)
+        out.append(h)
+        offset = h.end + 1
+    return out
+
+
+def find_header(headers: Iterable[MessageHeader], signature: GribSignature, lead: int, *,
+                average: bool = False) -> MessageHeader | None:
+    want = tuple(signature.as_list())
+    for h in headers:
+        if h.signature != want:
+            continue
+        if average and h.is_average and h.window[1] == lead:
+            return h
+        if not average and h.is_instant and h.window[0] == lead:
+            return h
+    return None
+
+
 # ------------------------------------------------------------------- fields
 
 @dataclass(frozen=True, slots=True)
@@ -306,8 +410,18 @@ def check_message(message: bytes, spec: FieldSpec, *, run: datetime, lead: int,
 
     Returns the check, the values as float64 ``(nj, ni)`` with NaN where the
     message's bitmap masks a point (None if the check failed), and the step
-    window ``(startStep, endStep)`` in hours.
+    window ``(startStep, endStep)`` in hours. Never raises: whatever the
+    decoder throws on bytes that are not this message is a failed check.
     """
+    try:
+        return _check_message(message, spec, run=run, lead=lead, average=average, grid=grid)
+    except Exception as exc:  # noqa: BLE001 - garbage in is a failed check, not a crash
+        return (MessageCheck(name=spec.name, errors=[f"unreadable: {type(exc).__name__}: {exc}"]),
+                None, None)
+
+
+def _check_message(message: bytes, spec: FieldSpec, *, run: datetime, lead: int,
+                   average: bool, grid: SourceGrid):
     import eccodes
 
     check = MessageCheck(name=spec.name)
@@ -563,6 +677,8 @@ def run_times(day: datetime) -> list[datetime]:
 
 
 __all__ = ["BUCKET", "ENDPOINT", "LAYOUT_NAMES", "Crop", "Encoded", "FieldSpec",
-           "GribSignature", "IdxEntry", "MessageCheck", "Regridder", "SourceGrid",
-           "check_message", "coalesce", "encode_field", "field_specs", "file_key", "file_name",
-           "find_entry", "floor_run", "hourly_means", "layout_for", "parse_idx", "run_times"]
+           "GribSignature", "IdxEntry", "MessageCheck", "MessageHeader", "Regridder",
+           "SourceGrid", "StaleIndex", "check_message", "coalesce", "encode_field",
+           "field_specs", "file_key", "file_name", "find_entry", "find_header", "floor_run",
+           "hourly_means", "layout_for", "message_ok", "parse_header", "parse_idx",
+           "run_times", "scan_headers"]

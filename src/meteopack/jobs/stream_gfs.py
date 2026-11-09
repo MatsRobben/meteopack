@@ -53,6 +53,7 @@ import numpy as np
 from meteopack.core import grids
 from meteopack.core.config import ProductConfig, layer_path
 from meteopack.core.encoding import Encoding
+from meteopack.core.http import FetchError
 from meteopack.core.store import gridded, manifest
 from meteopack.core.timeline import Timeline
 from meteopack.jobs.stream_kdp import (
@@ -135,6 +136,8 @@ class RunData:
     prate_absent: set[int] = field(default_factory=set)
     #: transfer failures: "fFFF kind" -> message. A run with any is not packed.
     errors: dict[str, str] = field(default_factory=dict)
+    #: files whose .idx did not match them; their messages were located by header
+    stale_indexes: list[str] = field(default_factory=list)
     schema_failures: list[dict] = field(default_factory=list)
     fingerprints: Counter = field(default_factory=Counter)
     bytes: int = 0
@@ -291,13 +294,51 @@ class GfsStream:
                     for group in gfs.coalesce([w.entry for w in wants]):
                         groups.append((key, [by_entry[e.start] for e in group]))
 
+        stale = self._fetch_groups(groups, out)
+
+        # A file whose .idx no longer matches it (re-uploaded upstream): walk the
+        # file's own message headers instead, then fetch what is wanted again.
+        if stale:
+            rebuilt = list(self.pool.map(lambda kw: self._rebuild(*kw),
+                                         [(key, wants) for key, wants in stale.items()]))
+            groups = []
+            for key, (fixed, absent) in zip(stale, rebuilt, strict=True):
+                for w in absent:
+                    target = out[w.run]
+                    if w.spec is None:
+                        target.prate_absent.add(w.lead)
+                    else:
+                        target.absent_fields.setdefault(w.lead, []).append(w.spec.name)
+                if fixed is None:
+                    continue
+                out[stale[key][0].run].stale_indexes.append(key)
+                by_entry = {w.entry.start: w for w in fixed}
+                for group in gfs.coalesce([w.entry for w in fixed]):
+                    groups.append((key, [by_entry[e.start] for e in group]))
+            still = self._fetch_groups(groups, out)
+            for key, wants in still.items():
+                out[wants[0].run].errors[f"f{wants[0].lead:03d} {wants[0].kind}"] = \
+                    "the file's messages do not match its own headers"
+        for data in out.values():
+            data.requests = 0
+        # Requests are counted for the whole call; attribute them to the first run.
+        if out:
+            next(iter(out.values())).requests = self.client.requests_made - req0
+        return out
+
+    def _fetch_groups(self, groups, out) -> dict[str, list[_Want]]:
+        """Fetch, check and crop groups; return the wants of files with a stale index."""
         futures = {self.pool.submit(self._fetch_group, key, wants): (key, wants)
                    for key, wants in groups}
+        stale: dict[str, list[_Want]] = {}
         for fut in cf.as_completed(futures):
             key, wants = futures[fut]
             data = out[wants[0].run]
             try:
                 results, n_bytes = fut.result()
+            except gfs.StaleIndex:
+                stale.setdefault(key, []).extend(wants)
+                continue
             except Exception as exc:  # noqa: BLE001 - a transfer failure; the day is partial
                 tag = f"f{wants[0].lead:03d} {wants[0].kind}"
                 data.errors[tag] = f"{type(exc).__name__}: {exc}"
@@ -321,12 +362,36 @@ class GfsStream:
                     data.prate_avg[want.lead] = (window[0], values)
                 else:
                     data.state.setdefault(want.lead, {})[want.spec.name] = values
-        for data in out.values():
-            data.requests = 0
-        # Requests are counted for the whole call; attribute them to the first run.
-        if out:
-            next(iter(out.values())).requests = self.client.requests_made - req0
-        return out
+        return stale
+
+    def _rebuild(self, key: str, wants: list[_Want]):
+        """Locate `wants` in `key` from the file's own headers: (found wants, absent wants).
+
+        Returns (None, []) if the file cannot be walked; the caller records that.
+        """
+        try:
+            listed = [r for r in self.client.list_prefix(key) if r.key == key]
+            if not listed:
+                return None, []
+            headers = gfs.scan_headers(lambda a, b: self.client.get_bytes(key, a, b),
+                                       listed[0].size)
+        except Exception as exc:  # noqa: BLE001 - reported as a failed file
+            logger.warning("gfs: %s: could not walk the file's headers: %s", key, exc)
+            return None, []
+        logger.warning("gfs: %s: stale .idx; located %d messages from the file's own headers",
+                       key, len(headers))
+        found, absent = [], []
+        for w in wants:
+            spec = w.spec or self.prate_spec
+            h = gfs.find_header(headers, spec.signature, w.lead, average=w.average)
+            if h is None:
+                absent.append(w)
+                continue
+            entry = gfs.IdxEntry(number="header", start=h.start, end=h.end,
+                                 run=w.entry.run, var=w.entry.var, level=w.entry.level,
+                                 step=w.entry.step)
+            found.append(_Want(w.run, w.lead, w.kind, entry, w.spec, w.average))
+        return found, absent
 
     def _gather_indexes(self, jobs, indexes, out) -> None:
         for fut in cf.as_completed(jobs):
@@ -342,12 +407,21 @@ class GfsStream:
     def _fetch_group(self, key: str, wants: list[_Want]):
         """One ranged GET for adjacent messages; check, decode and crop each."""
         first, last = wants[0].entry, wants[-1].entry
-        blob = self.client.get_bytes(key, first.start, last.end)
-        results = []
+        try:
+            blob = self.client.get_bytes(key, first.start, last.end)
+        except FetchError as exc:
+            if exc.status == 416:            # the index points past the end of the file
+                raise gfs.StaleIndex(key) from exc
+            raise
+        slices = []
         for w in wants:
             lo = w.entry.start - first.start
             hi = None if w.entry.end is None else w.entry.end - first.start + 1
-            message = blob[lo:hi]
+            slices.append(blob[lo:hi])
+        if not all(gfs.message_ok(m) for m in slices):
+            raise gfs.StaleIndex(key)
+        results = []
+        for w, message in zip(wants, slices, strict=True):
             spec = w.spec or self.prate_spec
             check, values, window = gfs.check_message(
                 message, spec, run=w.run, lead=w.lead, average=w.average,
@@ -683,6 +757,7 @@ class GfsStream:
             "prate_runs": p_info,
             "files_absent_upstream": absent_files,
             "failed_downloads": errors,
+            "stale_indexes": sorted(k for d in runs.values() for k in d.stale_indexes),
             "schema_failed": schema,
             "schema_fingerprints": dict(fps),
             "clipped_values": dict(clipped),

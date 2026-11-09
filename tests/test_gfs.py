@@ -262,6 +262,26 @@ def test_check_message_reads_a_time_mean_and_a_bitmap():
                              grid=SRC)[1] is None
 
 
+def test_message_headers_are_read_without_the_index():
+    v = np.zeros((SRC.nj, SRC.ni))
+    a = grib_message(v, run=RUN, lead=3, sig=TMP850)
+    b = grib_message(v, run=RUN, lead=8, sig=PRATE, avg_from=6)
+    c = grib_message(v, run=RUN, lead=8, sig=PRATE)
+    blob = a + b + c
+    assert gfs.message_ok(a) and not gfs.message_ok(blob[5:len(a) + 5])
+    heads = gfs.scan_headers(lambda lo, hi: blob[lo:hi + 1], len(blob), head_bytes=300)
+    assert [h.start for h in heads] == [0, len(a), len(a) + len(b)]
+    assert heads[-1].end == len(blob) - 1
+    assert heads[0].signature == (0, 0, 0, 100, 85000.0, 255, None) and heads[0].window == (3, 3)
+    assert heads[1].is_average and heads[1].window == (6, 8)
+    sig = gfs.GribSignature.parse(PRATE)
+    assert gfs.find_header(heads, sig, 8, average=True) is heads[1]
+    assert gfs.find_header(heads, sig, 8) is heads[2]
+    assert gfs.find_header(heads, sig, 7) is None
+    with pytest.raises(gfs.StaleIndex):
+        gfs.parse_header(blob[10:400], 10)
+
+
 # ---------------------------------------------------------- the stream
 
 DAY = datetime(2024, 6, 2, tzinfo=UTC)
@@ -488,6 +508,34 @@ def test_a_transfer_failure_leaves_the_day_partial_and_a_rerun_completes_it(tmp_
     bucket.get_bytes = real
     assert run_stream(state, prate, root, bucket)[0] == stream_kdp.EXIT_DONE
     assert json.loads(path.read_text())["state"] == "done"
+
+
+def test_a_stale_index_is_replaced_by_the_files_own_headers(tmp_path: Path, bucket):
+    """The archive's 2022-11-29 18z .. 11-30 06z case: GRIB re-uploaded, old .idx left."""
+    state, prate = tiny_cfgs()
+    run = DAY + timedelta(hours=12)
+    key = gfs.file_key(run, 3)
+    lines = bucket.objects[key + ".idx"].decode().splitlines()
+    # Shift every offset after the first message by 100 bytes: the old layout.
+    shifted = [ln if i == 0 else ":".join([ln.split(":")[0], str(int(ln.split(":")[1]) + 100),
+                                           *ln.split(":")[2:]])
+               for i, ln in enumerate(lines)]
+    bucket.objects[key + ".idx"] = ("\n".join(shifted) + "\n").encode()
+    bucket.list_prefix = lambda prefix: [type("R", (), {"key": k, "size": len(v)})()
+                                         for k, v in bucket.objects.items()
+                                         if k.startswith(prefix)]
+    root = tmp_path / "root"
+    code, lines_out = run_stream(state, prate, root, bucket)
+    assert code == stream_kdp.EXIT_DONE, lines_out
+    status = json.loads((gridded.store_path(root, state.store_id) / "days" / "2024"
+                         / "2024-06-02.json").read_text())
+    assert status["state"] == "done" and status["stale_indexes"] == [key]
+    # Only the fixture's own broken message (12z f004) fails; nothing from the stale file.
+    assert [f["lead"] for f in status["schema_failed"]] == [4]
+    native = field_values("tmp_850hpa", run, 3).astype("float32").astype("float64")
+    spec = {s.name: s for s in gfs.field_specs(state)}["tmp_850hpa"]
+    want = gfs.encode_field(native[40:103, 48:159], spec.encoding).codes
+    np.testing.assert_array_equal(_raw(root, state, "tmp_850hpa", 15), want)
 
 
 def test_the_real_configs_hold_the_122_fields():
