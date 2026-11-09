@@ -233,6 +233,36 @@ class StoreConfig(BaseModel):
     row_group_rows: Annotated[int, Field(gt=0)] | None = None
 
 
+class Levels(BaseModel):
+    """A vertical axis for a gridded product: the store becomes ``(time, z, y, x)``.
+
+    The dimension is always called ``z``; what it measures is said by `units`,
+    `long_name` and, when one applies, `standard_name`. `values` are the level
+    centres the store keeps, in order - a product that subsamples its source's
+    levels lists the kept ones here and says which source levels they are in
+    `source_indices`, so a reader never has to recompute the selection.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    units: str
+    values: list[float] = Field(min_length=1)
+    long_name: str | None = None
+    standard_name: str | None = None
+    positive: Literal["up", "down"] = "up"
+    #: Position of each kept level in the source's own vertical axis.
+    source_indices: list[int] | None = None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Levels:
+        if any(b <= a for a, b in zip(self.values, self.values[1:], strict=False)):
+            raise ValueError("levels.values must be strictly increasing")
+        if self.source_indices is not None and len(self.source_indices) != len(self.values):
+            raise ValueError(f"levels.source_indices has {len(self.source_indices)} entries "
+                             f"for {len(self.values)} levels")
+        return self
+
+
 class ProductConfig(BaseModel):
     """One (source, product) pair: what to pull, how to name it, where it lands."""
 
@@ -251,6 +281,9 @@ class ProductConfig(BaseModel):
     #: regular product can never lose its cadence check by omission.
     cadence_seconds: Annotated[int, Field(gt=0)] | None = 600
     grid_id: str | None = None
+    #: A vertical axis. Unset - every product before the 3D radar composite -
+    #: keeps the ``(time, y, x)`` layout. See `Levels`.
+    levels: Levels | None = None
     variables: list[Variable] = Field(default_factory=list)
     store: StoreConfig
     retention: RetentionConfig = RetentionConfig()
@@ -267,6 +300,8 @@ class ProductConfig(BaseModel):
         if self.cadence_seconds is None and self.store.kind != "points":
             raise ValueError("cadence_seconds: null (irregular) is only meaningful for a "
                              "points store; a gridded store is a regular time axis")
+        if self.levels is not None and self.store.kind != "gridded":
+            raise ValueError("levels (a vertical axis) only applies to a gridded store")
         return self
 
     @property

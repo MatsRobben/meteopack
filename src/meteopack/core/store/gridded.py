@@ -1,5 +1,11 @@
 """zarr v3 store for ``(time, y, x)`` fields: one frame per chunk, a day per shard.
 
+A product with a vertical axis (`ProductConfig.levels`) is stored as
+``(time, z, y, x)`` instead, with a ``z`` coordinate; everything below holds
+with "frame" meaning one time step of every level. The layout of an existing
+store is read from its arrays' own dimension names, never assumed, so
+``(time, y, x)`` stores written before this existed read exactly as before.
+
 Layout under ``<root>/<layer>/<category>/<source>/<product>/v<n>/``: a zarr v3 group holding
 one array per variable plus a ``time`` coordinate, with the grid in the attrs.
 
@@ -65,6 +71,22 @@ logger = logging.getLogger(__name__)
 
 TIME_NAME = "time"
 DIMS: tuple[str, str, str] = ("time", "y", "x")
+#: The vertical dimension, for products that declare `levels`.
+LEVEL_NAME = "z"
+DIMS_3D: tuple[str, str, str, str] = ("time", LEVEL_NAME, "y", "x")
+
+
+def dims_for(cfg: ProductConfig) -> tuple[str, ...]:
+    """``(time, z, y, x)`` for a product with levels, ``(time, y, x)`` otherwise."""
+    return DIMS_3D if cfg.levels is not None else DIMS
+
+
+def _dims_of(array: zarr.Array) -> tuple[str, ...]:
+    """An array's own dimension names; DIMS for one written without them."""
+    names = getattr(array.metadata, "dimension_names", None)
+    if names and all(names):
+        return tuple(str(n) for n in names)
+    return DIMS if array.ndim == 3 else DIMS_3D
 
 #: Seconds, not nanoseconds: CF-decodable by any reader, and exact for an integer
 #: cadence. Sub-second axes are rejected in `initialise` rather than rounded.
@@ -124,29 +146,34 @@ def _compressors(store: StoreConfig) -> Any:
 
 
 def _geometry(
-    cfg: ProductConfig, shape: tuple[int, int, int]
-) -> tuple[tuple[int, int, int], tuple[int, int, int] | None]:
+    cfg: ProductConfig, shape: tuple[int, ...]
+) -> tuple[tuple[int, ...], tuple[int, ...] | None]:
     """Inner chunk and shard shapes: from config where given, benchmarked defaults otherwise.
 
     Defaults are one frame per chunk and one day of frames per shard — a day
     being the natural unit of work for a packing job, and therefore the grain at
     which parallel writers stay on disjoint files.
     """
-    _, ny, nx = shape
+    dims = dims_for(cfg)
+    if len(shape) != len(dims):
+        raise ValueError(f"{cfg.store_id}: shape {shape} does not match dims {dims}")
     frames_per_day = max(1, _SECONDS_PER_DAY // cfg.cadence_seconds)
     wanted = cfg.store.chunks or {}
-    chunks = (
-        max(1, int(wanted.get("time", 1))),
-        max(1, int(wanted.get("y", ny))),
-        max(1, int(wanted.get("x", nx))),
+    # Time defaults to one frame per chunk; every other dimension to its full
+    # extent (a whole frame, all levels).
+    chunks = tuple(
+        max(1, int(wanted.get(dim, 1 if dim == TIME_NAME else size)))
+        for dim, size in zip(dims, shape, strict=True)
     )
     sharded = cfg.store.shard or {}
-    shards = (
-        max(1, int(sharded.get("time", frames_per_day))),
-        max(1, int(sharded.get("y", chunks[1]))),
-        max(1, int(sharded.get("x", chunks[2]))),
+    shards = tuple(
+        max(1, int(sharded.get(dim, frames_per_day if dim == TIME_NAME else chunk)))
+        for dim, chunk in zip(dims, chunks, strict=True)
     )
-    for dim, chunk, shard in zip(DIMS, chunks, shards, strict=True):
+    unknown = sorted((set(wanted) | set(sharded)) - set(dims))
+    if unknown:
+        raise ValueError(f"{cfg.store_id}: chunks/shard name {unknown}, not dims of {dims}")
+    for dim, chunk, shard in zip(dims, chunks, shards, strict=True):
         if shard % chunk:
             raise ValueError(
                 f"{cfg.store_id}: shard {shard} on {dim!r} is not a multiple of chunk {chunk}"
@@ -201,7 +228,7 @@ def _timeline_of(group: zarr.Group) -> Timeline:
 #: Everything that is not a field: the time axis, the coordinates and the
 #: per-frame provenance. Kept in one place because several functions mean
 #: "the variables" and none of them mean these.
-_NON_FIELD = frozenset({TIME_NAME, *COORD_NAMES, *PROVENANCE})
+_NON_FIELD = frozenset({TIME_NAME, LEVEL_NAME, *COORD_NAMES, *PROVENANCE})
 
 
 def _data_arrays(group: zarr.Group) -> list[str]:
@@ -237,7 +264,10 @@ def initialise(
     names = _variable_names(cfg, variables)
     grid = grids.get(cfg.grid_id)
     ny, nx = grid.shape
-    shape = (len(timeline), ny, nx)
+    dims = dims_for(cfg)
+    levels = cfg.levels
+    shape: tuple[int, ...] = ((len(timeline), len(levels.values), ny, nx) if levels is not None
+                              else (len(timeline), ny, nx))
     chunks, shards = _geometry(cfg, shape)
 
     path = zarr_path(root, cfg.store_id, layer=layer)
@@ -267,6 +297,8 @@ def initialise(
     time[:] = timeline.values().astype("int64")
 
     _create_coordinates(group, grid)
+    if levels is not None:
+        _create_levels(group, levels)
     _create_provenance(group, shape[0], shards[0] if shards else chunks[0])
 
     declared = {v.name: v for v in cfg.variables}
@@ -288,7 +320,7 @@ def initialise(
             dtype=dtype,
             fill_value=fill,
             compressors=_compressors(cfg.store),
-            dimension_names=DIMS,
+            dimension_names=dims,
             attributes=attributes,
         )
     return store_path(root, cfg.store_id, layer=layer)
@@ -318,10 +350,13 @@ def _root_attrs(cfg: ProductConfig, grid, timeline: Timeline, n_times: int) -> d
         "n_times": n_times,
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
+    if cfg.levels is not None:
+        declared["dims"] = list(DIMS_3D)
+        declared["n_levels"] = len(cfg.levels.values)
     # Whatever the config publishes - institution, source, history, references,
     # comment - wins, except the keys this store owns and must stay true.
     reserved = {"store_id", "grid_id", "proj4", "cadence_seconds",
-                "time_start", "time_end", "n_times"}
+                "time_start", "time_end", "n_times", "dims", "n_levels"}
     declared.update({k: v for k, v in (cfg.attrs or {}).items() if k not in reserved})
     mapping = {
         "grid_mapping_name": "polar_stereographic",
@@ -384,6 +419,21 @@ def _create_coordinates(group: zarr.Group, grid) -> None:
             attributes={"units": units, "standard_name": std, "long_name": std},
         )
         array[:] = values
+
+
+def _create_levels(group: zarr.Group, levels) -> None:
+    """The ``z`` coordinate: level centres, as the config declares them."""
+    values = np.asarray(levels.values, dtype="float64")
+    attributes = {"units": levels.units, "axis": "Z", "positive": levels.positive,
+                  "long_name": levels.long_name or "vertical level"}
+    if levels.standard_name:
+        attributes["standard_name"] = levels.standard_name
+    if levels.source_indices is not None:
+        attributes["source_indices"] = [int(i) for i in levels.source_indices]
+    array = group.create_array(LEVEL_NAME, shape=values.shape, chunks=values.shape,
+                               dtype="float64", dimension_names=(LEVEL_NAME,),
+                               attributes=attributes)
+    array[:] = values
 
 
 def _field_attrs(var, encoding: Encoding | None) -> dict:
@@ -555,10 +605,13 @@ def _write_fields(group, ds, cfg, keep, hit, order, breaks) -> None:
         if target in PROVENANCE:
             continue
         array = group[target]
+        dims = _dims_of(array)
+        if set(ds[name].dims) != set(dims):
+            raise ValueError(f"{name} has dims {ds[name].dims}; the store's array is {dims}")
         # Cast to the array's own dtype rather than to float32: the store may
         # hold integer codes with their own calibration, and converting those
         # to float and back would round values the source had exactly.
-        block = np.asarray(ds[name].transpose(*DIMS).values)
+        block = np.asarray(ds[name].transpose(*dims).values)
         if block.shape[1:] != tuple(array.shape[1:]):
             raise ValueError(
                 f"{name} frames are {block.shape[1:]}, store is {tuple(array.shape[1:])}"
@@ -811,7 +864,7 @@ def read(
     layer: Layer = DEFAULT_LAYER,
     decode: bool = True,
 ) -> xr.Dataset:
-    """Read a window of the store as a ``(time, y, x)`` dataset.
+    """Read a window of the store as a ``(time, y, x)`` (or ``(time, z, y, x)``) dataset.
 
     The window is resolved to positions before any chunk is touched, so
     ``time_range`` is what bounds the read: a whole-store read of a multi-year
@@ -841,7 +894,8 @@ def read(
 
     data: dict = {}
     for name in names:
-        variable = xr.Variable(DIMS, np.asarray(group[name][lo:hi]), dict(group[name].attrs))
+        variable = xr.Variable(_dims_of(group[name]), np.asarray(group[name][lo:hi]),
+                               dict(group[name].attrs))
         if decode:
             # One variable at a time: decoding the whole dataset would also
             # apply CF masking to the provenance coordinates.
@@ -857,7 +911,7 @@ def read(
         if name in present:
             coords[name] = ((TIME_NAME,), np.asarray(group[name][lo:hi]),
                             dict(group[name].attrs))
-    for name in ("y", "x"):
+    for name in (LEVEL_NAME, "y", "x"):
         if name in present:
             coords[name] = ((name,), np.asarray(group[name][:]), dict(group[name].attrs))
     for name in ("lat", "lon"):
@@ -887,6 +941,7 @@ def info(store_id: str, root: str | os.PathLike[str], *, layer: Layer = DEFAULT_
             "long_name": array.attrs.get("long_name"),
         }
     first = variables[names[0]] if names else {}
+    dims = _dims_of(group[names[0]]) if names else DIMS
     return {
         "store_id": store_id,
         "layer": layer,
@@ -894,7 +949,7 @@ def info(store_id: str, root: str | os.PathLike[str], *, layer: Layer = DEFAULT_
         "grid_id": group.attrs.get("grid_id"),
         "proj4": group.attrs.get("proj4"),
         "title": group.attrs.get("title"),
-        "dims": DIMS,
+        "dims": dims,
         "shape": first.get("shape"),
         "chunks": first.get("chunks"),
         "shards": first.get("shards"),
@@ -909,8 +964,11 @@ def info(store_id: str, root: str | os.PathLike[str], *, layer: Layer = DEFAULT_
 __all__ = [
     "DEFAULT_LAYER",
     "DIMS",
+    "DIMS_3D",
+    "LEVEL_NAME",
     "TIME_NAME",
     "TIME_UNITS",
+    "dims_for",
     "info",
     "initialise",
     "read",

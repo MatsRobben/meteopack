@@ -828,3 +828,129 @@ def test_store_metadata_says_what_no_echo_and_the_layout_codes_mean(tmp_path: Pa
     assert flags["flag_meanings"] == "missing corrupt echo_top_height"
     assert "flag_meanings" in flags["long_name"] or "flag_values" in flags["long_name"]
     assert "corrupt_layouts" in group["is_corrupt_frame"].attrs["long_name"]
+
+
+# ------------------------------------------------------------ vertical levels
+
+LEVELS = [0.375, 0.875, 1.375]
+
+
+def make_cfg_3d(**store) -> ProductConfig:
+    from meteopack.core.config import Levels
+
+    return ProductConfig(
+        source="knmi",
+        product="test3d",
+        cadence_seconds=CADENCE_SECONDS,
+        grid_id=TINY.id,
+        levels=Levels(units="km", values=LEVELS, long_name="height", source_indices=[1, 3, 5]),
+        variables=[Variable(name="refl", source_key="refl", units="dBZ",
+                            encoding={"dtype": "uint8", "scale": 0.5, "offset": -32.0,
+                                      "missing": 255, "out_of_image": 254})],
+        store=StoreConfig(kind="gridded", compression_level=1, **store),
+    )
+
+
+def block_3d(rows: np.ndarray) -> np.ndarray:
+    """uint8 codes unique per (row, level, cell) modulo 254, never a sentinel."""
+    nz = len(LEVELS)
+    idx = (np.asarray(rows)[:, None, None, None] * 7 + np.arange(nz)[None, :, None, None] * 3
+           + np.arange(NY * NX).reshape(1, 1, NY, NX))
+    return (idx % 250).astype("uint8")
+
+
+def test_levels_make_a_four_dimensional_store_with_a_z_coordinate(tmp_path: Path):
+    import zarr
+
+    cfg = make_cfg_3d()
+    gridded.initialise(cfg, tmp_path, make_timeline())
+    group = zarr.open_group(gridded.zarr_path(tmp_path, cfg.store_id), mode="r")
+    array = group["refl"]
+    assert array.shape == (DAYS * FRAMES_PER_DAY, len(LEVELS), NY, NX)
+    assert tuple(array.metadata.dimension_names) == gridded.DIMS_3D
+    # Default geometry: one time step, all levels, the whole frame per chunk.
+    assert array.chunks == (1, len(LEVELS), NY, NX)
+    assert array.shards == (FRAMES_PER_DAY, len(LEVELS), NY, NX)
+    assert array.fill_value == 255
+    np.testing.assert_array_equal(group["z"][:], LEVELS)
+    assert group["z"].attrs["units"] == "km"
+    assert group["z"].attrs["source_indices"] == [1, 3, 5]
+    assert group.attrs["dims"] == list(gridded.DIMS_3D)
+    info = gridded.info(cfg.store_id, tmp_path)
+    assert info["dims"] == gridded.DIMS_3D
+    assert info["shape"] == (DAYS * FRAMES_PER_DAY, len(LEVELS), NY, NX)
+
+
+def test_levels_round_trip_exactly_and_unwritten_frames_read_missing(tmp_path: Path):
+    cfg, timeline = make_cfg_3d(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    rows = np.arange(FRAMES_PER_DAY, 2 * FRAMES_PER_DAY)
+    codes = block_3d(rows)
+    # Handed over in a different dimension order: write transposes by name.
+    ds = xr.Dataset({"refl": (("time", "y", "x", "z"), codes.transpose(0, 2, 3, 1))},
+                    coords={"time": timeline.values()[rows]})
+    result = gridded.write(ds, cfg, tmp_path)
+    assert result.written == FRAMES_PER_DAY and result.outside == 0
+
+    raw = gridded.read(cfg.store_id, tmp_path, decode=False)
+    assert raw["refl"].dims == gridded.DIMS_3D
+    np.testing.assert_array_equal(raw["z"].values, LEVELS)
+    np.testing.assert_array_equal(raw["refl"].values[rows], codes)
+    assert (raw["refl"].values[: FRAMES_PER_DAY] == 255).all()
+    flags = raw["is_missing_frame"].values
+    assert not flags[rows].any() and flags[: FRAMES_PER_DAY].all()
+
+    decoded = gridded.read(cfg.store_id, tmp_path)["refl"].values
+    np.testing.assert_allclose(decoded[rows], codes.astype("float32") * 0.5 - 32.0)
+    assert np.isnan(decoded[: FRAMES_PER_DAY]).all()
+
+
+def test_levels_store_extends_and_validates(tmp_path: Path):
+    from meteopack.core import validate
+
+    cfg, timeline = make_cfg_3d(), make_timeline()
+    first = Timeline(timeline.start, timeline.start + timedelta(days=1), timeline.cadence)
+    gridded.initialise(cfg, tmp_path, first)
+    added = gridded.extend(cfg, tmp_path, timeline)
+    assert added == (DAYS - 1) * FRAMES_PER_DAY
+    rows = np.arange(3 * FRAMES_PER_DAY, 4 * FRAMES_PER_DAY)
+    gridded.write(xr.Dataset({"refl": (gridded.DIMS_3D, block_3d(rows))},
+                             coords={"time": timeline.values()[rows]}), cfg, tmp_path)
+    out = gridded.read(cfg.store_id, tmp_path, decode=False)
+    assert out.sizes["time"] == DAYS * FRAMES_PER_DAY
+    np.testing.assert_array_equal(out["refl"].values[rows], block_3d(rows))
+
+    report = validate.validate_gridded(cfg, tmp_path)
+    assert report.stats["dims"] == {"time": DAYS * FRAMES_PER_DAY, "z": len(LEVELS),
+                                    "y": NY, "x": NX}
+
+
+def test_a_three_dimensional_dataset_is_refused_by_a_levels_store(tmp_path: Path):
+    cfg, timeline = make_cfg_3d(), make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    rows = np.arange(FRAMES_PER_DAY)
+    flat = xr.Dataset({"refl": (gridded.DIMS, np.zeros((FRAMES_PER_DAY, NY, NX), "uint8"))},
+                      coords={"time": timeline.values()[rows]})
+    with pytest.raises(ValueError, match="dims"):
+        gridded.write(flat, cfg, tmp_path)
+
+
+def test_chunk_keys_must_name_real_dimensions(tmp_path: Path):
+    cfg = make_cfg(chunks={"time": 1, "z": 2, "y": NY, "x": NX})
+    with pytest.raises(ValueError, match="not dims"):
+        gridded.initialise(cfg, tmp_path, make_timeline())
+
+
+def test_unset_levels_leave_existing_config_hashes_unchanged():
+    from meteopack.core.store import manifest
+
+    cfg = make_cfg()
+    payload = cfg.model_dump(mode="json")
+    assert payload["levels"] is None
+    del payload["levels"]
+    # The hash a config had before `levels` existed: every store on disk
+    # recorded one of these, and none of them may turn stale.
+    assert manifest.config_hash(cfg) == manifest.config_hash(payload)
+    assert manifest.content_hash(cfg) == manifest.content_hash(payload)
+    assert manifest.config_hash(make_cfg_3d()) != manifest.config_hash(
+        make_cfg_3d().model_copy(update={"levels": None}))
