@@ -1,4 +1,4 @@
-"""meteopack {scan,list,fetch,parse,pack,derive,validate,catalog} <target>
+"""meteopack {scan,list,fetch,parse,pack,stream,derive,validate,catalog} <target>
 
 Every stage is re-runnable. For `fetch` the ledger decides what is left to do,
 so running it twice is cheap and a preempted Slurm task costs at most its
@@ -31,10 +31,14 @@ logger = logging.getLogger("meteopack")
 _STARTED = time.time()
 
 #: Stages that write into the data root. Everything else only reads it.
-_WRITING_STAGES = frozenset({"fetch", "pack"})
+_WRITING_STAGES = frozenset({"fetch", "pack", "stream"})
 
-STAGES = ("scan", "list", "fetch", "parse", "pack", "derive", "validate", "catalog",
+STAGES = ("scan", "list", "fetch", "parse", "pack", "stream", "derive", "validate", "catalog",
           "credentials")
+
+#: Stages that go through a source's local raw layer; a product that is
+#: streamed (extra.stream) has none and is packed by `stream` instead.
+_RAW_STAGES = frozenset({"scan", "list", "fetch", "parse", "pack"})
 
 
 # --------------------------------------------------------------------- args
@@ -69,6 +73,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="catalog: what the source's raw layer is missing and why, per file "
                         "and per station x year, from the last fetch's listing and the ledger")
     p.add_argument("--out", help="catalog --gaps: directory to write the full tables to (CSV)")
+    p.add_argument("--redo", action="store_true",
+                   help="stream: re-pack days already done, from scratch")
+    p.add_argument("--time-budget", type=float, default=None, metavar="HOURS",
+                   help="stream: start no new day after this many hours; exit 75 if days "
+                        "remain, so a Slurm job can resubmit itself")
+    p.add_argument("--download-workers", type=int, default=None,
+                   help="stream: concurrent downloads (default: extra.kdp.download_workers)")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="derive (kind: regularise or qc): override one config value for this run, "
                         "e.g. --set step_seconds=300 --set rain.rule=naive (repeatable)")
@@ -2183,8 +2194,48 @@ def _credential_state(name: str, registry) -> tuple[str, str]:
 
 # --------------------------------------------------------------------- main
 
+def stage_stream(ctx: Context) -> int:
+    """Download, check, pack and delete, one UTC day at a time (KDP products).
+
+    Without --window: from the product's first day to the start of today (UTC),
+    i.e. every complete day. Resumable: days already done are skipped.
+    """
+    import signal
+    import threading
+
+    from meteopack.jobs import stream_kdp
+
+    cfg = ctx.cfg
+    if cfg.extra.get("stream") != "kdp":
+        print(f"error: {cfg.store_id} is not a streamed product (extra.stream: kdp)",
+              file=sys.stderr)
+        return 2
+    if ctx.args.window:
+        start, end = ctx.window.start, ctx.window.end
+    else:
+        start = datetime.fromisoformat(str(cfg.extra["timeline_origin"]))
+        now = datetime.now(UTC)
+        end = datetime(now.year, now.month, now.day, tzinfo=UTC)
+    stop = threading.Event()
+
+    def on_term(signum, frame):  # pragma: no cover - exercised by Slurm
+        print(f"[stream] signal {signum}: finishing the current day, then stopping",
+              flush=True)
+        stop.set()
+
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGUSR1, on_term)
+    budget = ctx.args.time_budget * 3600 if ctx.args.time_budget else None
+    return stream_kdp.run(cfg, ctx.root, start, end,
+                          download_workers=ctx.args.download_workers,
+                          pack_workers=ctx.args.workers, redo=ctx.args.redo,
+                          time_budget_s=budget, max_days=ctx.args.limit, stop=stop,
+                          log=lambda line: print(line, flush=True))
+
+
 _STAGE_FUNCS = {
     "list": stage_list, "fetch": stage_fetch, "parse": stage_parse, "pack": stage_pack,
+    "stream": stage_stream,
     "scan": stage_scan, "validate": stage_validate, "catalog": stage_catalog,
 }
 
@@ -2206,6 +2257,10 @@ def main(argv: list[str] | None = None) -> int:
         ctx = Context(args)
     except (FileNotFoundError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.stage in _RAW_STAGES and ctx.cfg.extra.get("stream"):
+        print(f"error: {ctx.cfg.store_id} is streamed, not packed from a raw archive: run "
+              f"`meteopack stream {args.target} --product {ctx.cfg.product}`", file=sys.stderr)
         return 2
     return _STAGE_FUNCS[args.stage](ctx)
 
