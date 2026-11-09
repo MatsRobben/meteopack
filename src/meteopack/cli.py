@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="stream: start no new day after this many hours; exit 75 if days "
                         "remain, so a Slurm job can resubmit itself")
     p.add_argument("--download-workers", type=int, default=None,
-                   help="stream: concurrent downloads (default: extra.kdp.download_workers)")
+                   help="stream: concurrent downloads (default: extra.kdp/s3.download_workers)")
     p.add_argument("--requests-per-second", type=float, default=None,
                    help="stream: API request rate for whichever key is in use (default: "
                         "extra.kdp.requests_per_second for that key file); the quota itself "
@@ -2199,10 +2199,11 @@ def _credential_state(name: str, registry) -> tuple[str, str]:
 # --------------------------------------------------------------------- main
 
 def stage_stream(ctx: Context) -> int:
-    """Download, check, pack and delete, one UTC day at a time (KDP products).
+    """Download, check, pack and delete, one UTC day at a time (KDP or S3 products).
 
-    Without --window: from the product's first day to the start of today (UTC),
-    i.e. every complete day. Resumable: days already done are skipped.
+    Without --window: from the product's ``extra.stream_start`` (else its first
+    day) to the start of today (UTC), i.e. every complete day. Resumable: days
+    already done are skipped.
     """
     import signal
     import threading
@@ -2210,14 +2211,16 @@ def stage_stream(ctx: Context) -> int:
     from meteopack.jobs import stream_kdp
 
     cfg = ctx.cfg
-    if cfg.extra.get("stream") != "kdp":
-        print(f"error: {cfg.store_id} is not a streamed product (extra.stream: kdp)",
-              file=sys.stderr)
+    if cfg.extra.get("stream") not in stream_kdp.REMOTES:
+        print(f"error: {cfg.store_id} is not a streamed product (extra.stream: one of "
+              f"{', '.join(stream_kdp.REMOTES)})", file=sys.stderr)
         return 2
     if ctx.args.window:
         start, end = ctx.window.start, ctx.window.end
     else:
-        start = datetime.fromisoformat(str(cfg.extra["timeline_origin"]))
+        start = datetime.fromisoformat(str(cfg.extra.get("stream_start")
+                                           or cfg.extra["timeline_origin"]))
+        start = start if start.tzinfo else start.replace(tzinfo=UTC)
         now = datetime.now(UTC)
         end = datetime(now.year, now.month, now.day, tzinfo=UTC)
     stop = threading.Event()
