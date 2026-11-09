@@ -258,6 +258,7 @@ class Knmi3dFormat:
 FORMATS = {
     "knmi_radar_3d": "meteopack.jobs.stream_kdp:Knmi3dFormat",
     "opera_odim": "meteopack.sources.radar.opera:OperaFormat",
+    "harmonie_cy43": "meteopack.sources.nwp.knmi_harmonie:HarmonieFormat",
 }
 
 
