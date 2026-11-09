@@ -179,8 +179,8 @@ the raw HDF5 never accumulates.
 | code 65534 | **no data for this frame** (the fill); the frame is flagged `is_missing_frame` or `is_corrupt_frame` |
 | code 65533 | 655.33 mm/h: anything higher is clipped to it and counted per file (`n_clipped`) |
 | grid | `opera_2km_laea_nl`: OPERA's own LAEA grid (`+proj=laea +lat_0=55 +lon_0=10 +x_0=1950000 +y_0=-2100000 +ellps=WGS84`, metres), **not resampled**; store pixel `[i, j]` is native pixel `[756 + i, 389 + j]` of the 2200 x 1900 composite (`attrs["opera_window"]`). 880 x 880 pixels: the 1536 km KNMI training square around 52.2N 5.3E spans native cols 408-1249 and rows 775-1616, plus 19 px on every side. `x`, `y` are cell centres in metres; `lat`, `lon` per cell |
-| chunks | one time step in 2 x 2 tiles of 440 x 440; one UTC day (96 steps) per shard; blosc-zstd 5 with byte shuffle |
-| time axis | from 2013-01-01 00:00 UTC, so the store can be filled back without a rebuild; steps never streamed read as missing frames |
+| chunks | one whole 880 x 880 frame per chunk (training reads whole frames); one UTC day (96 steps) per shard; blosc-zstd 5 with byte shuffle |
+| time axis | from 2021-01-01 00:00 UTC (the start of RainPro-NL pretraining), growing forward day by day; earlier data would need a rebuild with an earlier `timeline_origin` |
 
 Two production chains made the rain rate, and **the series breaks between
 them**:

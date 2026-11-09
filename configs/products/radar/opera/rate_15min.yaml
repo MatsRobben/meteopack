@@ -25,11 +25,12 @@ grid_id: opera_2km_laea_nl
 
 store:
   kind: gridded
-  # One time step per inner chunk in 2 x 2 spatial tiles of 440 x 440: a
-  # whole frame is four chunk reads from one shard file, a training patch
-  # touches one to four. One UTC day (96 steps) per shard, so a stream day
-  # writes exactly one shard file and never shares it.
-  chunks: {time: 1, y: 440, x: 440}
+  # One whole frame per inner chunk: training reads whole frames, so spatial
+  # tiles would only add requests. 2 x 2 tiles of 440 measured the same size
+  # (31.7 / 7.9 / 3.1 against 31.7 / 8.0 / 3.1 MB on a wet, a mixed and a dry
+  # day) and the same frame read time (4-9 ms). One UTC day (96 steps) per
+  # shard, so a stream day writes exactly one shard file and never shares it.
+  chunks: {time: 1, y: 880, x: 880}
   shard: {time: 96, y: 880, x: 880}
   # Blosc-zstd 5 with byte shuffle (zarr's choice for uint16): 18-20 % smaller
   # than plain zstd 3 at the same write and read speed, measured on a wet, a
@@ -123,18 +124,16 @@ extra:
       pixel [756 + i, 389 + j] (`attrs["opera_window"]`).
     - `n_radars`, `has_nldhl`, `has_nlhrw` come from the file's /how/nodes
       (-1 = no frame); provenance.parquet holds the full node list per file.
-    - The time axis starts 2013-01-01; days never streamed read as missing frames.
-      `days/<YYYY>/<date>.json` says per day what was streamed and what is
-      missing upstream.
+    - The time axis starts 2021-01-01 00:00 UTC (the start of RainPro-NL
+      pretraining). `days/<YYYY>/<date>.json` says per day what was streamed
+      and what is missing upstream.
   stream: s3
   stream_format: opera_odim
-  # The store's time axis starts here and grows forward day by day. It is set
-  # well before the first streamed day so the store can later be filled back
-  # to 2013 without a rebuild: unwritten steps cost no disk and read as missing
-  # frames (is_missing_frame).
-  timeline_origin: "2013-01-01T00:00:00Z"
-  # Where `meteopack stream` starts without --window (to the start of today):
-  # 2021-01, the start of RainPro-NL pretraining (matches the GFS archive).
+  # The store's time axis starts here and grows forward day by day: 2021-01,
+  # the start of RainPro-NL pretraining (matches the GFS archive). The axis
+  # only grows forward; data before this needs a rebuild with an earlier origin.
+  timeline_origin: "2021-01-01T00:00:00Z"
+  # Where `meteopack stream` starts without --window (to the start of today).
   stream_start: "2021-01-01T00:00:00Z"
   s3:
     endpoint: https://s3.waw3-1.cloudferro.com

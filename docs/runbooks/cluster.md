@@ -101,8 +101,9 @@ a resubmitted successor gets too, so prefer them to command-line overrides.
 
 Without `--window` it streams from `extra.stream_start` (2021-01-01, the start
 of RainPro-NL pretraining) to the
-start of today; rerunning later adds only the new days. Extend it back with
-`--window 2013-01-01/2021-01-01`: the store's axis already starts in 2013.
+start of today; rerunning later adds only the new days. The axis starts at
+2021-01-01 too and only grows forward: earlier data needs a rebuild with an
+earlier `timeline_origin`.
 
 ## /dev/shm is wiped when any of your jobs on the node ends
 

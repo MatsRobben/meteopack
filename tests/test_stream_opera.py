@@ -188,8 +188,9 @@ def test_two_days_across_the_cutover(tmp_path: Path, upstream: Path):
     assert g.attrs["opera_window"]["row0"] == 5
     assert g.attrs["crs"]["grid_mapping_name"] == "lambert_azimuthal_equal_area"
     assert g["chain"].attrs["flag_meanings"] == "no_frame ODYSSEY NIMBUS"
-    # The time axis starts at the configured origin, years before the first day.
-    assert str(g.attrs["time_start"]).startswith("2013-01-01")
+    # The time axis starts at the configured origin, before the first streamed day.
+    assert str(g.attrs["time_start"]).startswith("2021-01-01")
+    assert g["rain_rate_mmh"].chunks == (1, 12, 10)    # the tiny window, one frame a chunk
 
 
 def test_a_rerun_is_cheap_and_changes_nothing(tmp_path: Path, upstream: Path):

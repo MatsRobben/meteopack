@@ -44,7 +44,7 @@ def tiny_cfg():
     spec["window"] = {"row0": ROW0, "col0": COL0, "ny": NY, "nx": NX}
     extra["opera"] = spec
     store = cfg.store.model_copy(update={
-        "chunks": {"time": 1, "y": NY // 2, "x": NX // 2},
+        "chunks": {"time": 1, "y": NY, "x": NX},
         "shard": {"time": 96, "y": NY, "x": NX},
         "compression_level": 1,
     })
