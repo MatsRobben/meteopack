@@ -254,7 +254,17 @@ class KdpClient:
 
     @property
     def files_url(self) -> str:
-        return f"{self.base_url}/datasets/{self.dataset}/versions/{self.version}/files"
+        return self.files_url_for()
+
+    def files_url_for(self, dataset: str | None = None, version: str | None = None) -> str:
+        """The files endpoint of this client's dataset, or of another one on the same key.
+
+        A product built from two datasets (HARMONIE: the NetCDF archive and the
+        P1 GRIB tars) uses one client, so one limiter and one request count
+        cover both - they share the key's quota anyway.
+        """
+        return (f"{self.base_url}/datasets/{dataset or self.dataset}/versions/"
+                f"{version or self.version}/files")
 
     def _get(self, url: str, params: Mapping[str, Any] | None = None) -> dict:
         attempt = 0
@@ -307,8 +317,13 @@ class KdpClient:
             attempt += 1
             time.sleep(delay)
 
-    def list_files(self, begin: str | None = None, end: str | None = None) -> list[RemoteFile]:
-        """Every file with ``begin <= filename <= end``, in filename order, all pages."""
+    def list_files(self, begin: str | None = None, end: str | None = None, *,
+                   dataset: str | None = None, version: str | None = None) -> list[RemoteFile]:
+        """Every file with ``begin <= filename <= end``, in filename order, all pages.
+
+        `dataset`/`version` list another dataset with the same key (default: the client's).
+        """
+        url = self.files_url_for(dataset, version)
         params: dict[str, Any] = {"maxKeys": MAX_KEYS, "orderBy": "filename", "sorting": "asc"}
         if begin:
             params["begin"] = begin
@@ -317,10 +332,10 @@ class KdpClient:
         out: list[RemoteFile] = []
         while True:
             try:
-                page = self._get(self.files_url, params)
+                page = self._get(url, params)
             except FetchError as exc:
-                raise ListingError(f"KDP listing of {self.dataset} {begin}..{end} failed: "
-                                   f"{exc}") from exc
+                raise ListingError(f"KDP listing of {dataset or self.dataset} {begin}..{end} "
+                                   f"failed: {exc}") from exc
             for item in page.get("files") or []:
                 out.append(RemoteFile(filename=str(item["filename"]), size=int(item["size"]),
                                       last_modified=item.get("lastModified")))
@@ -329,8 +344,10 @@ class KdpClient:
                 return out
             params = {**params, "nextPageToken": token}
 
-    def download_url(self, filename: str) -> str:
-        page = self._get(f"{self.files_url}/{filename}/url")
+    def download_url(self, filename: str, *, dataset: str | None = None,
+                     version: str | None = None) -> str:
+        """A temporary (one hour) S3 URL for one file: one API request."""
+        page = self._get(f"{self.files_url_for(dataset, version)}/{filename}/url")
         try:
             return str(page["temporaryDownloadUrl"])
         except KeyError:
