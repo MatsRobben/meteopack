@@ -28,6 +28,12 @@ Status records live beside the store, ``days/<YYYY>/<YYYY-MM-DD>.json``, and
 the manifest carries the per-day counts and the schema fingerprints seen
 across the archive (drift report).
 
+A time step's "file" may be a bundle: a format that defines ``download``
+fetches it itself (an NWP run is nine NetCDF files, or twelve members of a
+remote tar, into one directory), a format that defines ``variables`` packs
+several fields per time step, and a check that carries ``file_errors`` /
+``quarantine`` fails single files of a bundle without failing the rest.
+
 Exit codes of :func:`run`: 0 the window is finished (every day done, partial
 or empty), 75 stopped early (time budget or SIGTERM) with days left - run it
 again, 3 stopped on schema drift, 2 a credential problem, 1 anything else.
@@ -301,7 +307,10 @@ class Stream:
         self.pack_workers = pack_workers or max(1, min(8, os.cpu_count() or 1))
         self.redo = redo
         self.target = self.fmt.target
-        self.var = cfg.variables[0].name
+        #: Field name -> target encoding. One field unless the format packs several.
+        self.variables: dict[str, Encoding] = dict(
+            getattr(self.fmt, "variables", None) or {cfg.variables[0].name: self.target})
+        self.var = next(iter(self.variables))
         self.cadence = cfg.cadence
         self.per_day = int(timedelta(days=1) / self.cadence)
         self.pinned = cfg.schema_fingerprint
@@ -339,10 +348,15 @@ class Stream:
         stats0 = dict(getattr(self.client, "stats", {}) or {})
         t_dl = time.perf_counter()
 
+        fetch = getattr(self.fmt, "download", None)
+
         def one(item):
             when, remote = item
             s = time.perf_counter()
-            raw = self.client.download(remote, target / remote.filename)
+            if fetch is not None:  # a bundle: the format knows how to fetch it
+                raw = fetch(self.client, remote, target)
+            else:
+                raw = self.client.download(remote, target / remote.filename)
             return when, raw, time.perf_counter() - s
 
         with cf.ThreadPoolExecutor(self.download_workers, thread_name_prefix="dl") as pool:
@@ -386,10 +400,14 @@ class Stream:
             gridded.initialise(self.cfg, self.root, Timeline(origin, end, self.cadence))
             gridded.refresh_attrs(self.cfg, self.root, layout_names=self.fmt.layout_names)
             extra_attrs = self.fmt.store_attrs()
-            if extra_attrs:
+            array_attrs = getattr(self.fmt, "array_attrs", dict)()
+            if extra_attrs or array_attrs:
                 import zarr
 
-                zarr.open_group(path, mode="r+").attrs.update(extra_attrs)
+                group = zarr.open_group(path, mode="r+")
+                group.attrs.update(extra_attrs)
+                for name, attrs in array_attrs.items():
+                    group[name].attrs.update(attrs)
         else:
             gridded.extend(self.cfg, self.root, Timeline(origin, end, self.cadence))
 
@@ -403,7 +421,8 @@ class Stream:
         index = {w: i for i, w in enumerate(write_slots)}
         n = len(write_slots)
 
-        codes = np.full((n, *self.fmt.frame_shape), self.target.missing, dtype=self.target.dtype)
+        codes = {name: np.full((n, *self.fmt.frame_shape), enc.missing, dtype=enc.dtype)
+                 for name, enc in self.variables.items()}
         missing = np.ones(n, dtype=bool)
         corrupt = np.zeros(n, dtype=bool)
         layout = np.full(n, r3d.LAYOUT_MISSING, dtype="int16")
@@ -434,7 +453,12 @@ class Stream:
                     logger.error("stream: %s NOT packed: %s", remote.filename,
                                  "; ".join(packed.check.errors))
                 else:
-                    codes[i] = packed.codes
+                    # A dict for a multi-field format; a field it lacks stays missing.
+                    fields = packed.codes if isinstance(packed.codes, dict) \
+                        else {self.var: packed.codes}
+                    for name, frame in fields.items():
+                        if frame is not None:
+                            codes[name][i] = frame
                     missing[i] = False
                     layout[i] = self.fmt.layout(packed)
                     for name, value in self.fmt.frame_values(packed).items():
@@ -460,9 +484,11 @@ class Stream:
             self._ensure_store(day)
             times = np.array([np.datetime64(w.replace(tzinfo=None), "ns")
                               for w in write_slots])[keep]
+            dims = gridded.dims_for(self.cfg)
             ds = xr.Dataset(
                 # A view, not a copy, when the whole day is written: 4.9 GB.
-                {self.var: (gridded.dims_for(self.cfg), codes if keep.all() else codes[keep]),
+                {**{name: (dims, block if keep.all() else block[keep])
+                    for name, block in codes.items()},
                  "is_missing_frame": (("time",), missing[keep]),
                  "is_corrupt_frame": (("time",), corrupt[keep]),
                  "source_layout_id": (("time",), layout[keep]),
@@ -503,21 +529,30 @@ class Stream:
             raise RuntimeError(f"{day:%Y-%m-%d}: provenance flags did not read back as written")
         packed = np.flatnonzero(keep & ~missing & ~corrupt)
         for i in {int(packed[0]), int(packed[-1])} if packed.size else ():
-            back = np.asarray(group[self.var][int(rows[i])])
-            if not np.array_equal(back, codes[i]):
-                raise RuntimeError(f"{day:%Y-%m-%d}: frame {write_slots[i]} did not read back")
+            for name, block in codes.items():
+                back = np.asarray(group[name][int(rows[i])])
+                if not np.array_equal(back, block[i]):
+                    raise RuntimeError(f"{day:%Y-%m-%d}: {name} at {write_slots[i]} did not "
+                                       f"read back")
 
     def _shard_bytes(self, day: datetime) -> int:
         row = (day - self.settings.origin) // self.cadence
         shard = row // self.per_day
-        base = gridded.zarr_path(self.root, self.cfg.store_id) / self.var / "c" / str(shard)
-        return sum(p.stat().st_size for p in base.rglob("*") if p.is_file()) if base.exists() else 0
+        total = 0
+        for name in self.variables:
+            base = gridded.zarr_path(self.root, self.cfg.store_id) / name / "c" / str(shard)
+            if base.exists():
+                total += sum(p.stat().st_size for p in base.rglob("*") if p.is_file())
+        return total
 
     def _status(self, fetched: Fetched, slots, checks, pack_s, write_s, wall_s, pack_wall_s):
         previous = None if self.redo else read_status(self.cfg, self.root, fetched.day)
         packed = {datetime.fromisoformat(t) for t in (previous or {}).get("packed_times", [])}
         packed |= {w for w, c in checks.items() if c.ok}
         schema_failed = {c.name: c.errors for c in checks.values() if not c.ok}
+        # Single files of a bundle that failed while the rest was packed.
+        for c in checks.values():
+            schema_failed.update(getattr(c, "file_errors", None) or {})
         missing_upstream = [w for w in slots if w not in fetched.listed]
         not_packed = [w for w in slots if w in fetched.listed and w not in packed]
         fingerprints: dict[str, int] = {}
@@ -580,6 +615,7 @@ class Stream:
                 "day_wall_s": round(wall_s, 2),
             },
             "shard_bytes": self._shard_bytes(fetched.day),
+            **(getattr(self.fmt, "status_extra", lambda c: {})(checks)),
             "code_version": manifest.code_version(),
             "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
@@ -589,7 +625,25 @@ class Stream:
         quarantine = layer_path(self.root, "raw", self.cfg.source, self.cfg.product) / "quarantine"
         for when, path in fetched.paths.items():
             check = checks.get(when)
-            if check is not None and not check.ok:
+            if path.is_dir():
+                # A bundle: a failed time step goes aside whole; otherwise the
+                # files that failed go to quarantine/<bundle>/ and the rest is deleted.
+                if check is not None and not check.ok:
+                    quarantine.mkdir(parents=True, exist_ok=True)
+                    with contextlib.suppress(OSError):
+                        shutil.move(str(path), quarantine / path.name)
+                    continue
+                bad = set(getattr(check, "quarantine", None) or ())
+                for item in sorted(path.iterdir()):
+                    if item.name in bad:
+                        (quarantine / path.name).mkdir(parents=True, exist_ok=True)
+                        with contextlib.suppress(OSError):
+                            shutil.move(str(item), quarantine / path.name / item.name)
+                    elif item.is_file():
+                        item.unlink(missing_ok=True)
+                with contextlib.suppress(OSError):
+                    path.rmdir()
+            elif check is not None and not check.ok:
                 quarantine.mkdir(parents=True, exist_ok=True)
                 with contextlib.suppress(OSError):
                     shutil.move(str(path), quarantine / path.name)
