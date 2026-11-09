@@ -261,49 +261,62 @@ lead_time, y, x)`**, where `time` is the model run (forecast reference time,
 (hours, `standard_name: forecast_period`) is the `levels` axis of the product
 config, named (`levels.name: lead_time`) instead of the default `z`. The field
 at `[t, k]` is valid at `time[t] + lead_time[k]`. Everything else - integer
-codes, the two reserved codes, per-run flags, `provenance.parquet`, per-day
-status - is as for the radar stores, with "frame" meaning one run.
+codes, the reserved codes, per-run flags, `provenance.parquet`, per-day
+status - is as for the radar stores, with "frame" meaning one run. Forecast
+stores keep the model's own grid: nothing is reprojected at pack time.
 
 ### HARMONIE-AROME Cy43 NL
 
-`packed/nwp/knmi_harmonie/cy43_nl_4km/v1/` holds KNMI's HARMONIE-AROME Cy43
-(UWC-West) forecasts for the NL domain, every hourly run from 2024-06-25 06Z,
-leads +1..+12 h, ten near-surface fields area-averaged onto the 4 km model
-grid. It is streamed from the KNMI Data Platform day by day (24 runs) by
-`meteopack stream knmi_harmonie --product cy43_nl_4km`; the raw files never
-accumulate.
+KNMI's HARMONIE-AROME Cy43 (UWC-West) forecasts for the NL domain, every
+hourly run from 2024-06-25 06Z, leads +0..+12 h, ten near-surface fields, on
+**HARMONIE's own regular lat/lon grid - not reprojected** (the model regrids
+at load time). Two products, identical but for an optional block-mean
+coarsening; stream one of them:
 
-| field | units | stored as | step | from the NetCDF | from P1 (GRIB1 keys) |
-|---|---|---|---|---|---|
-| `mslp` | Pa | uint16, offset 80000 | 10 Pa | hPa x 100 | 1/103/0 |
-| `t2m` | K | uint16, offset 200 | 0.05 K | degC + 273.15 | 11/105/2 |
-| `rh2m` | 1 (fraction) | uint16 | 0.001 | as is (units `-`) | 52/105/2 |
-| `u10`, `v10` | m s-1, earth-relative | int16 | 0.05 m s-1 | kt x 1852/3600 | 33, 34/105/10 |
-| `gust10` | m s-1, max over the past hour | uint16 | 0.1 m s-1 | kt x 1852/3600 | hypot of 162, 163/105/10, TRI 2 |
-| `mld` | m (mixed-layer depth) | uint16 | 2 m | as is | 67/105/0 |
-| `cloud_base` | m (altitude) | uint16 | 5 m | ft x 0.3048 | 186/200/0 |
-| `visibility` | m (model caps at 50 km) | uint16 | 10 m | as is | 20/105/0 |
-| `tp_1h` | mm over the hour ending at the valid time | uint16 | 0.01 mm | as is | APCP(L) - APCP(L-1), 61/105/0 TRI 4 |
+| product | grid | cells | `coarsen_factor` |
+|---|---|---|---|
+| `packed/nwp/knmi_harmonie/cy43_nl_2km/v1/` | `harmonie_nl_2km`, native, 0.029 x 0.018 deg (~2 km) | 390 x 390 | 1 |
+| `packed/nwp/knmi_harmonie/cy43_nl_4km/v1/` | `harmonie_nl_4km`, 2 x 2 blocks, 0.058 x 0.036 deg (~4 km) | 195 x 195 | 2 |
 
-Codes: 65535 (int16: 32767) = **outside the HARMONIE domain** (`out_of_image`),
-65534 (32766) = **no run** (`missing`, the fill). For `cloud_base`, 65533 =
-**no cloud base** (cloud-free: less than half of the cell has one; the
-array's `cloud_free_code`) - it decodes to 327665 m, so mask it. Both
-reserved codes decode to NaN.
+Streamed from the KNMI Data Platform day by day (24 runs) by `meteopack
+stream knmi_harmonie --product cy43_nl_2km` (or `cy43_nl_4km`); the raw files
+never accumulate.
+
+| field | units | stored as | step | from the NetCDF | from P1 (GRIB1 keys) | 2 x 2 block |
+|---|---|---|---|---|---|---|
+| `mslp` | Pa | uint16, offset 80000 | 10 Pa | hPa x 100 | 1/103/0 | mean |
+| `t2m` | K | uint16, offset 200 | 0.05 K | degC + 273.15 | 11/105/2 | mean |
+| `rh2m` | 1 (fraction) | uint16 | 0.001 | as is (units `-`) | 52/105/2 | mean |
+| `u10`, `v10` | m s-1, earth-relative | int16 | 0.05 m s-1 | kt x 1852/3600 | 33, 34/105/10 | mean |
+| `gust10` | m s-1, max over the past hour | uint16 | 0.1 m s-1 | kt x 1852/3600 | hypot of 162, 163/105/10, TRI 2 | **max** |
+| `mld` | m (mixed-layer depth) | uint16 | 2 m | as is | 67/105/0 | mean |
+| `cloud_base` | m (altitude) | uint16 | 5 m | ft x 0.3048 | 186/200/0 | mean of the cloudy cells |
+| `visibility` | m (model caps at 50 km) | uint16 | 10 m | as is | 20/105/0 | mean |
+| `tp_1h` | mm over the hour ending at the valid time | uint16 | 0.01 mm | as is | APCP(L) - APCP(L-1), 61/105/0 TRI 4 | mean |
+
+> **`cloud_base` code 65533 = NO CLOUD BASE (a cloud-free column). Mask it.**
+> It decodes to 327665 m - neither a height nor NaN. The array's attributes
+> `cloud_free_code` / `cloud_free_value` / `comment` and the store's README say
+> so too. Coarsened, a block is cloud-free when less than half of its cells
+> have a cloud base, otherwise it holds the mean over its cloudy cells.
+
+Other codes: 65534 (int16: 32766) = **missing** (the fill: no run, or a lead
+the run does not have). The out-of-image code (65535 / 32767) is never used:
+every cell is inside the HARMONIE domain.
 
 | | |
 |---|---|
-| grid | `knmi_4km_stereo_1024`: 256 x 256 cells of 4 km on the RTCOR polar-stereographic projection, x -162..862 km, y -4544..-3520 km (centre 350, -4032 = 52.2N 5.3E), north-up. Edges are whole km, so a 4 km cell is exactly 4 x 4 `rtcor_5min` pixels where they overlap (checked against the RTCOR store's `x`/`y`); every edge of the 2 km model stage is a 4 km edge |
-| domain | the NL grid (lat 49.0-56.0, lon 0.0-11.3, 390 x 390 at 0.018 x 0.029 deg) covers 62 % of the frame; the rest is `out_of_image` |
-| regridding | area mean (first-order conservative): each 4 km cell is split into 10 x 10 sub-cells, each sub-cell takes the 2 km cell it falls in, and the field is averaged with those weights (`meteopack.core.regrid`). A cell is packed if at least half of it lies in the domain; for cloud base the mean is over the cloudy part, and a cell is "no cloud base" when less than half of it has one |
-| leads | 1..12 h. The NetCDF archive has no +0 h, so neither has the store. For an issue time t0 the newest run started at or before t0 is `floor(t0, 1 h)`, and its first valid hour after t0 is lead 1 |
-| chunks | one run of one field (12 leads x 256 x 256) per chunk, one UTC day (24 runs) per shard, blosc-zstd 9 with byte shuffle; ~3.5 MB a run (~72 GB for 2024-06-25 .. 2026-11-09) |
+| axes | `(time, lead_time, y, x)`. `time` = the run (`forecast_reference_time`), hourly; `lead_time` 0..12 h (`forecast_period`); valid time = `time + lead_time` |
+| lead 0 | only in runs packed from P1 (`source_dataset == 2`, from 2026-01-08); the NetCDF archive has no +0. Gust and 1 h precipitation are over the past hour and are missing at lead 0 in every run. For an issue time t0 the newest run started at or before t0 is `floor(t0, 1 h)`, and its first valid hour after t0 is lead 1 |
+| grid | HARMONIE's regular lat/lon (spherical earth, radius 6367470 m; `crs` `latitude_longitude`); `x` = longitude, `y` = latitude of the cell centres in degrees, **north-up** (row 0 northernmost, the source's south-up rows flipped); `lat`, `lon` per cell. Native centres lon 0.000..11.281, lat 49.000..56.002 |
+| coarsening | a factor f averages f x f blocks of native cells - no interpolation; the gust takes the block maximum; a block needs half its cells with a value. If f does not divide 390, the last `390 % f` rows (north) and columns (east) are dropped so every cell is a full block (none for f = 1 or 2). The grid entry must match source grid and factor (checked at start-up) |
+| chunks | one run of one field (13 leads x the whole grid) per chunk, one UTC day (24 runs) per shard, blosc-zstd 9 with byte shuffle |
 | per run | `source_dataset` (0 no run, 1 NetCDF, 2 P1), `fields_present` (bit i = field i in table order; 1023 = all), `is_partial_run` (-1 no run, 0 complete, 1 some field missing); `source_layout_id` 2 NetCDF, 3 P1 |
 
 **Two packagings, one model.** Runs before 2026-01-08 00Z come from
 `uwcw_extra_lv_ha43_nl_2km` v1.0 (NetCDF, one file per parameter, nine files
 a run); runs from then on from `harmonie_arome_cy43_p1` v1.0 (one GRIB1 tar
-per run, 61 members, one per lead; only the 12 needed members are fetched,
+per run, 61 members, one per lead; only the 13 needed members are fetched,
 by HTTP Range reads of the tar after walking its headers - one API request a
 run instead of nine; the Range reads go to S3 and cost no quota). A run
 missing from P1 falls back to the NetCDF. On run 2026-01-08 00Z the two agree
@@ -320,13 +333,12 @@ Every file is checked before it is packed. NetCDF: run time
 lat/lon axes against the configured grid, the grid mapping, and per field the
 variable, dtype, shape, dimension names, `units` and height level. P1: every
 needed message present once, its keys, run date, step range (TRI 0: +L; TRI
-2: L-1..L; TRI 4: 0..L), hours, table 253 / centre 99 and grid. Then the
-converted values must lie in each variable's `valid_min`..`valid_max` (a
-unit change upstream fails here). A NetCDF file that fails is kept in
-`raw/nwp/knmi_harmonie/cy43_nl_4km/quarantine/<run>/` and its fields are left
+2: L-1..L, 0..0 at +0; TRI 4: 0..L), hours, table 253 / centre 99 and grid.
+Then the converted values must lie in each variable's `valid_min`..`valid_max`
+(a unit change upstream fails here). A NetCDF file that fails is kept in
+`raw/nwp/knmi_harmonie/<product>/quarantine/<run>/` and its fields are left
 missing (the run is partial); a P1 run with a failing member is not packed
-(flagged corrupt, the run kept in quarantine). Structural fingerprints of
-both packagings are pinned in the product config.
+(flagged corrupt, the run kept in quarantine).
 
 Per-day status (`days/<YYYY>/<date>.json`) adds `partial_runs` (run -> fields
 missing) and `runs_by_source`. `provenance.parquet` has one row per run: its
@@ -338,37 +350,20 @@ import xarray as xr
 ds = xr.open_zarr(".../packed/nwp/knmi_harmonie/cy43_nl_4km/v1/dataset.zarr", consolidated=False)
 run = ds.sel(time="2025-07-01T12:00")            # one run, all leads
 tp = run.tp_1h.sel(lead_time=slice(1, 8))        # mm in the hours ending 13Z..20Z
+cb = ds.cloud_base.where(ds.cloud_base < 3e5)    # NaN = cloud-free, or missing
 valid = ds.time + (ds.lead_time * 3600e9).astype("timedelta64[ns]")   # (time, lead_time)
-cb = ds.cloud_base.where(ds.cloud_base < 3e5)    # NaN = cloud-free, outside, or no run
 ```
 
-Trial-run on 2026-11-09 (2024-06-25..26, 2024-08-10, 2025-03-10..12 with a
-SIGKILL mid-day and a resume, 2025-10-04, 2026-01-07..08 across the source
-switch, 2026-11-07..08; 234 runs) and checked:
-
-- **Source switch.** Run 2026-01-08 00Z packed from both packagings: the codes
-  differ by at most one step in < 0.12 % of cells (precipitation; < 0.01 % for
-  the rest), from the GRIB packing; the store holds the P1 codes.
-- **Packed vs source.** 400 random fully-covered cells x 12 leads of that run
-  against an independent brute-force mean of the NetCDF fields (own reader,
-  own unit conversion): with the same 10 x 10 sub-cells, every value within
-  half a store step; against 20 x 20 sub-cells (closer to the exact area
-  mean) mean differences of the order of the step (T 0.013 K, winds 0.014
-  m/s, MSLP 2.5 Pa), larger only in cells with sharp gradients (p99:
-  visibility 655 m, cloud base 129 m, MLD 17 m).
-- **Units.** Over all 234 runs: MSLP 96,510-102,990 Pa, T2m 261-307 K, RH
-  0.22-1.0, winds -22..26 m/s, gust <= 40.5 m/s, MLD 10-5,000 m, cloud base
-  5-12,485 m, visibility 50-50,000 m, 1 h precipitation 0-70 mm.
-- **Georeferencing.** The 4 km cell edges coincide with `rtcor_5min` pixel
-  edges to 0.000 km; land-sea contrasts in T2m, RH, gust and MLD follow the
-  coastlines. On the wet day 2025-10-04, lead +1 h precipitation against RTCOR
-  hourly sums (4 x 4 block means): domain means 0.73 vs 0.58 mm, wet (>= 0.1
-  mm) fractions 0.49 vs 0.40, median spatial correlation 0.47 (0.48-0.69 in
-  the frontal band, 01-10Z). In the 2026-01-07/08 snow, RTCOR sees far less
-  than HARMONIE, as expected for radar in snow.
-- **Gaps.** 2024-08-10 (inside the 2024-08-05..20 outage) is `empty`, 24 runs
-  missing; 2024-06-25 00-04Z are missing upstream and 05Z has only the T file
-  (a partial run); 2026-01-07 09Z is missing.
+**Status (2026-11-09): paused, not streamed.** The user paused HARMONIE (KDP
+access is too cumbersome for ML training: 72 h retention on most datasets, 9
+requests a run, a deprecated NetCDF source). The native-grid design above is
+implemented and unit-tested; its trial was cut short after one day
+(`cy43_nl_2km`, 2026-01-08 from P1: 11.85 MB a run, ~240 GB for the full
+period at that rate; `cy43_nl_4km` not measured). An earlier trial of the
+superseded 4 km stereographic reprojection (11 days, 234 runs) validated the
+reading, unit conversion, P1/NetCDF agreement, schema checks, gap flagging,
+kill-and-resume and georeferencing that this design reuses; its numbers are in
+`claude_scratch/2026-11-09_harmonie/validation/` and the branch history.
 
 ## Points stores (station networks)
 

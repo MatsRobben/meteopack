@@ -103,9 +103,10 @@ Without `--window` it streams from `extra.stream_start` (2023-11-01) to the
 start of today; rerunning later adds only the new days. Extend it back with
 `--window 2013-01-01/2023-11-01`: the store's axis already starts in 2013.
 
-### HARMONIE Cy43 NL forecasts (`knmi_harmonie/cy43_nl_4km`)
+### HARMONIE Cy43 NL forecasts (`knmi_harmonie/cy43_nl_2km` or `cy43_nl_4km`)
 
-Same script, same pattern (measured 2026-11-09 on 6 CPUs, regular KDP key):
+Same script, same pattern (measured 2026-11-09 on 6 CPUs, regular KDP key).
+Stream ONE of the two products (native ~2 km, or 2 x 2 block means ~4 km):
 
 ```bash
 mkdir -p /path/to/logs
@@ -121,7 +122,7 @@ key)** sets the pace, not the network or the CPU:
 | era | runs | API requests | quota-bound wall time |
 |---|---|---|---|
 | NetCDF (to 2026-01-07) | ~13,100 | 9 a run + 9 a month of listings, ~118,000 | ~118 h |
-| P1 (from 2026-01-08) | ~7,330 | 1 a run + 1-10 a month, ~7,700 | ~8 h (the downloads, ~190 MB a run by Range reads at ~110 MB/s, and the packing take ~50 s a day) |
+| P1 (from 2026-01-08) | ~7,330 | 1 a run + 1-10 a month, ~7,700 | ~8 h (the downloads, ~200 MB a run by Range reads at ~110 MB/s, and the packing take under a minute a day) |
 
 So about 5.2 days: three chained 2-day jobs. The limiter reads the quota
 from the API's headers and waits for the hourly reset by itself ("quota down
