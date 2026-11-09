@@ -2,8 +2,8 @@
 # Dissemination on AWS (s3://noaa-gfs-bdp-pds, anonymous).
 #
 # Nothing here is fetched with `meteopack fetch`: the products are STREAMED day by
-# day (`meteopack stream noaa_gfs --product state_1h_16km`, which also fills
-# prate_16km; see the product configs), reading only the wanted GRIB messages with
+# day (`meteopack stream noaa_gfs --product state_1h_0p25`, which also fills
+# prate_0p25; see the product configs), reading only the wanted GRIB messages with
 # byte-range requests, so there is no raw archive and no Source class. This file
 # exists because every source has one: it names the host and the polite rate.
 #

@@ -1,4 +1,5 @@
-"""NOAA GFS: index parsing, message checks, regridding, de-averaging, and the stream end to end."""
+"""NOAA GFS: index parsing, message checks, cropping, load-time regridding, de-averaging, and
+the stream end to end."""
 from __future__ import annotations
 
 import json
@@ -28,6 +29,9 @@ IDX = """\
 
 #: A 2 degree global grid keeps synthetic messages small (91 x 180).
 SRC = gfs.SourceGrid(ni=180, nj=91, lat_first=90.0, lon_first=0.0, dlat=2.0, dlon=2.0)
+#: The stream tests: a regional 0.25 degree grid (70N-42.75N, 20W-29.75E) that holds the
+#: store's window, so the crop is the real one while messages stay small.
+REGION = gfs.SourceGrid(ni=200, nj=110, lat_first=70.0, lon_first=340.0, dlat=0.25, dlon=0.25)
 
 
 # ----------------------------------------------------------------- the index
@@ -132,7 +136,7 @@ def test_bilinear_drops_masked_neighbours_and_nearest_keeps_codes():
 
 
 def test_the_model_frame_is_north_up_and_centred_on_the_netherlands():
-    g = grids.get("knmi_stereo_16km_1536")
+    g = grids.get("knmi_stereo_16km_1536")      # the model frame readers regrid to
     assert g.shape == (96, 96)
     lon, lat = g.lonlat()
     assert lat[0, 48] > lat[-1, 48]                      # row 0 is the northern edge
@@ -165,7 +169,7 @@ def grib_message(values: np.ndarray, *, run: datetime, lead: int, sig, avg_from=
                            ("latitudeOfLastGridPointInDegrees",
                             grid.lat_first - grid.dlat * (grid.nj - 1)),
                            ("longitudeOfLastGridPointInDegrees",
-                            grid.lon_first + grid.dlon * (grid.ni - 1)),
+                            (grid.lon_first + grid.dlon * (grid.ni - 1)) % 360.0),
                            ("iDirectionIncrementInDegrees", grid.dlon),
                            ("jDirectionIncrementInDegrees", grid.dlat),
                            ("jScansPositively", 0), ("iScansNegatively", 0)):
@@ -265,11 +269,11 @@ FIELDS = ["tmp_850hpa", "prate_sfc", "crain_sfc", "snod_sfc", "clmr_500hpa"]
 
 
 def tiny_cfgs():
-    state = load_product_config("noaa_gfs", "state_1h_16km")
-    prate = load_product_config("noaa_gfs", "prate_16km")
+    state = load_product_config("noaa_gfs", "state_1h_0p25")
+    prate = load_product_config("noaa_gfs", "prate_0p25")
     extra = json.loads(json.dumps(state.extra))
-    extra["gfs"]["source_grid"] = {"ni": SRC.ni, "nj": SRC.nj, "lat_first": 90.0,
-                                   "lon_first": 0.0, "dlat": 2.0, "dlon": 2.0}
+    extra["gfs"]["source_grid"] = {"ni": REGION.ni, "nj": REGION.nj, "lat_first": 70.0,
+                                   "lon_first": 340.0, "dlat": 0.25, "dlon": 0.25}
     extra["gfs"]["fields"] = {k: v for k, v in extra["gfs"]["fields"].items() if k in FIELDS}
     store = state.store.model_copy(update={"compression_level": 1})
     state = state.model_copy(update={
@@ -284,12 +288,12 @@ def field_values(name: str, run: datetime, lead: int) -> np.ndarray:
     rng = np.random.default_rng(zlib.crc32(f"{name} {run:%Y%m%d%H} {lead}".encode()))
     base = {"tmp_850hpa": 280.0, "snod_sfc": 0.2, "clmr_500hpa": 1e-4}.get(name, 0.0)
     if name == "crain_sfc":
-        return (rng.random((SRC.nj, SRC.ni)) < 0.3).astype("float64")
+        return (rng.random((REGION.nj, REGION.ni)) < 0.3).astype("float64")
     if name == "prate_sfc":
-        return rng.gamma(0.5, 2e-4, (SRC.nj, SRC.ni))
-    v = base * (1 + 0.1 * rng.standard_normal((SRC.nj, SRC.ni)))
+        return rng.gamma(0.5, 2e-4, (REGION.nj, REGION.ni))
+    v = base * (1 + 0.1 * rng.standard_normal((REGION.nj, REGION.ni)))
     if name == "snod_sfc":
-        v[: SRC.nj // 2] = np.nan            # a bitmap
+        v[: REGION.nj // 2] = np.nan            # a bitmap
     return v
 
 
@@ -331,13 +335,14 @@ class FakeBucket:
             values = hourly_prate(run, lead) / 3600 if name == "prate_sfc" and lead \
                 else field_values(name, run, lead)
             add(s.var, s.level, step, grib_message(values, run=run, lead=lead, sig=sig,
-                                                   bitmap=name == "snod_sfc"))
+                                                   bitmap=name == "snod_sfc", grid=REGION))
         if lead:
             start = (lead - 1) // 6 * 6
             mean = np.mean([hourly_prate(run, k) for k in range(start + 1, lead + 1)],
                            axis=0) / 3600
             add("PRATE", "surface", f"{start}-{lead} hour ave fcst",
-                grib_message(mean, run=run, lead=lead, sig=PRATE, avg_from=start))
+                grib_message(mean, run=run, lead=lead, sig=PRATE, avg_from=start,
+                             grid=REGION))
         key = gfs.file_key(run, lead)
         self.objects[key] = b"".join(parts)
         self.objects[key + ".idx"] = ("\n".join(lines) + "\n").encode()
@@ -396,22 +401,30 @@ def test_a_day_end_to_end(tmp_path: Path, bucket):
     assert bool(day.is_corrupt_frame[16]) and int(day.n_fields_missing[16]) == 2
     assert int(day.n_fields_missing[20]) == 0
 
-    # Packed codes are the encoded regrid of the message values.
+    # Packed codes are the encoded message values in the window, not resampled:
+    # store pixel [i, j] is source row 40 + i (60N), column 48 + j (8W).
+    def rg(values):
+        return np.asarray(values)[40:103, 48:159]
+
     g = grids.get(state.grid_id)
     lon, lat = g.lonlat()
-    rg = gfs.Regridder(lon, lat, SRC)
+    assert g.shape == (63, 111) and lat[0, 0] == 60.0 and lon[0, 0] == -8.0
+    np.testing.assert_array_equal(gfs.Crop(lon, lat, REGION)(np.arange(REGION.ni * REGION.nj)
+                                                             .reshape(REGION.nj, REGION.ni)),
+                                  rg(np.arange(REGION.ni * REGION.nj)
+                                     .reshape(REGION.nj, REGION.ni)))
     specs = {s.name: s for s in gfs.field_specs(state)}
     for name, hour in (("tmp_850hpa", 13), ("snod_sfc", 3), ("crain_sfc", 20)):
         run = gfs.floor_run(DAY + timedelta(hours=hour))
         lead = hour % 6
         native = field_values(name, run, lead).astype("float32").astype("float64")  # IEEE32
-        want = gfs.encode_field(rg(native, specs[name].regrid),
+        want = gfs.encode_field(rg(native),
                                 specs[name].encoding).codes
         np.testing.assert_array_equal(_raw(root, state, name, hour), want)
     assert (_raw(root, state, "snod_sfc", 3) == 65535).any()          # bitmap -> undefined
     assert (_raw(root, state, "clmr_500hpa", 2) == 65534).all()       # absent upstream
     assert (_raw(root, state, "tmp_850hpa", 16) == 65534).all()       # failed its check
-    quarantine = list((root / "raw" / "nwp" / "noaa_gfs" / "state_1h_16km" / "quarantine")
+    quarantine = list((root / "raw" / "nwp" / "noaa_gfs" / "state_1h_0p25" / "quarantine")
                       .glob("*.json"))
     assert len(quarantine) == 1
 
@@ -478,13 +491,13 @@ def test_a_transfer_failure_leaves_the_day_partial_and_a_rerun_completes_it(tmp_
 
 
 def test_the_real_configs_hold_the_122_fields():
-    state = load_product_config("noaa_gfs", "state_1h_16km")
+    state = load_product_config("noaa_gfs", "state_1h_0p25")
     specs = gfs.field_specs(state)
     assert len(specs) == 122 and len({s.key for s in specs}) == 122
     assert {s.name for s in specs if s.regrid == "nearest"} == {
         "crain_sfc", "csnow_sfc", "cfrzr_sfc", "cicep_sfc", "cpofp_sfc"}
-    prate = load_product_config("noaa_gfs", "prate_16km")
+    prate = load_product_config("noaa_gfs", "prate_0p25")
     assert [v.name for v in prate.variables] == [f"prate_f{k:02d}" for k in range(1, 16)]
     assert state.category == "nwp"
     assert str(gridded.store_path(Path("/r"), state.store_id)) == \
-        "/r/packed/nwp/noaa_gfs/state_1h_16km/v1"
+        "/r/packed/nwp/noaa_gfs/state_1h_0p25/v1"

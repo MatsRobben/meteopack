@@ -255,18 +255,19 @@ advection: compared against a window 5 min later, both chains prefer
 
 ### The GFS NWP stores
 
-Two stores hold NOAA GFS 0.25 degree forecasts on the 16 km RainPro-NL model
-frame (`knmi_stereo_16km_1536`: 96 x 96 cells of 16 km on the KNMI radar
-polar-stereographic projection, centred x = 350 km, y = -4032 km, edges
-x -418..1118 km, y -4800..-3264 km, north-up). Both are filled by one stream,
-`meteopack stream noaa_gfs --product state_1h_16km`, from NOAA's public AWS
+Two stores hold NOAA GFS 0.25 degree forecasts on GFS's **own grid, not
+resampled**, cropped to a window around the 1536 km RainPro-NL model frame
+(`knmi_stereo_16km_1536`: KNMI polar-stereographic, centred x = 350 km,
+y = -4032 km, edges x -418..1118 km, y -4800..-3264 km). Regridding to the
+model grid happens at load time. Both are filled by one stream,
+`meteopack stream noaa_gfs --product state_1h_0p25`, from NOAA's public AWS
 archive (`s3://noaa-gfs-bdp-pds`, anonymous). Nothing raw is kept: the stream
 reads each file's `.idx`, fetches only the wanted GRIB messages with HTTP
 byte-range requests (adjacent messages in one request), checks, decodes,
-regrids and encodes them in memory. A message that fails its check is written
-to `raw/nwp/noaa_gfs/state_1h_16km/quarantine/` with the reason, never packed.
+crops and encodes them in memory. A message that fails its check is written
+to `raw/nwp/noaa_gfs/state_1h_0p25/quarantine/` with the reason, never packed.
 
-**`packed/nwp/noaa_gfs/state_1h_16km/v1/`** - the 122 input fields of
+**`packed/nwp/noaa_gfs/state_1h_0p25/v1/`** - the 122 input fields of
 RainPro-8 (Pablos et al., ICLR 2026, Appendix I, Table 11), hourly, by valid
 time.
 
@@ -277,9 +278,10 @@ time.
 | fields | 122 variables `(time, y, x)`, one per (GFS variable, level), e.g. `tmp_850hpa`, `cape_255_0hpa_agl`, `rh_atm`, `lftx4_sfc`; always the **instantaneous** GRIB field (`anl` / `L hour fcst`), never a time mean. The list, with units, steps and availability: the product config, or `gfs_122_variables.tsv` in the trial notes |
 | codes | uint16, `value = scale_factor * code + add_offset` per field (array attrs); 65534 = field not available for this frame (absent upstream, or failed its check); 65535 = undefined at this pixel (GRIB bitmap: SNOD/WEASD over sea). `xr.open_zarr` decodes both to NaN |
 | encoding | per field a fixed physical range mapped onto codes 0..65533, step chosen as a round number >= range / 65533 (e.g. T 0.002 K, RH 0.002 %, MSLP 0.4 Pa, CAPE 0.2 J/kg, specific humidity 2e-9 .. 8e-7 kg/kg by level). Values outside the range are clipped and counted per day (none in the trials) |
-| regrid | bilinear from the 0.25 deg grid (~28 km at 52N, coarser than 16 km) at each cell centre's lon/lat; GRIB-masked neighbours are dropped and the weights renormalised, < 50 % valid weight -> undefined. CRAIN, CSNOW, CFRZR, CICEP and CPOFP take the **nearest** neighbour, so 0/1 flags stay 0/1 and CPOFP's "no precipitation" value (-50 %) is never averaged with real percentages |
+| grid | `gfs_0p25_latlon_nl`: GFS 0.25 deg points 8.00W..19.50E x 60.00N..44.50N (63 rows north first x 111 columns); store pixel `[i, j]` = GFS row `120 + i`, column `(1408 + j) mod 1440`. The model frame spans 7.30W-18.91E, 45.07N-59.40N; the window is the 0.25 deg nodes enclosing it plus 2 more on every side, so bilinear interpolation at load time has all its neighbours. `lat`/`lon` per point (and `y`/`x` = lat/lon, degrees) |
+| load-time regridding | `meteopack.sources.nwp.gfs.Regridder(lon, lat, SourceGrid(...))` interpolates to any target lon/lat: bilinear with GRIB-masked neighbours dropped and the weights renormalised; the per-field hint `extra.gfs.fields.<name>.regrid` in the product config says **nearest** for CRAIN, CSNOW, CFRZR, CICEP and CPOFP (0/1 flags; CPOFP's "no precipitation" is -50 %) |
 | units | GRIB's own (K, Pa, m, kg/kg, %, J/kg ...), except PRATE in mm/h (x 3600) |
-| chunks | one hour per inner chunk, 7 days per shard; blosc-zstd 5, byte shuffle |
+| chunks | one hour per inner chunk (63 x 111), 7 days per shard; blosc-zstd 5, byte shuffle |
 
 Per frame, beside the provenance flags (`is_corrupt_frame` = some field of the
 frame failed its check; `source_layout_id` 2 = GFS v15 flat path, 3 = v16
@@ -293,7 +295,7 @@ lead used):
 | `is_fallback` | 1 = from the previous run, 0 = newest run, -1 no frame |
 | `n_fields_missing` | how many of the 122 fields are not available in this frame |
 
-**`packed/nwp/noaa_gfs/prate_16km/v1/`** - precipitation rate per run.
+**`packed/nwp/noaa_gfs/prate_0p25/v1/`** - precipitation rate per run.
 
 | | |
 |---|---|
@@ -301,6 +303,7 @@ lead used):
 | fields | `prate_f01` .. `prate_f15`: mean rate (mm/h) over lead hours `L-1 .. L`, i.e. valid at run + L h. One variable per lead because the gridded store has no lead axis yet; maps 1:1 onto a `(time, lead, y, x)` layout once it has |
 | codes | uint16, `mm/h = 0.002 * code`; 65534 = lead not available |
 | per frame | `n_leads_missing` (-1 no run) |
+| grid | the same native window as the state store |
 | chunks | one run per inner chunk, 30 days (120 runs) per shard |
 
 A model at issue time t0 takes run `floor6(t0)` and the leads that cover
@@ -330,8 +333,8 @@ the upgrade as far as the metadata says.
 
 ```python
 import xarray as xr
-st = xr.open_zarr(".../packed/nwp/noaa_gfs/state_1h_16km/v1/dataset.zarr", consolidated=False)
-pr = xr.open_zarr(".../packed/nwp/noaa_gfs/prate_16km/v1/dataset.zarr", consolidated=False)
+st = xr.open_zarr(".../packed/nwp/noaa_gfs/state_1h_0p25/v1/dataset.zarr", consolidated=False)
+pr = xr.open_zarr(".../packed/nwp/noaa_gfs/prate_0p25/v1/dataset.zarr", consolidated=False)
 t0 = "2024-01-02T13:25"
 frame = st.sel(time=t0, method="pad")             # the hour at or before t0 (decoded, NaN = n/a)
 run = pr.sel(time=t0, method="pad")               # the newest run at or before t0
@@ -343,23 +346,28 @@ precipitation leads are missing, what was clipped, and the transfer and
 timings. Day states: `done` (every frame packed or confirmed absent
 upstream), `partial` (a transfer failed; a rerun redoes the day), `empty`.
 
-Checked on 2026-11-09 (trial days 2021-01-10, 2021-03-22..23, 2022-08-15..18,
-2024-01-02, 2025-07-01..04, 2026-11-07):
+Checked on 2026-11-09. The pipeline first ran with regridding to the 16 km
+frame (trial days 2021-01-10, 2021-03-22..23, 2022-08-15..18, 2024-01-02,
+2025-07-01..04, 2026-11-07); the native-grid stores were then re-run and
+re-checked on 2021-03-22 (v15) and 2024-01-02 (v16):
 
-* all 122 fields at 5 valid hours across the eras (v15 3-hourly, v15 hourly,
-  v16 lead 5, 2024 lead 1, 2026 lead 0), re-fetched and regridded by an
-  independent per-point implementation: the store is within half a
-  quantisation step everywhere;
+* all 122 fields at 4 valid hours (v15 lead 0 and 2, v16 lead 1 and 5),
+  re-fetched and picked at the store's own `lat`/`lon` (which also checks the
+  georeferencing): the store is within half a quantisation step everywhere,
+  and fields absent upstream are entirely 65534 (an earlier check of the
+  regridded layout covered 7 hours across all eras the same way);
 * the de-averaged one-hour rates against hourly differences of the APCP
   accumulations (an independent route) over 40-62N, 12W-25E: correlation
   0.983-0.9998 for the v16 runs 2024-01-02 12z and 2026-11-07 06z, area means
   within 1 % on most leads (worst 7 %), mean absolute difference
   0.005-0.017 mm/h (APCP itself is packed to 0.0625 mm); the v15 run
-  2021-03-22 06z correlates 0.93-0.998. The store equals the regridded native
+  2021-03-22 06z correlates 0.93-0.998. The store equals the native
   de-averaged rate to half a step;
 * georeferencing: GFS orography's coastline and the sea mask of WEASD sit on
-  the Natural Earth coastline;
-* the wet day 2024-01-02 against RTCOR averaged onto the same 16 km cells:
+  the Natural Earth coastline, and the model frame lies inside the window
+  with its margin;
+* the wet day 2024-01-02, regridded to 16 km, against RTCOR averaged onto the
+  same cells:
   hourly domain means correlate 0.86 and peak in the same hours; GFS's daily
   total is ~2x RTCOR's (RTCOR is known to underestimate in winter) - a sanity
   check, not a verification;

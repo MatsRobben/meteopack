@@ -1,4 +1,4 @@
-"""NOAA GFS 0.25 degree forecasts from the public AWS archive: index, check, decode, regrid.
+"""NOAA GFS 0.25 degree forecasts from the public AWS archive: index, check, decode, crop.
 
 The archive (``s3://noaa-gfs-bdp-pds``, anonymous, https://noaa-gfs-bdp-pds.s3.amazonaws.com)
 holds one GRIB2 file per run and lead, with a text index (``.idx``) of where each
@@ -29,12 +29,14 @@ the configured signature, the global 0.25 degree grid and its scanning order,
 the run's date and time, the step (hours; the lead; instantaneous or average)
 and the values. A message that fails is never packed.
 
-Regridding (`Regridder`) is bilinear from the 0.25 degree latitude/longitude
-grid (~28 km at 52N) onto the target grid's cell centres, with the weights of
-GRIB-masked neighbours (a bitmap: snow fields over sea) dropped and the rest
-renormalised; a target cell whose valid neighbours carry less than half the
-weight is undefined. Categorical fields - and CPOFP, whose "no precipitation"
-value is -50 % - take the nearest neighbour instead, so a 0/1 flag stays 0/1.
+Packed stores keep the native 0.25 degree grid: `Crop` cuts a fixed
+latitude/longitude window out of each global field (the store's grid must be a
+whole-cell window of the GFS grid; checked at start-up), nothing is
+interpolated. `Regridder` is for readers that want the fields on another grid
+at load time: bilinear with the weights of GRIB-masked neighbours (a bitmap:
+snow fields over sea) dropped and the rest renormalised, or nearest neighbour
+for the categorical fields and CPOFP, whose "no precipitation" value is -50 %
+(the per-field hint is ``extra.gfs.fields.<name>.regrid``).
 """
 from __future__ import annotations
 
@@ -225,7 +227,8 @@ class SourceGrid:
 
 @dataclass(frozen=True, slots=True)
 class FieldSpec:
-    """One stored field: which message makes it, how it is regridded, scaled and encoded."""
+    """One stored field: which message makes it, how it is scaled and encoded, and how a
+    reader should interpolate it at load time (`regrid`, a hint; the store is native)."""
 
     name: str
     var: str
@@ -413,6 +416,35 @@ def check_message(message: bytes, spec: FieldSpec, *, run: datetime, lead: int,
         eccodes.codes_release(h)
 
 
+# ---------------------------------------------------------------------- crop
+
+class Crop:
+    """A fixed window of the source grid: rows and columns whose centres are the target's.
+
+    The target grid (a latitude/longitude grid from the registry) must sit
+    exactly on source points; columns wrap at the date line of a global grid.
+    """
+
+    def __init__(self, lon: np.ndarray, lat: np.ndarray, grid: SourceGrid) -> None:
+        lon = np.asarray(lon, dtype="float64")
+        lat = np.asarray(lat, dtype="float64")
+        fy = (grid.lat_first - lat) / grid.dlat
+        fx = ((lon - grid.lon_first) % 360.0) / grid.dlon
+        rows = np.rint(fy)
+        cols = np.rint(fx)
+        if np.abs(fy - rows).max() > 1e-6 or np.abs(fx - cols).max() > 1e-6:
+            raise ValueError("the store grid is not a window of the source grid's points")
+        rows = rows.astype("int64")
+        cols = cols.astype("int64") % grid.ni if grid.is_global else cols.astype("int64")
+        if rows.min() < 0 or rows.max() >= grid.nj or cols.min() < 0 or cols.max() >= grid.ni:
+            raise ValueError("the store grid reaches outside the source grid")
+        self.shape = lon.shape
+        self.index = (rows * grid.ni + cols).ravel()
+
+    def __call__(self, values: np.ndarray) -> np.ndarray:
+        return np.asarray(values, dtype="float64").ravel()[self.index].reshape(self.shape)
+
+
 # -------------------------------------------------------------------- regrid
 
 class Regridder:
@@ -530,7 +562,7 @@ def run_times(day: datetime) -> list[datetime]:
     return [day + timedelta(hours=h) for h in range(0, 24, CYCLE_HOURS)]
 
 
-__all__ = ["BUCKET", "ENDPOINT", "LAYOUT_NAMES", "Encoded", "FieldSpec", "GribSignature",
-           "IdxEntry", "MessageCheck", "Regridder", "SourceGrid", "check_message", "coalesce",
-           "encode_field", "field_specs", "file_key", "file_name", "find_entry", "floor_run",
-           "hourly_means", "layout_for", "parse_idx", "run_times"]
+__all__ = ["BUCKET", "ENDPOINT", "LAYOUT_NAMES", "Crop", "Encoded", "FieldSpec",
+           "GribSignature", "IdxEntry", "MessageCheck", "Regridder", "SourceGrid",
+           "check_message", "coalesce", "encode_field", "field_specs", "file_key", "file_name",
+           "find_entry", "floor_run", "hourly_means", "layout_for", "parse_idx", "run_times"]

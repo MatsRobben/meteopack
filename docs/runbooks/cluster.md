@@ -103,11 +103,11 @@ Without `--window` it streams from `extra.stream_start` (2023-11-01) to the
 start of today; rerunning later adds only the new days. Extend it back with
 `--window 2013-01-01/2023-11-01`: the store's axis already starts in 2013.
 
-NOAA GFS (`noaa_gfs/state_1h_16km`, which also fills `prate_16km`) needs a
+NOAA GFS (`noaa_gfs/state_1h_0p25`, which also fills `prate_0p25`) needs a
 venv synced with `uv sync --extra nwp` (ecCodes) - pass it as `METEOPACK_PY`.
 Measured 2026-11-09 on 12 CPUs with 32 download workers: ~2.0 GB fetched a day
 (byte ranges of ~2,900 GRIB messages) at 65-85 MB/s, ~33 s a day with the
-next day's download overlapping the write, ~25 MB packed a day, 1.7 GB
+next day's download overlapping the write, ~20 MB packed a day, 1.7 GB
 resident:
 
 ```bash
@@ -115,7 +115,7 @@ METEOPACK_DATA_ROOT=/vol/knmimo-nobackup/users/mrobben/meteopack_data \
 METEOPACK_REPO=/path/to/pinned/checkout METEOPACK_PY=/path/to/nwp/venv/bin/python \
 STREAM_LOG_DIR=/path/to/logs \
 sbatch --cpus-per-task=12 --output=/path/to/logs/%x-%j.out scripts/stream_kdp.slurm \
-    noaa_gfs --product state_1h_16km --download-workers 32
+    noaa_gfs --product state_1h_0p25 --download-workers 32
 ```
 
 ## /dev/shm is wiped when any of your jobs on the node ends

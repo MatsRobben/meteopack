@@ -1,6 +1,9 @@
 """Stream NOAA GFS 0.25 degree forecasts into two small gridded stores, one UTC day at a time.
 
-``meteopack stream noaa_gfs --product state_1h_16km`` fills both:
+``meteopack stream noaa_gfs --product state_1h_0p25`` fills both:
+
+Both keep GFS's native 0.25 degree latitude/longitude grid, cropped to a fixed
+window (``grid_id``); nothing is interpolated in the store.
 
 * **state** (the product named): an hourly valid-time series of instantaneous
   fields. Valid hour H comes from run ``floor6(H)`` at lead ``H - floor6(H)``
@@ -16,7 +19,7 @@
 Per day: read the ``.idx`` of every file needed (4 runs; state leads 0-5,
 precipitation leads 1-15) -> fetch only the wanted messages with byte-range
 reads (adjacent messages in one request) -> check every message's schema ->
-decode -> regrid to the store grid -> encode -> write both stores -> read
+decode -> crop to the store grid -> encode -> write both stores -> read
 them back and compare -> status record. Raw bytes live only in memory; a
 message that fails its check is written to ``raw/<category>/<source>/<product>/
 quarantine/`` with the reason and never packed.
@@ -115,11 +118,11 @@ class Settings:
 
 @dataclass(slots=True)
 class RunData:
-    """What one run gave: regridded fields per lead, and what was absent or failed."""
+    """What one run gave: cropped fields per lead, and what was absent or failed."""
 
     run: datetime
     layout: int | None = None
-    #: lead -> field name -> regridded physical values (NaN = undefined here).
+    #: lead -> field name -> cropped physical values (NaN = undefined here).
     state: dict[int, dict[str, np.ndarray]] = field(default_factory=dict)
     #: leads whose pgrb2 index exists upstream.
     present: set[int] = field(default_factory=set)
@@ -127,7 +130,7 @@ class RunData:
     absent_fields: dict[int, list[str]] = field(default_factory=dict)
     #: lead -> fields whose message failed its check.
     failed_fields: dict[int, list[str]] = field(default_factory=dict)
-    #: lead -> (window start, regridded mean rate in the store's units).
+    #: lead -> (window start, cropped mean rate in the store's units).
     prate_avg: dict[int, tuple[int, np.ndarray]] = field(default_factory=dict)
     prate_absent: set[int] = field(default_factory=set)
     #: transfer failures: "fFFF kind" -> message. A run with any is not packed.
@@ -157,7 +160,7 @@ class _Want:
 
 
 class GfsStream:
-    """Fetch, check, regrid and pack. One instance per process."""
+    """Fetch, check, crop and pack. One instance per process."""
 
     def __init__(self, state_cfg: ProductConfig, prate_cfg: ProductConfig, root: Path, *,
                  client=None, download_workers: int | None = None, redo: bool = False,
@@ -183,7 +186,7 @@ class GfsStream:
             raise ValueError("the state and precipitation stores must share a grid")
         grid = grids.get(state_cfg.grid_id)
         lon, lat = grid.lonlat()
-        self.regridder = gfs.Regridder(lon, lat, self.settings.grid)
+        self.crop = gfs.Crop(lon, lat, self.settings.grid)
         self.frame_shape = grid.shape
         if client is None:
             from meteopack.core import s3
@@ -250,7 +253,7 @@ class GfsStream:
                         (run, lead, "pgrb2b")
         self._gather_indexes(jobs, indexes, out)
 
-        # Phase 3: choose messages, coalesce, fetch, check, decode, regrid.
+        # Phase 3: choose messages, coalesce, fetch, check, decode, crop.
         groups: list[tuple[str, list[_Want]]] = []
         for run, (s_leads, p_leads) in wanted.items():
             data = out[run]
@@ -337,7 +340,7 @@ class GfsStream:
             out[run].idx_seen[(lead, kind)] = indexes[(run, lead, kind)][0] is not None
 
     def _fetch_group(self, key: str, wants: list[_Want]):
-        """One ranged GET for adjacent messages; check, decode and regrid each."""
+        """One ranged GET for adjacent messages; check, decode and crop each."""
         first, last = wants[0].entry, wants[-1].entry
         blob = self.client.get_bytes(key, first.start, last.end)
         results = []
@@ -353,8 +356,7 @@ class GfsStream:
                 self._quarantine(w, message, check)
                 results.append((w, check, None, None))
                 continue
-            method = spec.regrid if w.spec else "bilinear"
-            out = self.regridder(values, method) * spec.factor
+            out = self.crop(values) * spec.factor
             results.append((w, check, out, window))
         return results, len(blob)
 

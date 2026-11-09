@@ -1,11 +1,13 @@
 # NOAA GFS 0.25 degree forecast -> the 122 RainPro-8 input fields (Pablos et al., ICLR 2026,
-# Appendix I, Table 11), hourly, regridded to the 16 km RainPro-NL model frame.
+# Appendix I, Table 11), hourly, on GFS's native 0.25 deg lat/lon grid cropped to a window
+# around the 1536 km RainPro-NL model frame (grid gfs_0p25_latlon_nl, 63 x 111 points). Not
+# resampled: readers interpolate to their model grid at load time.
 #
 # STREAMED from the public AWS archive (s3://noaa-gfs-bdp-pds, anonymous) one UTC day at a
-# time by `meteopack stream noaa_gfs --product state_1h_16km`, which fills this store AND
+# time by `meteopack stream noaa_gfs --product state_1h_0p25`, which fills this store AND
 # the precipitation store (extra.gfs.prate.product) in one pass:
 #   .idx -> byte-range GETs of only the wanted GRIB messages -> schema check -> decode ->
-#   regrid -> encode -> write -> read back. Nothing raw is kept (quarantine excepted).
+#   crop -> encode -> write -> read back. Nothing raw is kept (quarantine excepted).
 # (meteopack.jobs.stream_gfs, reader meteopack.sources.nwp.gfs). `fetch`/`pack` refuse it.
 #
 # Time = VALID hour H. The frame comes from run floor6(H) (00/06/12/18 UTC) at lead
@@ -26,23 +28,23 @@
 source: noaa_gfs
 description: >-
   NOAA GFS 0.25 deg, the 122 RainPro-8 input fields (instantaneous), hourly valid times
-  from the newest run (leads 0-5 h), bilinear to the 16 km 1536 km KNMI-stereo model frame,
+  from the newest run (leads 0-5 h), native 0.25 deg grid cropped to 8W-19.5E x 44.5-60N,
   uint16 per-field scale/offset.
-product: state_1h_16km
+product: state_1h_0p25
 version: 1
 
 cadence_seconds: 3600
-grid_id: knmi_stereo_16km_1536
+grid_id: gfs_0p25_latlon_nl
 
 store:
   kind: gridded
-  # One valid hour per inner chunk (96 x 96 = 18 KB raw); 7 days (168 h) per shard, so the
+  # One valid hour per inner chunk (63 x 111 = 14 KB raw); 7 days (168 h) per shard, so the
   # full archive is ~37k files (122 fields x ~310 weeks) rather than ~261k with one-day
   # shards. The stream writes a day at a time into its week's shard (one writer, under the
   # stream's lock), which rewrites that shard file: 4 days streamed in 131 s against 132 s
   # with one-day shards; 30-day shards took 221 s (2026-11-09, 12 CPUs, 32 workers).
-  chunks: {time: 1, y: 96, x: 96}
-  shard: {time: 168, y: 96, x: 96}
+  chunks: {time: 1, y: 63, x: 111}
+  shard: {time: 168, y: 63, x: 111}
   compressor: blosc
   compression_level: 5
   partition_by: [year]
@@ -51,13 +53,13 @@ raw_layout: {archive: none, granularity: day}
 
 retention:
   # No raw files at all: messages live in memory. Ones that fail their check are kept
-  # in raw/nwp/noaa_gfs/state_1h_16km/quarantine/.
+  # in raw/nwp/noaa_gfs/state_1h_0p25/quarantine/.
   raw: {keep: false, after: pack}
   canonical: {keep: true}
   derived: {keep: true}
 
 attrs:
-  title: NOAA GFS 0.25 deg, 122 RainPro-8 input fields, hourly, 16 km KNMI-stereo model frame
+  title: NOAA GFS 0.25 deg, 122 RainPro-8 input fields, hourly, native grid cropped around the Netherlands
   institution: NOAA/NCEP (GFS); packed by meteopack
   source: >-
     NOAA Global Forecast System 0.25 deg forecasts (pgrb2.0p25 and pgrb2b.0p25 GRIB2), NOAA
@@ -69,9 +71,10 @@ attrs:
   comment: >-
     uint16 codes; value = scale * code + offset per field (the field's attrs). 65534 =
     field not available for this frame (absent upstream, or failed its check), 65535 =
-    undefined at this pixel (masked by the GRIB bitmap, e.g. snow fields over sea). Bilinear
-    from the 0.25 deg grid, masked neighbours dropped; CRAIN/CSNOW/CFRZR/CICEP/CPOFP nearest
-    neighbour. Values outside a field's range are clipped (counted in the day status).
+    undefined at this pixel (masked by the GRIB bitmap, e.g. snow fields over sea). Native
+    GFS 0.25 deg points, not resampled: store pixel [i, j] is GFS row 120 + i (60.00N - 0.25 i)
+    and column (1408 + j) mod 1440 (8.00W + 0.25 j). Values outside a field's range are
+    clipped (counted in the day status).
     PRATE converted to mm/h (x 3600).
 
 variables:
@@ -234,8 +237,12 @@ extra:
       3-hourly only; GFS v15 (to 2021-03-22 06z) lacks CAPE/CIN 90-0 hPa, LCDC, MCDC,
       instantaneous TCDC entire atmosphere; CLMR on pressure levels absent
       2021-02-26..2023-02-02 and on 2023-05-01. `n_fields_missing` per frame.
-    - Bilinear from 0.25 deg (masked neighbours dropped, renormalised; < 50 % valid
-      weight -> undefined); CRAIN/CSNOW/CFRZR/CICEP/CPOFP nearest neighbour.
+    - **Native grid, not resampled**: GFS 0.25 deg points 8.00W-19.50E x 44.50N-60.00N
+      (63 x 111, north first): the 1536 km KNMI-stereo frame (7.30W-18.91E,
+      45.07N-59.40N) plus 2 points on every side, so bilinear interpolation to the
+      model grid at load time has its neighbours. `lat`/`lon` per point. Suggested
+      load-time method per field: `extra.gfs.fields.<name>.regrid` in the product
+      config (nearest for CRAIN/CSNOW/CFRZR/CICEP/CPOFP; `meteopack.sources.nwp.gfs.Regridder`).
     - `days/<YYYY>/<date>.json` says per day which run/lead made each hour, what was
       absent upstream and what was clipped.
   stream: s3
@@ -255,14 +262,15 @@ extra:
     source_grid: {ni: 1440, nj: 721, lat_first: 90.0, lon_first: 0.0, dlat: 0.25, dlon: 0.25}
     prate:
       # The companion store, filled by the same stream.
-      product: prate_16km
+      product: prate_0p25
       leads: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
       # PRATE time means ("A-L hour ave fcst"): kg m-2 s-1 -> mm h-1.
       factor: 3600.0
       grib: [0, 1, 7, 1, 0, 255, null]
     # Per field: the GRIB2 signature every message must match
     # [discipline, category, number, surface1, value1, surface2, value2] (read from
-    # 2024-06-01 00z f001, identical in v15 files), and how it is regridded / scaled.
+    # 2024-06-01 00z f001, identical in v15 files), the unit factor, and the suggested load-time
+    # interpolation (regrid: nearest for categorical fields; bilinear otherwise).
     fields:
       lftx4_sfc: {grib: [0, 7, 193, 1, 0, 255, null]}
       absv_100hpa: {grib: [0, 2, 10, 100, 10000, 255, null]}
