@@ -157,8 +157,8 @@ counts (`extra.days`). The archive's first file is
 `3D_RADAR_COMPOSITE_202405070850.nc` (not the documented 2023-11-01), so the
 store's axis starts 2024-05-07 00:00 and that first day is `partial`.
 
-Checked on 2026-11-09 against 146 local sample files that the stream never
-touched (2024-05-10 and 2024-07-09): decoded values within 0.25 dBZ of the
+Checked on 2026-11-09 against 219 local sample files that the stream never
+touched (2024-05-10, 2024-06-10, 2024-07-09): decoded values within 0.25 dBZ of the
 file, and the not-observed and no-echo masks identical pixel for pixel.
 
 ## Points stores (station networks)

@@ -5,7 +5,7 @@
 #SBATCH --qos=das-large
 #SBATCH --exclude=cn79,cn84     # cn79: no AVX2 (polars dies); cn84: 1 GbE
 #SBATCH --cpus-per-task=6
-#SBATCH --mem=24G               # one day of a 32-level volume is 4.9 GB in memory
+#SBATCH --mem=24G               # a day of 32 levels is 4.9 GB; measured peak 11.2 GB with prefetch
 #SBATCH --time=2-00:00:00
 #SBATCH --signal=B:USR1@900     # 15 min warning: finish the current day, then stop
 #
@@ -54,7 +54,9 @@ echo "[stream] exit ${rc} $(date -u +%FT%TZ)"
 
 if [[ "${rc}" == 75 && -z "${STREAM_NO_RESUBMIT:-}" && -n "${SLURM_JOB_ID:-}" ]]; then
   script="${REPO}/scripts/stream_kdp.slurm"
+  # The successor keeps this job's CPUs and memory (sbatch options are not inherited).
   next=$(cd "${STREAM_LOG_DIR}" && sbatch --parsable --dependency="afterany:${SLURM_JOB_ID}" \
+         --cpus-per-task="${SLURM_CPUS_PER_TASK:-6}" --mem="${SLURM_MEM_PER_NODE:-24576}M" \
          --output="${STREAM_LOG_DIR}/%x-%j.out" "${script}" "$@")
   echo "[stream] more to do: submitted ${next}"
 fi
