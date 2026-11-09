@@ -224,6 +224,10 @@ def store_readme(cfg, store_path: Path | str, info: dict | None = None) -> Path 
             "`flag_values` / `flag_meanings` |"),
             ("| `source_record_id` | which raw file it came from: look the id up in "
             "`provenance.parquet` beside `dataset.zarr` |"),
+            *(f"| `{v.name}` | {v.long_name}"
+              + (f"; {', '.join(f'{c} = {m}' for c, m in zip(v.flag_values, v.flag_meanings or [], strict=False))}"
+                 if v.flag_values is not None else "") + " |"
+              for v in getattr(cfg, "frame_variables", None) or []),
             "",
             "Missing and corrupt frames both read as all-NaN imagery; only these flags",
             "tell them apart from each other. Mask on `is_missing_frame | is_corrupt_frame`.",
@@ -256,11 +260,12 @@ def store_readme(cfg, store_path: Path | str, info: dict | None = None) -> Path 
             "",
             "Station coordinates are in `stations/`, joined on `station_id` (text).",
         ]
-        # What only this product needs said (its side tables, its provenance
-        # columns): from the config, so it travels with the store's definition.
-        extra = cfg.extra.get("readme")
-        if extra:
-            lines += ["", str(extra).rstrip()]
+    # What only this product needs said (its side tables, its provenance
+    # columns, its quirks): from the config, so it travels with the store's
+    # definition.
+    extra = cfg.extra.get("readme")
+    if extra:
+        lines += ["", str(extra).rstrip()]
     text = "\n".join(lines) + "\n"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

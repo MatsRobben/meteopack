@@ -307,6 +307,7 @@ class Stream:
         self.pinned = cfg.schema_fingerprint
         #: Every fingerprint that is not drift (a format may pin several).
         self.pinned_all: frozenset[str] = frozenset(self.fmt.pinned)
+        self._readme_written = False
 
     # ------------------------------------------------------------ download
 
@@ -376,6 +377,11 @@ class Stream:
         if day < origin:
             raise ValueError(f"{day:%Y-%m-%d} is before the store's origin {origin:%Y-%m-%d}")
         path = gridded.zarr_path(self.root, self.cfg.store_id)
+        if not self._readme_written:
+            from meteopack.core import readme
+
+            readme.store_readme(self.cfg, store_dir(self.cfg, self.root))
+            self._readme_written = True
         if not (path / "zarr.json").exists():
             gridded.initialise(self.cfg, self.root, Timeline(origin, end, self.cadence))
             gridded.refresh_attrs(self.cfg, self.root, layout_names=self.fmt.layout_names)
