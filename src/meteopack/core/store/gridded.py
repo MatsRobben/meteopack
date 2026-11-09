@@ -1,10 +1,12 @@
 """zarr v3 store for ``(time, y, x)`` fields: one frame per chunk, a day per shard.
 
-A product with a vertical axis (`ProductConfig.levels`) is stored as
+A product with a second axis (`ProductConfig.levels`) is stored as
 ``(time, z, y, x)`` instead, with a ``z`` coordinate; everything below holds
-with "frame" meaning one time step of every level. The layout of an existing
-store is read from its arrays' own dimension names, never assumed, so
-``(time, y, x)`` stores written before this existed read exactly as before.
+with "frame" meaning one time step of every level. The axis is ``z`` unless the
+product names it (`Levels.name`): a forecast store is ``(time, lead_time, y,
+x)``, ``time`` being the run. The layout of an existing store is read from its
+arrays' own dimension names, never assumed, so ``(time, y, x)`` stores written
+before this existed read exactly as before.
 
 Layout under ``<root>/<layer>/<category>/<source>/<product>/v<n>/``: a zarr v3 group holding
 one array per variable plus a ``time`` coordinate, with the grid in the attrs.
@@ -77,8 +79,10 @@ DIMS_3D: tuple[str, str, str, str] = ("time", LEVEL_NAME, "y", "x")
 
 
 def dims_for(cfg: ProductConfig) -> tuple[str, ...]:
-    """``(time, z, y, x)`` for a product with levels, ``(time, y, x)`` otherwise."""
-    return DIMS_3D if cfg.levels is not None else DIMS
+    """``(time, <levels.name>, y, x)`` for a product with levels, ``(time, y, x)`` otherwise."""
+    if cfg.levels is None:
+        return DIMS
+    return (TIME_NAME, cfg.levels.name, "y", "x")
 
 
 def _dims_of(array: zarr.Array) -> tuple[str, ...]:
@@ -232,8 +236,24 @@ _NON_FIELD = frozenset({TIME_NAME, LEVEL_NAME, *COORD_NAMES, *PROVENANCE})
 
 
 def _data_arrays(group: zarr.Group) -> list[str]:
-    return [name for name, array in group.arrays()
-            if name not in _NON_FIELD and _dims_of(array) != (TIME_NAME,)]
+    """The fields: arrays over time and space. A level coordinate of any name
+    (``(lead_time,)``) is 1-D and not over time, so it is never one."""
+    out = []
+    for name, array in group.arrays():
+        dims = _dims_of(array)
+        if name not in _NON_FIELD and len(dims) > 1 and dims[0] == TIME_NAME:
+            out.append(name)
+    return out
+
+
+def _level_dims(group: zarr.Group, names: Sequence[str]) -> list[str]:
+    """The dimensions between time and (y, x) of these fields: ``z``, ``lead_time``, ..."""
+    found: list[str] = []
+    for name in names:
+        for dim in _dims_of(group[name])[1:-2]:
+            if dim not in found:
+                found.append(dim)
+    return found
 
 
 def _frame_arrays(group: zarr.Group) -> list[str]:
@@ -363,7 +383,7 @@ def _root_attrs(cfg: ProductConfig, grid, timeline: Timeline, n_times: int) -> d
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     if cfg.levels is not None:
-        declared["dims"] = list(DIMS_3D)
+        declared["dims"] = list(dims_for(cfg))
         declared["n_levels"] = len(cfg.levels.values)
     # Whatever the config publishes - institution, source, history, references,
     # comment - wins, except the keys this store owns and must stay true.
@@ -434,16 +454,21 @@ def _create_coordinates(group: zarr.Group, grid) -> None:
 
 
 def _create_levels(group: zarr.Group, levels) -> None:
-    """The ``z`` coordinate: level centres, as the config declares them."""
+    """The level coordinate (``z`` unless named): level centres, as the config declares them."""
     values = np.asarray(levels.values, dtype="float64")
-    attributes = {"units": levels.units, "axis": "Z", "positive": levels.positive,
-                  "long_name": levels.long_name or "vertical level"}
+    attributes = {"units": levels.units,
+                  "long_name": levels.long_name or ("vertical level" if levels.name == "z"
+                                                    else levels.name)}
+    if levels.cf_axis:
+        attributes["axis"] = levels.cf_axis
+    if levels.positive:
+        attributes["positive"] = levels.positive
     if levels.standard_name:
         attributes["standard_name"] = levels.standard_name
     if levels.source_indices is not None:
         attributes["source_indices"] = [int(i) for i in levels.source_indices]
-    array = group.create_array(LEVEL_NAME, shape=values.shape, chunks=values.shape,
-                               dtype="float64", dimension_names=(LEVEL_NAME,),
+    array = group.create_array(levels.name, shape=values.shape, chunks=values.shape,
+                               dtype="float64", dimension_names=(levels.name,),
                                attributes=attributes)
     array[:] = values
 
@@ -964,7 +989,7 @@ def read(
         if name in present:
             coords[name] = ((TIME_NAME,), np.asarray(group[name][lo:hi]),
                             dict(group[name].attrs))
-    for name in (LEVEL_NAME, "y", "x"):
+    for name in (*_level_dims(group, available), "y", "x"):
         if name in present:
             coords[name] = ((name,), np.asarray(group[name][:]), dict(group[name].attrs))
     for name in ("lat", "lon"):

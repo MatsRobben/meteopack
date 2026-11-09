@@ -42,10 +42,19 @@ def config_hash(cfg: BaseModel | dict[str, Any]) -> str:
 _ADDED_OPTIONAL = frozenset({"levels"})
 
 
+#: `levels` keys added after level stores were built, with the default that
+#: hashes as though the key were absent.
+_ADDED_LEVEL_DEFAULTS = {"name": "z", "axis": None}
+
+
 def _without_unset_additions(payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
-    return {k: v for k, v in payload.items() if not (k in _ADDED_OPTIONAL and v is None)}
+    out = {k: v for k, v in payload.items() if not (k in _ADDED_OPTIONAL and v is None)}
+    if isinstance(out.get("levels"), dict):
+        out["levels"] = {k: v for k, v in out["levels"].items()
+                         if not (k in _ADDED_LEVEL_DEFAULTS and v == _ADDED_LEVEL_DEFAULTS[k])}
+    return out
 
 
 #: Config fields that describe a store without changing a single stored value:

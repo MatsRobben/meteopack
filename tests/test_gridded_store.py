@@ -1,6 +1,7 @@
 """Gridded fields: one frame per chunk, days written in parallel, nothing shifted."""
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
 import os
 import threading
@@ -989,3 +990,45 @@ def test_frame_variables_are_per_frame_arrays_that_grow_and_read_as_coordinates(
     np.testing.assert_array_equal(back["n_radars"].values[rows], np.arange(rows.size))
     assert (back["n_radars"].values[:FRAMES_PER_DAY] == -1).all()
     assert back["chain"].attrs["flag_meanings"] == "none a b"
+
+
+def test_a_named_level_axis_makes_a_lead_time_store(tmp_path: Path):
+    """`levels.name` names the second axis: a forecast store is (time, lead_time, y, x),
+    with a lead_time coordinate that is never mistaken for a field."""
+    import zarr
+
+    from meteopack.core.config import Levels
+
+    cfg = make_cfg_3d().model_copy(update={"levels": Levels(
+        name="lead_time", units="hours", values=[1, 2, 3], standard_name="forecast_period",
+        positive=None)})
+    timeline = make_timeline()
+    gridded.initialise(cfg, tmp_path, timeline)
+    assert gridded.dims_for(cfg) == ("time", "lead_time", "y", "x")
+    group = zarr.open_group(gridded.zarr_path(tmp_path, cfg.store_id), mode="r")
+    assert tuple(group["refl"].metadata.dimension_names) == ("time", "lead_time", "y", "x")
+    lead = group["lead_time"]
+    assert lead.attrs["standard_name"] == "forecast_period"
+    assert "axis" not in lead.attrs and "positive" not in lead.attrs
+    assert group.attrs["dims"] == ["time", "lead_time", "y", "x"]
+    rows = np.arange(FRAMES_PER_DAY)
+    gridded.write(xr.Dataset({"refl": (("time", "lead_time", "y", "x"), block_3d(rows))},
+                             coords={"time": timeline.values()[rows]}), cfg, tmp_path)
+    out = gridded.read(cfg.store_id, tmp_path, decode=False)
+    assert list(out.data_vars) == ["refl"]
+    np.testing.assert_array_equal(out["lead_time"].values, [1, 2, 3])
+    np.testing.assert_array_equal(out["refl"].values[rows], block_3d(rows))
+    assert gridded.info(cfg.store_id, tmp_path)["dims"] == ("time", "lead_time", "y", "x")
+    with pytest.raises(ValueError, match="dimension name"):
+        Levels(name="time", units="h", values=[1])
+
+
+def test_a_default_level_axis_hashes_as_before_the_name_existed():
+    from meteopack.core.store import manifest
+
+    cfg = make_cfg_3d()
+    payload = cfg.model_dump(mode="json")
+    assert payload["levels"]["name"] == "z"
+    old = json.loads(json.dumps(payload))
+    del old["levels"]["name"], old["levels"]["axis"]
+    assert manifest.config_hash(cfg) == manifest.config_hash(old)

@@ -235,13 +235,17 @@ class StoreConfig(BaseModel):
 
 
 class Levels(BaseModel):
-    """A vertical axis for a gridded product: the store becomes ``(time, z, y, x)``.
+    """A second axis for a gridded product: the store becomes ``(time, <name>, y, x)``.
 
-    The dimension is always called ``z``; what it measures is said by `units`,
-    `long_name` and, when one applies, `standard_name`. `values` are the level
-    centres the store keeps, in order - a product that subsamples its source's
-    levels lists the kept ones here and says which source levels they are in
-    `source_indices`, so a reader never has to recompute the selection.
+    By default a vertical axis called ``z``; what it measures is said by
+    `units`, `long_name` and, when one applies, `standard_name`. `values` are
+    the level centres the store keeps, in order - a product that subsamples its
+    source's levels lists the kept ones here and says which source levels they
+    are in `source_indices`, so a reader never has to recompute the selection.
+
+    A product may name the axis something else - a forecast store has
+    ``(time, lead_time, y, x)`` with `time` the run and `lead_time` in hours -
+    by setting `name` (and `axis`/`positive`, which only a vertical axis has).
     """
 
     model_config = {"extra": "forbid"}
@@ -250,9 +254,15 @@ class Levels(BaseModel):
     values: list[float] = Field(min_length=1)
     long_name: str | None = None
     standard_name: str | None = None
-    positive: Literal["up", "down"] = "up"
+    #: Only meaningful for a vertical axis; null for any other.
+    positive: Literal["up", "down"] | None = "up"
     #: Position of each kept level in the source's own vertical axis.
     source_indices: list[int] | None = None
+    #: The dimension (and coordinate) name. Default ``z``, a vertical axis.
+    name: str = "z"
+    #: The CF ``axis`` attribute of the coordinate: ``Z`` for the default
+    #: vertical axis, none unless given for any other name.
+    axis: str | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> Levels:
@@ -261,7 +271,13 @@ class Levels(BaseModel):
         if self.source_indices is not None and len(self.source_indices) != len(self.values):
             raise ValueError(f"levels.source_indices has {len(self.source_indices)} entries "
                              f"for {len(self.values)} levels")
+        if self.name in ("time", "y", "x", "lat", "lon") or not self.name.isidentifier():
+            raise ValueError(f"levels.name {self.name!r} is not a usable dimension name")
         return self
+
+    @property
+    def cf_axis(self) -> str | None:
+        return self.axis if self.axis is not None else ("Z" if self.name == "z" else None)
 
 
 class FrameVariable(BaseModel):
