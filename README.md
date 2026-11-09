@@ -16,6 +16,7 @@ it); storage, scheduling, validation and bookkeeping are shared.
 | `knmi_radar/echotop_5min` | radar echo top height, 2008- | **packed and verified** |
 | `knmi_radar/refl_5min` | radar reflectivity composite, 2008- | **packed and verified** |
 | `knmi_radar/composite3d_5min` | 3D radar reflectivity, 32 levels 0.375-15.875 km, `(time, z, y, x)` uint8, 2024-05-07- | **streamed from the KNMI Data Platform** (`meteopack stream`); tested end to end on 5 days (2026-11-09), full archive waiting for a bulk API key - see [docs/stores.md](docs/stores.md#the-3d-radar-composite) |
+| `opera/rate_15min` | EUMETNET OPERA European radar rain rate, 15 min, native 2 km LAEA, 880 x 880 window around the 1536 km KNMI training square, uint16 0.01 mm/h; ODYSSEY to 2024-07-05 06:00, NIMBUS after (per-frame `chain`) | **streamed from the public OPERA archive** (`meteopack stream opera`); trial-run and validated on 27 days (2026-11-09), full 2023-11 -> now run not yet launched - see [docs/stores.md](docs/stores.md#the-opera-rain-rate-composite) |
 | `knmi_insitu/obs_10min` | KNMI automatic weather stations, 2012- | **packed and validated** (2026-11-05): 49.0 M rows, 73 stations |
 | `dwd/stations_10min` | German stations inside the radar footprint, 10 min, 2010- | **re-fetched, packed and validated** (2026-11-06): 390 M rows, 539 reporting stations (568 with metadata), closed stations included, to 2026-11-06 |
 | `dmi/stations_10min` | Danish stations, 10 min, 2012- | **packed and validated**: 75.0 M rows, 115 stations |
@@ -168,7 +169,7 @@ flowchart LR
 | `fetch` | downloads, in parallel, atomically, rate-limited, retried, integrity-checked; records why each unit ended | `raw/`, `_bookkeeping/` |
 | `parse` | parses raw files and reports what they hold | nothing |
 | `pack` | parses and writes the store | `packed/` |
-| `stream` | for products served by an API (the KNMI 3D radar composite): per day list, download, check every file's schema, pack, delete the raw files, write a status record; resumable | `packed/` (raw only transiently) |
+| `stream` | for products served by an API or a public bucket (the KNMI 3D radar composite, the OPERA composite): per day list, download, check every file's schema, pack, delete the raw files, write a status record; resumable | `packed/` (raw only transiently) |
 | `validate` | asks whether the store is *usable*, not merely present | nothing |
 | `derive` | builds training bricks, station matrices and splits; regularises irregular stores; QC flags for WOW-NL | `training/` (QC: `packed/stations/wow_nl/qc`) |
 | `catalog <source>` | what is fetched and packed for a source; `--gaps`: what is missing and why | nothing |

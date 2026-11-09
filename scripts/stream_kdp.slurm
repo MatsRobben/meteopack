@@ -16,6 +16,9 @@
 #   STREAM_LOG_DIR=/path/to/logs sbatch --output=/path/to/logs/%x-%j.out \
 #       scripts/stream_kdp.slurm knmi_radar --product composite3d_5min [--window A/B]
 #
+# Any streamed product works the same way, e.g. the OPERA rain rate from the
+# public S3 archive: `... scripts/stream_kdp.slurm opera --product rate_15min`.
+#
 # Environment:
 #   METEOPACK_DATA_ROOT   the data root (required)
 #   METEOPACK_REPO        checkout to run from (default: this repo). Point it at

@@ -78,6 +78,31 @@ pid=$!; trap 'kill -TERM $pid' TERM
 wait $pid; while kill -0 $pid 2>/dev/null; do wait $pid; done
 ```
 
+## Streaming a product (`meteopack stream`)
+
+`scripts/stream_kdp.slurm` runs `meteopack stream` for any streamed product
+(KDP or S3) as a job that resubmits itself while days remain (exit 75), and
+stops cleanly on Slurm's USR1 warning. Point `METEOPACK_REPO` at a checkout
+nobody edits while it runs.
+
+The OPERA rain rate, 2023-11-01 to the start of today (measured 2026-11-09 on
+6 CPUs: ~7 s and ~10 MB a day, ~500 days an hour, 1.2 GB resident; the
+download, ~120 MB a day at ~45 MB/s over 8 connections, overlaps the packing):
+
+```bash
+mkdir -p /path/to/logs
+METEOPACK_DATA_ROOT=/vol/knmimo-nobackup/users/mrobben/meteopack_data \
+METEOPACK_REPO=/path/to/pinned/checkout STREAM_LOG_DIR=/path/to/logs \
+sbatch --output=/path/to/logs/%x-%j.out scripts/stream_kdp.slurm opera --product rate_15min
+```
+
+The script's own `#SBATCH` lines (das-large, 6 CPUs, 24 GB, 2 days) are what
+a resubmitted successor gets too, so prefer them to command-line overrides.
+
+Without `--window` it streams from `extra.stream_start` (2023-11-01) to the
+start of today; rerunning later adds only the new days. Extend it back with
+`--window 2013-01-01/2023-11-01`: the store's axis already starts in 2013.
+
 ## /dev/shm is wiped when any of your jobs on the node ends
 
 Measured 2026-11-06 on cn114: about 10 s after **any** job of yours on a node

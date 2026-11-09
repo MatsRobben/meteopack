@@ -58,6 +58,7 @@ intended: both reserved codes (below) should read as NaN.
 | `is_corrupt_frame` | time | a file covered it, but the frame was unusable |
 | `source_layout_id` | time | which upstream layout the frame came from |
 | `source_record_id` | time | which raw file it came from |
+| product frame variables, e.g. OPERA's `chain` | time | what the source says about each frame (`frame_variables` in the product config); read as coordinates, like the four above |
 
 ### Field values: three kinds of "nothing"
 
@@ -160,6 +161,97 @@ store's axis starts 2024-05-07 00:00 and that first day is `partial`.
 Checked on 2026-11-09 against 146 local sample files that the stream never
 touched (2024-05-10 and 2024-07-09): decoded values within 0.25 dBZ of the
 file, and the not-observed and no-echo masks identical pixel for pixel.
+
+### The OPERA rain-rate composite
+
+`packed/radar/opera/rate_15min/v1/` holds the EUMETNET OPERA European
+rain-rate composite, 15-minute, on its own 2 km grid, cut to a window around
+the Netherlands. It is streamed day by day from the public archive bucket
+(`https://s3.waw3-1.cloudferro.com/openradar-archive/`, anonymous, CC BY 4.0,
+property rights EUMETNET) by `meteopack stream opera --product rate_15min`;
+the raw HDF5 never accumulates.
+
+| | |
+|---|---|
+| `rain_rate_mmh` | uint16, `mm/h = 0.01 * code`, `(time, y, x)` |
+| code 0 | **no rain**: the file's `undetect` (-8888000), observed and dry - and any rate below 0.005 mm/h |
+| code 65535 | **no radar coverage**: the file's `nodata` (-9999000) |
+| code 65534 | **no data for this frame** (the fill); the frame is flagged `is_missing_frame` or `is_corrupt_frame` |
+| code 65533 | 655.33 mm/h: anything higher is clipped to it and counted per file (`n_clipped`) |
+| grid | `opera_2km_laea_nl`: OPERA's own LAEA grid (`+proj=laea +lat_0=55 +lon_0=10 +x_0=1950000 +y_0=-2100000 +ellps=WGS84`, metres), **not resampled**; store pixel `[i, j]` is native pixel `[756 + i, 389 + j]` of the 2200 x 1900 composite (`attrs["opera_window"]`). 880 x 880 pixels: the 1536 km KNMI training square around 52.2N 5.3E spans native cols 408-1249 and rows 775-1616, plus 19 px on every side. `x`, `y` are cell centres in metres; `lat`, `lon` per cell |
+| chunks | one time step in 2 x 2 tiles of 440 x 440; one UTC day (96 steps) per shard; blosc-zstd 5 with byte shuffle |
+| time axis | from 2013-01-01 00:00 UTC, so the store can be filled back without a rebuild; steps never streamed read as missing frames |
+
+Two production chains made the rain rate, and **the series breaks between
+them**:
+
+| chain | files | until / from | data window | `chain` | `source_layout_id` |
+|---|---|---|---|---|---|
+| ODYSSEY | `OPERA@YYYYMMDDTHHMM@0@QIND_RATE.h5` (ODIM 2.0) | up to and including 2024-07-05 06:00 | T-10 .. T+5 min | 1 | 2 |
+| NIMBUS | `OPERA@YYYYMMDDTHHMM@0@RATE.h5` (ODIM 2.4) | from 2024-07-05 06:15 | instantaneous at T | 2 | 3 |
+
+Both chains publish 05:30-06:00 on 2024-07-05; the cutover rule takes exactly
+one file per step, and ODYSSEY's 05:30 is absent upstream, so that step is a
+missing frame. Values are stored as the files give them - **no correction
+across the break**; calibrate each chain separately (e.g. against
+`rtcor_5min`) by selecting on `chain`.
+
+Per frame, beside the four provenance flags:
+
+| array | holds |
+|---|---|
+| `chain` | 0 no frame, 1 ODYSSEY, 2 NIMBUS |
+| `n_radars` | radars listed in the file's `/how/nodes` (-1 no frame); 142-167 in 2023-2026 |
+| `has_nldhl`, `has_nlhrw` | Den Helder / Herwijnen listed in `/how/nodes`: 1 yes, 0 no, -1 no frame |
+
+`provenance.parquet` adds, per file: the chain, the full node list, the data
+window, and counts of nodata, no-rain, rain, NaN, negative and clipped pixels
+in the window, and the window's maximum rate.
+
+```python
+import xarray as xr
+ds = xr.open_zarr(".../packed/radar/opera/rate_15min/v1/dataset.zarr", consolidated=False)
+rate = ds.rain_rate_mmh.sel(time=slice("2024-07-05", "2024-07-06"))   # mm/h, NaN = no data
+nimbus = ds.chain == 2
+both_nl = (ds.has_nldhl == 1) & (ds.has_nlhrw == 1)
+```
+
+Every file is checked before it is packed: its name and quarter-hour; its
+chain, by structure (ODYSSEY: `dataset1` RATE + `dataset2` QIND; NIMBUS:
+`dataset1/data1` + `quality1`) as well as by name, and against the chain the
+cutover assigns to its time step; `/what` object, version and time against
+the name; `projdef`, grid size, scale and corners; quantity, dtype, shape,
+gain 1, offset 0, nodata and undetect; and a non-empty `/how/nodes`. A file
+that fails is never packed: its frame is flagged corrupt, the file is kept in
+`raw/radar/opera/rate_15min/quarantine/`, and the day's status says why. The
+structural fingerprint of each chain is pinned in the product config
+(`extra.opera.pinned_fingerprints`); others are reported as drift.
+
+Known gaps in the archive (no rain-rate file at all): 2024-12-03..09 (only
+ODYSSEY files exist those days, which the cutover rule ignores),
+2025-05-02..15, 2026-05-24..25, and several partial days (e.g. 2024-02-20,
+2025-05-01, 2025-11-05). Per-day status: `days/<YYYY>/<YYYY-MM-DD>.json`
+(`done`, `partial`, `empty`), as for the 3D composite.
+
+Upstream artefacts that are packed as they are: ODYSSEY frames carry a few
+persistent hot pixels with absurd rates (e.g. up to 63,958 mm/h at the
+Feldberg radar site, 47.9N 8.0E), clipped to 655.33 mm/h and counted in
+`n_clipped`.
+
+Checked on 2026-11-09 (trial days 2023-11-01..02, 2024-02-18..21,
+2024-03-01..06, 2024-07-04..06, 2024-12-05, 2025-05-01, 2025-05-03,
+2025-11-01..10, 2026-11-08): nine frames of both chains decoded
+independently from re-downloaded files equal the store exactly (largest
+error 3e-14 mm/h; the files hold 0.01 mm/h steps), nodata and no-rain
+masks identical pixel for pixel; `x`/`y` equal the native cell centres and
+`lat`/`lon` agree with PROJ to 2e-6 degrees; against `rtcor_5min` (OPERA sampled at
+every RTCOR pixel, integer shifts of +-3 px, correlation of log(1 + rate)
+averaged over wet hourly frames) the best shift is (0, 0) for ODYSSEY (51
+frames, RTCOR window centred 5 min before the nominal time; corr 0.768) and
+(+1, 0) for NIMBUS (64 frames, window centred on the nominal time; corr
+0.712 against 0.708 at (0, 0)). Shift and time lag trade off through
+advection: compared against a window 5 min later, both chains prefer
+(-1, +1) - a single frame's best shift says little.
 
 ## Points stores (station networks)
 
