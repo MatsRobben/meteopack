@@ -238,6 +238,13 @@ Known gaps in the archive (no rain-rate file at all): 2025-05-02..15, 2026-05-24
 2025-05-01, 2025-11-05). Per-day status: `days/<YYYY>/<YYYY-MM-DD>.json`
 (`done`, `partial`, `empty`), as for the 3D composite.
 
+Empty composites are not packed: 17 ODYSSEY files (2023-10-30, 2023-11-06,
+2024-06-09, 2024-06-11) list `/how/nodes` as `none` and hold nodata
+everywhere; they fail the check and their frames are flagged
+`is_corrupt_frame`. ODYSSEY files of 2021-01-11 .. 2021-03-01 also carry NaN
+pixels (about 2 % of the window, 2,647 files); they are stored as nodata
+(65535) and counted in `n_nan`.
+
 Upstream artefacts that are packed as they are: ODYSSEY frames carry a few
 persistent hot pixels with absurd rates (e.g. up to 63,958 mm/h at the
 Feldberg radar site, 47.9N 8.0E), clipped to 655.33 mm/h and counted in

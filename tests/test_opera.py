@@ -153,6 +153,7 @@ def test_nodes_in_every_chains_spelling():
     assert opera.parse_nodes(b"'behel','nlhrw'") == ["behel", "nlhrw"]
     assert opera.parse_nodes("behel, bewid, behel") == ["behel", "bewid"]
     assert opera.parse_nodes(None) == []
+    assert opera.parse_nodes(b"none") == []          # an empty composite: no radar
 
 
 def test_select_takes_one_file_per_step_from_the_right_chain():
@@ -255,6 +256,7 @@ WHEN = datetime(2024, 3, 1, 12, 0, tzinfo=UTC)
     ({"shape": (NATIVE_Y, NATIVE_X - 1)}, "shape"),
     ({"name": "OPERA@20240301T1207@0@QIND_RATE.h5"}, "cadence"),
     ({"nodes": []}, "/how/nodes"),
+    ({"nodes": ["none"]}, "/how/nodes"),
 ])
 def test_schema_drift_is_caught_and_never_packed(tmp_path, kwargs, message):
     path = write_odim(tmp_path, WHEN, opera.ODYSSEY, **kwargs)

@@ -113,6 +113,8 @@ def parse_nodes(text: str | bytes | None) -> list[str]:
 
     ODYSSEY writes ``NOD:frnan,NOD:frbou,...``, NIMBUS ``'behel','bejab',...``
     and CIRRUS ``behel, bewid, ...``; all become ``["frnan", "frbou", ...]``.
+    An empty composite says ``none`` (17 ODYSSEY files in 2023-2024, every
+    pixel nodata): that is no radar, not a radar called "none".
     """
     if text is None:
         return []
@@ -123,7 +125,7 @@ def parse_nodes(text: str | bytes | None) -> list[str]:
         token = token.strip()
         if token.upper().startswith("NOD:"):
             token = token[4:]
-        if token:
+        if token and token.lower() not in ("none", "null", "nan"):
             out.append(token.lower())
     return list(dict.fromkeys(out))
 
