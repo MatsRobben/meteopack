@@ -423,16 +423,24 @@ def _create_coordinates(group: zarr.Group, grid) -> None:
     except (ValueError, ImportError) as exc:
         logger.warning("grid %s: no projected coordinates written (%s)", grid.id, exc)
         return
+    geographic = grid.grid_mapping_name == "latitude_longitude"
     units = "km" if "+units=km" in grid.proj4 else "m"
     for name, values, axis, std in (
         ("y", y, "Y", "projection_y_coordinate"),
         ("x", x, "X", "projection_x_coordinate"),
     ):
+        attributes = {"units": units, "standard_name": std, "axis": axis,
+                      "long_name": f"{axis.lower()} coordinate of projection"}
+        if geographic:
+            # A regular lat/lon grid: x and y are longitude and latitude.
+            attributes.update({
+                "units": "degrees_east" if name == "x" else "degrees_north",
+                "standard_name": "longitude" if name == "x" else "latitude",
+                "long_name": "longitude of cell centre" if name == "x"
+                else "latitude of cell centre"})
         array = group.create_array(
             name, shape=values.shape, chunks=values.shape, dtype="float64",
-            dimension_names=(name,),
-            attributes={"units": units, "standard_name": std, "axis": axis,
-                        "long_name": f"{axis.lower()} coordinate of projection"},
+            dimension_names=(name,), attributes=attributes,
         )
         array[:] = values
 

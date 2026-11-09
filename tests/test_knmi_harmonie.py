@@ -1,8 +1,9 @@
-"""HARMONIE Cy43 NL: both packagings checked, read, regridded and streamed into a lead-time store.
+"""HARMONIE Cy43 NL: both packagings checked, read, coarsened and streamed into a lead-time store.
 
-Synthetic NetCDF files and P1 GRIB tars on a tiny source grid, written to look
-like the KDP ones, served by a fake KDP client; the product config is the real
-one shrunk to three leads and a 6 x 6 target grid.
+Synthetic NetCDF files and P1 GRIB tars on a tiny 12 x 9 source grid, written
+to look like the KDP ones, served by a fake KDP client; the product config is
+the real factor-2 one shrunk to leads 0-3, so the store grid is 6 x 4 and the
+odd eastern source column is dropped.
 """
 from __future__ import annotations
 
@@ -24,13 +25,13 @@ from meteopack.jobs.plan import load_product_config
 from meteopack.sources.nwp import knmi_harmonie as hm
 from test_grib1 import encode_message
 
-STEREO = ("+proj=stere +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378140 +b=6356750 +x_0=0 +y_0=0 "
-          "+units=km +no_defs")
-#: 50 km cells; the western column lies outside the tiny source domain.
-TINY = Grid(id="tiny_4km", proj4=STEREO, shape=(6, 6),
-            extent=((100.0, 400.0), (-4150.0, -3850.0)))
+LONLAT = "+proj=longlat +a=6367470 +e=0 +no_defs"
 LAT0, DLAT, NLAT, LON0, DLON, NLON = 51.0, 0.25, 12, 2.5, 0.35, 9
-LEADS = [1, 2, 3]
+#: The source coarsened 2 x 2: 6 x 4 blocks, the 9th (eastern) column dropped.
+TINY = Grid(id="tiny_ll_f2", proj4=LONLAT, shape=(6, 4),
+            extent=((LON0 - DLON / 2, LON0 - DLON / 2 + 8 * DLON),
+                    (LAT0 - DLAT / 2, LAT0 - DLAT / 2 + 12 * DLAT)))
+LEADS = [0, 1, 2, 3]
 DAY_NC = datetime(2026, 1, 7, tzinfo=UTC)
 DAY_P1 = datetime(2026, 1, 8, tzinfo=UTC)
 KT = 1852 / 3600
@@ -69,11 +70,10 @@ def tiny_cfg():
     extra = json.loads(json.dumps(cfg.extra))
     extra["harmonie"]["source_grid"] = {"lat0": LAT0, "dlat": DLAT, "nlat": NLAT, "lon0": LON0,
                                         "dlon": DLON, "nlon": NLON, "tolerance_deg": 1e-4}
-    extra["harmonie"]["regrid"]["oversample"] = 6
     extra["timeline_origin"] = extra["stream_start"] = DAY_NC.isoformat()
     store = cfg.store.model_copy(update={
-        "chunks": {"time": 1, "lead_time": len(LEADS), "y": 6, "x": 6},
-        "shard": {"time": 24, "lead_time": len(LEADS), "y": 6, "x": 6},
+        "chunks": {"time": 1, "lead_time": len(LEADS), "y": 6, "x": 4},
+        "shard": {"time": 24, "lead_time": len(LEADS), "y": 6, "x": 4},
         "compression_level": 1})
     return cfg.model_copy(update={"grid_id": TINY.id, "levels": levels, "extra": extra,
                                   "store": store})
@@ -140,8 +140,6 @@ def p1_member(run: datetime, lead: int, *, bad_grid: bool = False) -> bytes:
     kw = {"run": run, "lat0": LAT0, "lon0": LON0 + (1.0 if bad_grid else 0.0), "dlat": DLAT,
           "dlon": DLON}
     out = [encode_message(np.full((NLAT, NLON), 1.0), param=81, **kw)]  # land fraction
-    if lead == 0:
-        return b"".join(out)
 
     def inst(name, param, lt, level, decimal=0, bits=16):
         out.append(encode_message(phys(name, run, lead), param=param, level_type=lt,
@@ -155,12 +153,14 @@ def p1_member(run: datetime, lead: int, *, bad_grid: bool = False) -> bytes:
     gust = phys("gust10", run, lead)
     for param, part in ((162, 0.6), (163, 0.8)):
         out.append(encode_message(gust * part, param=param, level=10, time_range=2,
-                                  p1=lead - 1, p2=lead, decimal=1, **kw))
+                                  p1=max(lead - 1, 0), p2=lead, decimal=1, **kw))
     inst("mld", 67, 105, 0)
     inst("cloud_base", 186, 200, 0, bits=24)
     inst("visibility", 20, 105, 0)
-    acc = sum(phys("tp_1h", run, k) for k in range(1, lead + 1))
-    out.append(encode_message(acc, param=61, time_range=4, p1=0, p2=lead, decimal=2, **kw))
+    acc = sum((phys("tp_1h", run, k) for k in range(1, lead + 1)),
+              np.zeros((NLAT, NLON)))
+    out.append(encode_message(acc, param=61, time_range=4, p1=0, p2=lead, decimal=2,
+                              bits=16 if lead else 0, **kw))
     return b"".join(out)
 
 
@@ -272,17 +272,33 @@ def stream(cfg, root, client, upstream, **kw):
 
 
 def expected(cfg, name, run, lead):
-    """The regridded physical value the store should hold for one field."""
-    schema = hm.Schema.from_config(cfg)
-    w = hm.WEIGHTS.get(schema)
-    return w.apply(phys(name, run, lead), min_coverage=schema.min_coverage,
-                   min_valid=schema.min_valid), w.outside(schema.min_coverage)
+    """The physical value the store should hold for one field: 2 x 2 block means
+    (gust: maxima) of the 12 x 8 source cells kept, north-up - computed here
+    directly, not with the module's own function."""
+    v = phys(name, run, lead)[:, :8].reshape(6, 2, 4, 2)
+    if name == "gust10":
+        out = v.max(axis=(1, 3))
+    elif name == "cloud_base":
+        ok = np.isfinite(v)
+        with np.errstate(all="ignore"):
+            out = np.where(ok, v, 0).sum(axis=(1, 3)) / ok.sum(axis=(1, 3))
+        out[ok.mean(axis=(1, 3)) < 0.5] = np.nan
+    else:
+        out = v.mean(axis=(1, 3))
+    return out[::-1]
 
 
 def test_schema_reads_the_real_config():
     schema = hm.Schema.from_config(load_product_config("knmi_harmonie", "cy43_nl_4km"))
-    assert schema.leads == tuple(range(1, 13))
-    assert schema.p1_leads == list(range(1, 13))
+    assert schema.leads == tuple(range(13)) and schema.nc_leads == list(range(1, 13))
+    assert schema.p1_leads == list(range(13)) and schema.factor == 2
+    schema.check_grid()
+    two = hm.Schema.from_config(load_product_config("knmi_harmonie", "cy43_nl_2km"))
+    assert two.factor == 1 and two.grid_id == "harmonie_nl_2km"
+    two.check_grid()
+    gust = next(f for f in schema.fields if f.name == "gust10")
+    assert gust.aggregate == "max" and not gust.lead0
+    assert [f.name for f in schema.fields if not f.lead0] == ["gust10", "tp_1h"]
     assert len(schema.nc_params) == 9  # the wind components share a file
     assert [f.name for f in schema.fields] == ["mslp", "t2m", "rh2m", "u10", "v10", "gust10",
                                                "mld", "cloud_base", "visibility", "tp_1h"]
@@ -311,18 +327,52 @@ def test_netcdf_and_p1_of_the_same_run_pack_to_the_same_store_values(tmp_path, u
     assert a.check.ok and b.check.ok, (a.check.errors, b.check.errors)
     assert a.check.fields_present == b.check.fields_present == [f.name for f in schema.fields]
     for spec in schema.fields:
-        diff = np.abs(a.codes[spec.name].astype(int) - b.codes[spec.name].astype(int))
-        assert diff.max() <= 1, spec.name  # GRIB packing may move a rounding by one code
-        want, outside = expected(cfg, spec.name, run, 2)
         enc = spec.encoding
-        got = a.codes[spec.name][1]
-        assert (got[outside] == enc.out_of_image).all()
-        if spec.undefined == "cloud_free":
-            assert (got[~outside & np.isnan(want)] == hm.cloud_free_code(enc)).all()
-        ok = ~outside & np.isfinite(want)
-        np.testing.assert_allclose(got[ok] * enc.scale + enc.offset, want[ok], rtol=1e-6,
-                                   atol=enc.scale / 2 + 1e-9, err_msg=spec.name)
+        # Leads 1-3 agree; GRIB packing may move a rounding by one code.
+        diff = np.abs(a.codes[spec.name][1:].astype(int) - b.codes[spec.name][1:].astype(int))
+        assert diff.max() <= 1, spec.name
+        # Lead 0: never from the NetCDF; from P1 except the past-hour fields.
+        assert (a.codes[spec.name][0] == enc.missing).all(), spec.name
+        assert (b.codes[spec.name][0] == enc.missing).all() == (not spec.lead0), spec.name
+        for k, lead in enumerate(LEADS):
+            if lead == 0 and not spec.lead0:
+                continue
+            want = expected(cfg, spec.name, run, lead)
+            got = b.codes[spec.name][k]
+            assert got.shape == (6, 4)
+            if spec.undefined == "cloud_free":
+                assert (got[np.isnan(want)] == hm.cloud_free_code(enc)).all()
+                assert np.isnan(want).any() and np.isfinite(want).any()
+            ok = np.isfinite(want)
+            np.testing.assert_allclose(got[ok] * enc.scale + enc.offset, want[ok], rtol=1e-6,
+                                       atol=enc.scale / 2 + 1e-9, err_msg=spec.name)
     assert a.check.fingerprint != b.check.fingerprint
+
+
+def test_block_reduce_means_maxima_edges_and_north_up():
+    v = np.arange(5 * 7, dtype=float).reshape(5, 7)  # rows south to north
+    one = hm.block_reduce(v, 1)
+    np.testing.assert_array_equal(one, v[::-1])
+    two = hm.block_reduce(v, 2)
+    assert two.shape == (2, 3)  # the northern row and the eastern column are dropped
+    np.testing.assert_allclose(two[-1, 0], v[0:2, 0:2].mean())  # south-west block, last row
+    np.testing.assert_allclose(two[0, 2], v[2:4, 4:6].mean())
+    np.testing.assert_allclose(hm.block_reduce(v, 2, "max")[-1, 0], v[1, 1])
+    w = v.copy()
+    w[0, 0] = np.nan
+    np.testing.assert_allclose(hm.block_reduce(w, 2)[-1, 0], np.nanmean(w[0:2, 0:2]))
+    w[0:2, 0:2] = [[np.nan, np.nan], [np.nan, 1.0]]
+    assert np.isnan(hm.block_reduce(w, 2, min_valid=0.5)[-1, 0])
+    stack = np.stack([v, v + 1])
+    assert hm.block_reduce(stack, 2).shape == (2, 2, 3)
+
+
+def test_a_grid_that_does_not_match_the_factor_is_refused(monkeypatch):
+    cfg = tiny_cfg()
+    extra = json.loads(json.dumps(cfg.extra))
+    extra["harmonie"]["coarsen_factor"] = 1
+    with pytest.raises(ValueError, match="coarsened by 1"):
+        hm.Schema.from_config(cfg.model_copy(update={"extra": extra})).check_grid()
 
 
 def test_a_unit_change_fails_the_file_not_the_run(tmp_path, upstream):
@@ -388,14 +438,25 @@ def test_stream_two_days_flags_partial_and_corrupt_runs_and_cleans_up(tmp_path, 
     # A partial run's missing field reads missing; its other fields are there.
     enc = hm.Schema.from_config(cfg).fields[7].encoding
     assert (ds["cloud_base"].values[1] == enc.missing).all()
-    want, outside = expected(cfg, "mslp", DAY_NC + timedelta(hours=1), 3)
+    want = expected(cfg, "mslp", DAY_NC + timedelta(hours=1), 3)
     mslp = hm.Schema.from_config(cfg).fields[0].encoding
-    got = ds["mslp"].values[1, 2].astype(float) * mslp.scale + mslp.offset
-    np.testing.assert_allclose(got[~outside], want[~outside], atol=mslp.scale / 2)
-    # Decoded through xarray's CF rules, outside and missing are NaN.
+    got = ds["mslp"].values[1, 3].astype(float) * mslp.scale + mslp.offset
+    np.testing.assert_allclose(got, want, atol=mslp.scale / 2)
+    # Decoded through xarray's CF rules, missing is NaN: a NetCDF run's lead 0,
+    # every field of a run that is not there, a P1 run's past-hour fields at +0.
     dec = gridded.read(cfg.store_id, root)
-    assert np.isnan(dec["t2m"].values[0][:, outside]).all()
+    assert np.isnan(dec["t2m"].values[0, 0]).all() and np.isfinite(dec["t2m"].values[0, 1]).all()
     assert np.isnan(dec["t2m"].values[3]).all()
+    assert np.isfinite(dec["t2m"].values[24, 0]).all()
+    assert np.isnan(dec["gust10"].values[24, 0]).all()
+    assert np.isnan(dec["tp_1h"].values[24, 0]).all()
+    # The grid: HARMONIE's own lat/lon cells (2 x 2 block centres), north-up.
+    np.testing.assert_allclose(ds["x"].values, LON0 + DLON / 2 + 2 * DLON * np.arange(4))
+    np.testing.assert_allclose(ds["y"].values,
+                               (LAT0 + DLAT / 2 + 2 * DLAT * np.arange(6))[::-1])
+    assert ds["x"].attrs["units"] == "degrees_east"
+    np.testing.assert_allclose(ds["lat"].values[:, 0], ds["y"].values, atol=1e-5)
+    np.testing.assert_allclose(ds["lon"].values[0], ds["x"].values, atol=1e-5)
 
     # Raw data is gone; the failed T file and the failed P1 run are kept aside.
     raw = root / "raw/nwp/knmi_harmonie/cy43_nl_4km"
@@ -410,7 +471,7 @@ def test_stream_two_days_flags_partial_and_corrupt_runs_and_cleans_up(tmp_path, 
     prov = pl.read_parquet(gridded.store_path(root, cfg.store_id) / "provenance.parquet")
     assert prov.height == 6
     row = prov.filter(pl.col("filename") == "HARM43_V1_P1_2026010800.tar").row(0, named=True)
-    assert row["source_dataset"] == "harmonie_arome_cy43_p1" and row["n_files"] == 3
+    assert row["source_dataset"] == "harmonie_arome_cy43_p1" and row["n_files"] == 4  # +0..+3
 
     # Store metadata: the run axis, the cloud-free code.
     import zarr
@@ -457,7 +518,7 @@ def test_a_killed_p1_download_resumes_from_its_member_index(tmp_path, upstream):
     d.mkdir()
     hm.download_p1(client, files, d, schema, factory)
     members = sorted(p.name for p in d.iterdir() if not p.name.startswith("."))
-    assert members == [schema.p1_member_name(DAY_P1, k) for k in (1, 2, 3)]
+    assert members == [schema.p1_member_name(DAY_P1, k) for k in (0, 1, 2, 3)]
     # Lose one member, as a kill mid-run would: only it is read again, no walk.
     (d / members[1]).unlink()
     _, fresh = hm.download_p1(client, files, d, schema, factory)

@@ -1,4 +1,4 @@
-"""KNMI HARMONIE-AROME Cy43 NL forecasts from the KNMI Data Platform, regridded and packed.
+"""KNMI HARMONIE-AROME Cy43 NL forecasts from the KNMI Data Platform, on their own grid.
 
 Streamed day by day (24 hourly runs) by ``meteopack stream knmi_harmonie
 --product cy43_nl_4km`` (meteopack.jobs.stream_kdp with the ``harmonie_cy43``
@@ -39,8 +39,16 @@ GRIB keys and step ranges, and converted values against the variable's
 fails is quarantined and its field left missing (the run is *partial*); a P1
 run with any failing member is not packed at all.
 
-The fields are area-averaged onto the store's grid (:mod:`meteopack.core.regrid`)
-and encoded to 16 bits with the variables' fixed calibrations.
+The fields stay on HARMONIE's own regular lat/lon grid - nothing is
+reprojected; a consumer regrids at load time - optionally coarsened by an
+integer factor with block means (:func:`block_reduce`; the gust takes the
+block maximum), turned north-up, and encoded to 16 bits with the variables'
+fixed calibrations.
+
+Lead 0: P1 has a +0 member, the NetCDF does not. NetCDF runs therefore hold
+the missing code at lead 0 for every field; P1 runs hold +0 for every field
+except the two defined over the past hour (gust, 1 h precipitation), which
+have no past hour inside the run and are missing at lead 0 everywhere.
 """
 from __future__ import annotations
 
@@ -59,7 +67,7 @@ from typing import Any
 
 import numpy as np
 
-from meteopack.core import grids, regrid, remote_tar
+from meteopack.core import grids, remote_tar
 from meteopack.core.config import ProductConfig
 from meteopack.core.encoding import Encoding, encode
 from meteopack.core.http import IntegrityError
@@ -115,6 +123,26 @@ class FieldSpec:
     valid_min: float | None
     valid_max: float | None
     encoding: Encoding
+    #: How a coarsening block is reduced: ``mean`` (area mean) or ``max``.
+    aggregate: str = "mean"
+    #: False for a field defined over the past hour, which has no +0.
+    lead0: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class LatLonGrid:
+    """A regular lon/lat grid by its first cell centre, step and size (rows south to north)."""
+
+    lat0: float
+    dlat: float
+    nlat: int
+    lon0: float
+    dlon: float
+    nlon: int
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (self.nlat, self.nlon)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,10 +151,10 @@ class Schema:
 
     leads: tuple[int, ...]
     p1_from: datetime
-    source: regrid.LatLonGrid
+    source: LatLonGrid
     tolerance_deg: float
-    oversample: int
-    min_coverage: float
+    #: Block size of the coarsening (1 = the native grid).
+    factor: int
     min_valid: float
     nc_prefix: str
     grid_mapping_proj4: str
@@ -146,11 +174,9 @@ class Schema:
         if cfg.levels is None or cfg.levels.name != "lead_time":
             raise ValueError(f"{cfg.store_id}: levels must be the lead_time axis")
         leads = tuple(int(v) for v in cfg.levels.values)
-        if any(float(v) != int(v) or v < 1 for v in cfg.levels.values):
-            raise ValueError(f"{cfg.store_id}: lead times must be whole hours >= 1 "
-                             f"(the NetCDF archive has no +0)")
+        if any(float(v) != int(v) or v < 0 for v in cfg.levels.values):
+            raise ValueError(f"{cfg.store_id}: lead times must be whole hours >= 0")
         g = dict(spec["source_grid"])
-        rg = dict(spec.get("regrid") or {})
         nc = dict(spec.get("netcdf") or {})
         p1 = dict(spec.get("p1") or {})
         declared = {v.name: v for v in cfg.variables}
@@ -172,7 +198,10 @@ class Schema:
                 p1_combine=str(q.get("combine", "single")),
                 undefined=str(f.get("undefined", "missing")),
                 clip_min=None if f.get("clip_min") is None else float(f["clip_min"]),
-                valid_min=var.valid_min, valid_max=var.valid_max, encoding=enc))
+                valid_min=var.valid_min, valid_max=var.valid_max, encoding=enc,
+                aggregate=str(f.get("aggregate", "mean")), lead0=bool(f.get("lead0", True))))
+            if fields[-1].aggregate not in ("mean", "max"):
+                raise ValueError(f"{name}: unknown aggregate {fields[-1].aggregate!r}")
             if fields[-1].p1_combine not in ("single", "hypot", "accumulation"):
                 raise ValueError(f"{name}: unknown p1.combine {fields[-1].p1_combine!r}")
             if fields[-1].undefined not in ("missing", "cloud_free"):
@@ -184,13 +213,12 @@ class Schema:
         return cls(
             leads=leads,
             p1_from=p1_from if p1_from.tzinfo else p1_from.replace(tzinfo=UTC),
-            source=regrid.LatLonGrid(lat0=float(g["lat0"]), dlat=float(g["dlat"]),
-                                     nlat=int(g["nlat"]), lon0=float(g["lon0"]),
-                                     dlon=float(g["dlon"]), nlon=int(g["nlon"])),
+            source=LatLonGrid(lat0=float(g["lat0"]), dlat=float(g["dlat"]),
+                              nlat=int(g["nlat"]), lon0=float(g["lon0"]),
+                              dlon=float(g["dlon"]), nlon=int(g["nlon"])),
             tolerance_deg=float(g.get("tolerance_deg", 1e-4)),
-            oversample=int(rg.get("oversample", 10)),
-            min_coverage=float(rg.get("min_coverage", 0.5)),
-            min_valid=float(rg.get("min_valid", 0.5)),
+            factor=int(spec.get("coarsen_factor", 1)),
+            min_valid=float(spec.get("min_valid", 0.5)),
             nc_prefix=str(nc.get("prefix", "uwcw_ha43_nl_2km_")),
             grid_mapping_proj4=str(nc.get("grid_mapping_proj4", "")),
             p1_dataset=str(p1.get("dataset", "harmonie_arome_cy43_p1")),
@@ -204,10 +232,35 @@ class Schema:
             listing_ttl_s=float(spec.get("listing_ttl_s", 21600)),
         )
 
+    def check_grid(self) -> None:
+        """The store's grid must be exactly the (coarsened) source grid: a config
+        edit that changes one without the other would misplace every cell."""
+        g, f = self.source, self.factor
+        if f < 1:
+            raise ValueError(f"coarsen_factor {f} must be >= 1")
+        grid = grids.get(self.grid_id)
+        ny, nx = g.nlat // f, g.nlon // f
+        if grid.shape != (ny, nx):
+            raise ValueError(f"grid {grid.id} is {grid.shape}; the source coarsened by {f} is "
+                             f"{(ny, nx)}")
+        want = ((g.lon0 - g.dlon / 2, g.lon0 - g.dlon / 2 + nx * f * g.dlon),
+                (g.lat0 - g.dlat / 2, g.lat0 - g.dlat / 2 + ny * f * g.dlat))
+        (x0, x1), (y0, y1) = grid.projected_extent()
+        if not np.allclose([x0, x1, y0, y1], [*want[0], *want[1]], atol=1e-6):
+            raise ValueError(f"grid {grid.id} extent {((x0, x1), (y0, y1))} is not the "
+                             f"coarsened source's {want}")
+        if grid.grid_mapping_name != "latitude_longitude":
+            raise ValueError(f"grid {grid.id} is not a lat/lon grid")
+
     @property
     def nc_params(self) -> list[str]:
         """The NetCDF files a run needs, one per parameter (the wind components share one)."""
         return list(dict.fromkeys(f.nc_param for f in self.fields))
+
+    @property
+    def nc_leads(self) -> list[int]:
+        """The leads the NetCDF holds (+1 onwards)."""
+        return [lead for lead in self.leads if lead >= 1]
 
     @property
     def p1_leads(self) -> list[int]:
@@ -338,11 +391,11 @@ def check_netcdf_field(h5, filename: str, specs: Sequence[FieldSpec], schema: Sc
 
     Returns ``(values by field name, descriptor, errors)``; with errors the
     values are not to be used. Values are float64 ``(n_leads, nlat, nlon)``,
-    rows south to north.
+    rows south to north, NaN at a lead the file does not hold (+0).
     """
     err: list[str] = []
     g = schema.source
-    n_lead = max(schema.leads)
+    n_lead = max(schema.nc_leads)
     attrs = {k: _text(v) for k, v in h5.attrs.items()}
     if attrs.get("cycle_datetime") != f"{run:%Y-%m-%dT%H}":
         err.append(f"cycle_datetime {attrs.get('cycle_datetime')!r}, expected "
@@ -380,7 +433,7 @@ def check_netcdf_field(h5, filename: str, specs: Sequence[FieldSpec], schema: Sc
         if lon.size else [],
         "n_time": int(times.size), "grid_mapping": proj4, "fields": {}}
     out: dict[str, np.ndarray] = {}
-    index = [lead - 1 for lead in schema.leads]
+    index = [lead - 1 for lead in schema.nc_leads]
     for spec in specs:
         if spec.nc_var not in h5:
             err.append(f"no variable {spec.nc_var!r}")
@@ -416,7 +469,10 @@ def check_netcdf_field(h5, filename: str, specs: Sequence[FieldSpec], schema: Sc
             continue
         raw = np.asarray(ds[index[0]:index[-1] + 1, 0], dtype="float64")
         raw = raw[[i - index[0] for i in index]]
-        values = raw * spec.factor + spec.offset
+        # Every store lead; the ones the NetCDF lacks (+0) stay NaN.
+        values = np.full((len(schema.leads), g.nlat, g.nlon), np.nan)
+        rows = [schema.leads.index(lead) for lead in schema.nc_leads]
+        values[rows] = raw * spec.factor + spec.offset
         rng = _range_errors(spec, values)
         if rng:
             err += rng
@@ -459,7 +515,7 @@ def read_netcdf_run(directory: Path, files: RunFiles, schema: Schema
         values.update(got)
     check.fields_present = [f.name for f in schema.fields if f.name in values]
     check.fields_missing = [f.name for f in schema.fields if f.name not in values]
-    check.descriptor = {"kind": NETCDF, "leads": list(schema.leads), "files": descriptors}
+    check.descriptor = {"kind": NETCDF, "leads": schema.nc_leads, "files": descriptors}
     check.fingerprint = _fingerprint(check.descriptor)
     check.storage = f"netcdf {' / '.join(sorted(storage))}" if storage else "netcdf"
     if not values:
@@ -509,7 +565,8 @@ def read_p1_members(directory: Path, files: RunFiles, schema: Schema
                 per_key[str(list(key))] = d
                 bits.add(msg.bits)
                 start, end = msg.step_range
-                want = {0: (lead, lead), 2: (lead - 1, lead), 4: (0, lead)}.get(msg.time_range)
+                want = {0: (lead, lead), 2: (max(lead - 1, 0), lead),
+                        4: (0, lead)}.get(msg.time_range)
                 if want is None or (start, end) != want:
                     errs.append(f"{name}: {list(key)} step range {(start, end)}, expected {want}")
                 if msg.time_unit != 1:
@@ -536,8 +593,8 @@ def read_p1_members(directory: Path, files: RunFiles, schema: Schema
         if errs:
             check.errors += errs
             check.quarantine.append(name)
-    # The structure, the same for every lead (steps are relative to the lead).
-    structure = next(iter(descriptor.values()), {})
+    # The structure, the same for every lead from +1 (steps are relative to the lead).
+    structure = descriptor.get("1") or next(iter(descriptor.values()), {})
     check.descriptor = {"kind": P1, "leads": list(schema.leads), "messages": structure}
     check.fingerprint = _fingerprint(check.descriptor)
     check.storage = f"grib1 simple {'/'.join(str(b) for b in sorted(bits))} bit"
@@ -547,10 +604,15 @@ def read_p1_members(directory: Path, files: RunFiles, schema: Schema
     for spec in schema.fields:
         stack = []
         for lead in schema.leads:
+            if lead == 0 and not spec.lead0:
+                # Gust and 1 h precipitation are over the past hour: none at +0.
+                stack.append(np.full((g.nlat, g.nlon), np.nan))
+                continue
             parts = [fields[lead][k] for k in spec.p1_keys]
             if spec.p1_combine == "hypot":
                 v = np.hypot(parts[0], parts[1])
             elif spec.p1_combine == "accumulation":
+                # APCP is accumulated since the run start, and APCP(0) = 0.
                 prev = fields[lead - 1][spec.p1_keys[0]] if lead - 1 >= 1 else 0.0
                 v = parts[0] - prev
             else:
@@ -586,12 +648,43 @@ def cloud_free_code(enc: Encoding) -> int:
     return min(enc.reserved) - 1
 
 
-def encode_field(values: np.ndarray, spec: FieldSpec, outside: np.ndarray
-                 ) -> tuple[np.ndarray, dict]:
-    """Regridded physical values ``(n_leads, ny, nx)`` -> codes, with what was clipped.
+def block_reduce(values: np.ndarray, factor: int, how: str = "mean",
+                 min_valid: float = 0.5) -> np.ndarray:
+    """``(..., nlat, nlon)`` rows south to north -> ``(..., nlat // f, nlon // f)`` north-up.
 
-    NaN inside the domain is `missing`, or "no cloud base" for a field whose
-    undefined value means cloud-free; `outside` cells get `out_of_image`.
+    Each output cell is the mean (or, ``how="max"``, the maximum) of the
+    ``factor x factor`` block of source cells it covers - no interpolation.
+    NaN source cells are left out; a block with less than `min_valid` of its
+    cells finite is NaN. When `factor` does not divide the grid, the last
+    ``nlat % f`` rows (the northern edge) and ``nlon % f`` columns (the
+    eastern edge) are dropped rather than averaged over a partial block, so
+    every output cell is a full block; the store's grid says so in its extent.
+    `factor` 1 only turns the field north-up.
+    """
+    v = np.asarray(values, dtype="float64")
+    f = int(factor)
+    if f == 1:
+        return v[..., ::-1, :].copy()
+    ny, nx = v.shape[-2] // f, v.shape[-1] // f
+    blocks = v[..., : ny * f, : nx * f].reshape(*v.shape[:-2], ny, f, nx, f)
+    finite = np.isfinite(blocks)
+    share = finite.mean(axis=(-3, -1))
+    with np.errstate(all="ignore"):
+        if how == "max":
+            out = np.where(finite, blocks, -np.inf).max(axis=(-3, -1))
+        else:
+            out = np.where(finite, blocks, 0.0).sum(axis=(-3, -1)) / finite.sum(axis=(-3, -1))
+    out[share < min_valid] = np.nan
+    return out[..., ::-1, :]
+
+
+def encode_field(values: np.ndarray, spec: FieldSpec, lead_ok: np.ndarray
+                 ) -> tuple[np.ndarray, dict]:
+    """Store-grid physical values ``(n_leads, ny, nx)`` -> codes, with what was clipped.
+
+    NaN is `missing`, or "no cloud base" for a field whose undefined value
+    means cloud-free; leads the run does not have (`lead_ok` False) are
+    `missing` whatever the field.
     """
     enc = spec.encoding
     v = np.asarray(values, dtype="float64")
@@ -601,44 +694,30 @@ def encode_field(values: np.ndarray, spec: FieldSpec, outside: np.ndarray
     info = np.iinfo(enc.dtype)
     q = np.rint((v - enc.offset) / enc.scale)
     finite = np.isfinite(q)
-    inside = ~np.broadcast_to(outside, v.shape)
+    have = np.broadcast_to(np.asarray(lead_ok, dtype=bool)[:, None, None], v.shape)
     stats = {
-        "n_clipped_low": int(((q < info.min) & finite & inside).sum()),
-        "n_clipped_high": int(((q > ceiling) & finite & inside).sum()),
-        "n_undefined": int((~finite & inside).sum()),
-        "min": float(np.nanmin(v[inside])) if (finite & inside).any() else None,
-        "max": float(np.nanmax(v[inside])) if (finite & inside).any() else None,
+        "n_clipped_low": int(((q < info.min) & finite).sum()),
+        "n_clipped_high": int(((q > ceiling) & finite).sum()),
+        "n_undefined": int((~finite & have).sum()),
+        "min": float(np.nanmin(v)) if finite.any() else None,
+        "max": float(np.nanmax(v)) if finite.any() else None,
     }
     top = ceiling * enc.scale + enc.offset
     codes = encode(np.where(finite, np.minimum(v, top), np.nan), enc,
                    source_scale=1.0, source_offset=0.0)
     if spec.undefined == "cloud_free":
-        codes[~finite] = cloud_free_code(enc)
-    codes[np.broadcast_to(outside, v.shape)] = enc.out_of_image
+        codes[~finite & have] = cloud_free_code(enc)
+    codes[~have] = enc.missing
     return codes, stats
 
 
-class _WeightsCache:
-    """Regrid weights, built once per process (a few seconds) and shared by the pack threads."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._cache: dict[tuple, regrid.AreaWeights] = {}
-
-    def get(self, schema: Schema) -> regrid.AreaWeights:
-        key = (schema.source, schema.grid_id, schema.oversample)
-        with self._lock:
-            if key not in self._cache:
-                self._cache[key] = regrid.latlon_to_grid(schema.source, grids.get(schema.grid_id),
-                                                         schema.oversample)
-            return self._cache[key]
-
-
-WEIGHTS = _WeightsCache()
+def lead_available(spec: FieldSpec, kind: str, leads: Sequence[int]) -> np.ndarray:
+    """Which of the store's leads a run of this packaging has for this field."""
+    return np.array([lead >= 1 or (kind == P1 and spec.lead0) for lead in leads])
 
 
 def pack_run(directory: Path, files: RunFiles, schema: Schema) -> PackedRun:
-    """Check, read, regrid and encode one run. A run with no usable field yields no codes."""
+    """Check, read, coarsen and encode one run. A run with no usable field yields no codes."""
     t0 = time.perf_counter()
     try:
         if files.kind == P1:
@@ -651,16 +730,15 @@ def pack_run(directory: Path, files: RunFiles, schema: Schema) -> PackedRun:
         return PackedRun(check, None, read_s=time.perf_counter() - t0)
     if not check.ok:
         return PackedRun(check, None, read_s=time.perf_counter() - t0)
-    weights = WEIGHTS.get(schema)
-    outside = weights.outside(schema.min_coverage)
     codes: dict[str, np.ndarray] = {}
     stats: dict[str, dict] = {}
     for spec in schema.fields:
         if spec.name not in values:
             continue
-        mean = weights.apply(values[spec.name], min_coverage=schema.min_coverage,
-                             min_valid=schema.min_valid)
-        codes[spec.name], stats[spec.name] = encode_field(mean, spec, outside)
+        reduced = block_reduce(values[spec.name], schema.factor, spec.aggregate,
+                               schema.min_valid)
+        codes[spec.name], stats[spec.name] = encode_field(
+            reduced, spec, lead_available(spec, files.kind, schema.leads))
     return PackedRun(check, codes, stats, time.perf_counter() - t0)
 
 
@@ -746,6 +824,7 @@ class HarmonieFormat:
         self.cfg = cfg
         self.settings = settings
         self.schema = Schema.from_config(cfg)
+        self.schema.check_grid()
         grid = grids.get(cfg.grid_id)
         self.variables: dict[str, Encoding] = {f.name: f.encoding for f in self.schema.fields}
         self.target = self.schema.fields[0].encoding
@@ -899,10 +978,15 @@ class HarmonieFormat:
                 "type": "regular lat/lon (south to north)", "lat0": g.lat0, "dlat": g.dlat,
                 "nlat": g.nlat, "lon0": g.lon0, "dlon": g.dlon, "nlon": g.nlon,
                 "proj4": s.grid_mapping_proj4},
-            "regridding": {
-                "method": "area mean (first-order conservative), overlap fractions from "
-                          f"{s.oversample}x{s.oversample} sub-cells per target cell",
-                "min_coverage": s.min_coverage, "min_valid": s.min_valid},
+            "coarsening": {
+                "factor": s.factor,
+                "method": "none: the native grid" if s.factor == 1 else
+                          f"block mean of {s.factor} x {s.factor} native cells (gust: block "
+                          f"maximum), no interpolation; a block needs min_valid of its cells",
+                "min_valid": s.min_valid,
+                "edge": "a remainder of nlat % factor rows (north) and nlon % factor columns "
+                        "(east) would be dropped; none for factor 1 or 2 (390 = 2 x 195)"},
+            "orientation": "north-up: row 0 is the northernmost latitude",
             "p1_from": s.p1_from.isoformat(),
             "lead_times_h": list(s.leads),
             "valid_time": "time + lead_time",
@@ -916,10 +1000,12 @@ class HarmonieFormat:
         for f in self.schema.fields:
             if f.undefined == "cloud_free":
                 code = cloud_free_code(f.encoding)
-                out[f.name] = {"cloud_free_code": code,
-                               "cloud_free_value": code * f.encoding.scale + f.encoding.offset,
-                               "comment": "cloud_free_code (decoded: cloud_free_value) = no "
-                                          "cloud base: less than min_valid of the cell has one"}
+                value = code * f.encoding.scale + f.encoding.offset
+                out[f.name] = {"cloud_free_code": code, "cloud_free_value": value,
+                               "comment": f"MASK IT: code {code} (decodes to {value:g} m) means "
+                                          f"NO CLOUD BASE (a cloud-free column; coarsened: less "
+                                          f"than min_valid of the block has a cloud base). It "
+                                          f"is not a height and is not NaN after decoding."}
         return out
 
     def manifest_extra(self) -> dict:
@@ -933,9 +1019,9 @@ class HarmonieFormat:
                                      if f.undefined == "cloud_free" else {})}
                          for f in s.fields},
             "lead_times_h": list(s.leads),
-            "regridding": self.store_attrs()["regridding"],
-            "orientation": "north-up (y descending); source rows south to north, flipped by "
-                           "the regridding",
+            "coarsening": self.store_attrs()["coarsening"],
+            "orientation": "north-up (y = latitude descending); the source rows run south to "
+                           "north and are flipped",
             "source": {"api": self.settings.base_url,
                        "netcdf": {"dataset": self.settings.dataset,
                                   "version": self.settings.version,
