@@ -1,0 +1,25 @@
+# NOAA Global Forecast System (GFS) 0.25 degree forecasts, from NOAA Open Data
+# Dissemination on AWS (s3://noaa-gfs-bdp-pds, anonymous).
+#
+# Nothing here is fetched with `meteopack fetch`: the products are STREAMED day by
+# day (`meteopack stream noaa_gfs --product state_1h_16km`, which also fills
+# prate_16km; see the product configs), reading only the wanted GRIB messages with
+# byte-range requests, so there is no raw archive and no Source class. This file
+# exists because every source has one: it names the host and the polite rate.
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: noaa_gfs
+
+base_url: https://noaa-gfs-bdp-pds.s3.amazonaws.com
+
+rate_limit:
+  # Public AWS bucket (us-east-1). The stream's own settings are extra.s3 in the
+  # state product config (16 workers).
+  requests_per_second: 200.0
+  max_workers: 16
+  max_retries: 5
+  backoff_seconds: 2.0
+
+# Public bucket (NOAA Open Data): no credentials.
+credentials_env: []

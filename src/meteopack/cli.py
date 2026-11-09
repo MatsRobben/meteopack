@@ -2211,6 +2211,11 @@ def stage_stream(ctx: Context) -> int:
     from meteopack.jobs import stream_kdp
 
     cfg = ctx.cfg
+    if cfg.extra.get("stream_with"):
+        print(f"error: {cfg.store_id} is filled together with another product: run "
+              f"`meteopack stream {cfg.source} --product {cfg.extra['stream_with']}`",
+              file=sys.stderr)
+        return 2
     if cfg.extra.get("stream") not in stream_kdp.REMOTES:
         print(f"error: {cfg.store_id} is not a streamed product (extra.stream: one of "
               f"{', '.join(stream_kdp.REMOTES)})", file=sys.stderr)
@@ -2233,6 +2238,18 @@ def stage_stream(ctx: Context) -> int:
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGUSR1, on_term)
     budget = ctx.args.time_budget * 3600 if ctx.args.time_budget else None
+    if cfg.extra.get("stream_job") == "gfs":
+        # One pass fills two stores: this one and its precipitation companion.
+        from meteopack.jobs import plan as planning
+        from meteopack.jobs import stream_gfs
+
+        companion = planning.load_product_config(
+            cfg.source, cfg.extra["gfs"]["prate"]["product"], configs=ctx.args.configs)
+        return stream_gfs.run(cfg, companion, ctx.root, start, end,
+                              download_workers=ctx.args.download_workers, redo=ctx.args.redo,
+                              time_budget_s=budget, max_days=ctx.args.limit, stop=stop,
+                              requests_per_second=ctx.args.requests_per_second,
+                              log=lambda line: print(line, flush=True))
     return stream_kdp.run(cfg, ctx.root, start, end,
                           download_workers=ctx.args.download_workers,
                           pack_workers=ctx.args.workers, redo=ctx.args.redo,

@@ -1,0 +1,388 @@
+# NOAA GFS 0.25 degree forecast -> the 122 RainPro-8 input fields (Pablos et al., ICLR 2026,
+# Appendix I, Table 11), hourly, regridded to the 16 km RainPro-NL model frame.
+#
+# STREAMED from the public AWS archive (s3://noaa-gfs-bdp-pds, anonymous) one UTC day at a
+# time by `meteopack stream noaa_gfs --product state_1h_16km`, which fills this store AND
+# the precipitation store (extra.gfs.prate.product) in one pass:
+#   .idx -> byte-range GETs of only the wanted GRIB messages -> schema check -> decode ->
+#   regrid -> encode -> write -> read back. Nothing raw is kept (quarantine excepted).
+# (meteopack.jobs.stream_gfs, reader meteopack.sources.nwp.gfs). `fetch`/`pack` refuse it.
+#
+# Time = VALID hour H. The frame comes from run floor6(H) (00/06/12/18 UTC) at lead
+# H - floor6(H) = 0..5 h: the newest run started at or before H, no latency emulated.
+# If that run's file is absent upstream, the frame comes from the previous run at lead
+# 6..11 (`is_fallback` = 1). Per frame: `source_run_time`, `source_lead_h`.
+# All fields are the INSTANTANEOUS ones (GRIB "anl" / "L hour fcst"), never time means.
+#
+# Coverage of the archive (scan of every run 2021-01-01 .. 2026-11-08, see docs/stores.md):
+#   2021-01-01 .. 2021-02-25 18z  only leads f000, f003, ... (3-hourly backfill): hours
+#                                 not divisible by 3 are missing; 7 runs absent entirely
+#   .. 2021-03-22 06z  GFS v15: no CAPE/CIN 90-0 hPa, no LCDC/MCDC, TCDC entire atmosphere
+#                      only as a time mean (not used); SPFH isobaric + ICETK in pgrb2b
+#   2021-02-26 .. 2023-02-02 and 2023-05-01: no CLMR on pressure levels
+#   2023-02-03 ..      all 122 fields
+# A field absent upstream reads as the `missing` code (65534) for that frame; nothing is
+# substituted from another field. `n_fields_missing` counts them per frame.
+source: noaa_gfs
+description: >-
+  NOAA GFS 0.25 deg, the 122 RainPro-8 input fields (instantaneous), hourly valid times
+  from the newest run (leads 0-5 h), bilinear to the 16 km 1536 km KNMI-stereo model frame,
+  uint16 per-field scale/offset.
+product: state_1h_16km
+version: 1
+
+cadence_seconds: 3600
+grid_id: knmi_stereo_16km_1536
+
+store:
+  kind: gridded
+  # One valid hour per inner chunk (96 x 96 = 18 KB raw); 7 days (168 h) per shard, so the
+  # full archive is ~37k files (122 fields x ~310 weeks) rather than ~261k with one-day
+  # shards. The stream writes a day at a time into its week's shard (one writer, under the
+  # stream's lock), which rewrites that shard file: 4 days streamed in 131 s against 132 s
+  # with one-day shards; 30-day shards took 221 s (2026-11-09, 12 CPUs, 32 workers).
+  chunks: {time: 1, y: 96, x: 96}
+  shard: {time: 168, y: 96, x: 96}
+  compressor: blosc
+  compression_level: 5
+  partition_by: [year]
+
+raw_layout: {archive: none, granularity: day}
+
+retention:
+  # No raw files at all: messages live in memory. Ones that fail their check are kept
+  # in raw/nwp/noaa_gfs/state_1h_16km/quarantine/.
+  raw: {keep: false, after: pack}
+  canonical: {keep: true}
+  derived: {keep: true}
+
+attrs:
+  title: NOAA GFS 0.25 deg, 122 RainPro-8 input fields, hourly, 16 km KNMI-stereo model frame
+  institution: NOAA/NCEP (GFS); packed by meteopack
+  source: >-
+    NOAA Global Forecast System 0.25 deg forecasts (pgrb2.0p25 and pgrb2b.0p25 GRIB2), NOAA
+    Open Data Dissemination on AWS, s3://noaa-gfs-bdp-pds (https://noaa-gfs-bdp-pds.s3.amazonaws.com).
+    GFS v15 up to 2021-03-22 06z, v16 after (and its later updates).
+  references: >-
+    Pablos et al. (2026), RainPro-8, ICLR 2026, Appendix I (Table 11);
+    https://www.nco.ncep.noaa.gov/pmb/products/gfs/
+  comment: >-
+    uint16 codes; value = scale * code + offset per field (the field's attrs). 65534 =
+    field not available for this frame (absent upstream, or failed its check), 65535 =
+    undefined at this pixel (masked by the GRIB bitmap, e.g. snow fields over sea). Bilinear
+    from the 0.25 deg grid, masked neighbours dropped; CRAIN/CSNOW/CFRZR/CICEP/CPOFP nearest
+    neighbour. Values outside a field's range are clipped (counted in the day status).
+    PRATE converted to mm/h (x 3600).
+
+variables:
+  - {name: lftx4_sfc, source_key: "4LFTX:surface", units: "K", long_name: "Best (4-layer) lifted index, surface", valid_min: -50, valid_max: 81.066, encoding: {dtype: uint16, scale: 0.002, offset: -50}}
+  - {name: absv_100hpa, source_key: "ABSV:100 mb", units: "s-1", long_name: "Absolute vorticity, 100 hPa", valid_min: -0.005, valid_max: 0.0081066, encoding: {dtype: uint16, scale: 2e-07, offset: -0.005}}
+  - {name: absv_250hpa, source_key: "ABSV:250 mb", units: "s-1", long_name: "Absolute vorticity, 250 hPa", valid_min: -0.005, valid_max: 0.0081066, encoding: {dtype: uint16, scale: 2e-07, offset: -0.005}}
+  - {name: absv_500hpa, source_key: "ABSV:500 mb", units: "s-1", long_name: "Absolute vorticity, 500 hPa", valid_min: -0.005, valid_max: 0.0081066, encoding: {dtype: uint16, scale: 2e-07, offset: -0.005}}
+  - {name: absv_850hpa, source_key: "ABSV:850 mb", units: "s-1", long_name: "Absolute vorticity, 850 hPa", valid_min: -0.005, valid_max: 0.0081066, encoding: {dtype: uint16, scale: 2e-07, offset: -0.005}}
+  - {name: absv_1000hpa, source_key: "ABSV:1000 mb", units: "s-1", long_name: "Absolute vorticity, 1000 hPa", valid_min: -0.005, valid_max: 0.0081066, encoding: {dtype: uint16, scale: 2e-07, offset: -0.005}}
+  - {name: cape_sfc, source_key: "CAPE:surface", units: "J kg-1", long_name: "Convective available potential energy, surface", valid_min: 0, valid_max: 13106.6, encoding: {dtype: uint16, scale: 0.2, offset: 0}}
+  - {name: cape_180_0hpa_agl, source_key: "CAPE:180-0 mb above ground", units: "J kg-1", long_name: "Convective available potential energy, 180-0 hPa above ground", valid_min: 0, valid_max: 13106.6, encoding: {dtype: uint16, scale: 0.2, offset: 0}}
+  - {name: cape_90_0hpa_agl, source_key: "CAPE:90-0 mb above ground", units: "J kg-1", long_name: "Convective available potential energy, 90-0 hPa above ground", valid_min: 0, valid_max: 13106.6, encoding: {dtype: uint16, scale: 0.2, offset: 0}}
+  - {name: cape_255_0hpa_agl, source_key: "CAPE:255-0 mb above ground", units: "J kg-1", long_name: "Convective available potential energy, 255-0 hPa above ground", valid_min: 0, valid_max: 13106.6, encoding: {dtype: uint16, scale: 0.2, offset: 0}}
+  - {name: cfrzr_sfc, source_key: "CFRZR:surface", units: "1", long_name: "Categorical freezing rain, surface", valid_min: 0, valid_max: 1, encoding: {dtype: uint16, scale: 1, offset: 0}}
+  - {name: cicep_sfc, source_key: "CICEP:surface", units: "1", long_name: "Categorical ice pellets, surface", valid_min: 0, valid_max: 1, encoding: {dtype: uint16, scale: 1, offset: 0}}
+  - {name: cin_sfc, source_key: "CIN:surface", units: "J kg-1", long_name: "Convective inhibition, surface", valid_min: -3000, valid_max: 276.65, encoding: {dtype: uint16, scale: 0.05, offset: -3000}}
+  - {name: cin_180_0hpa_agl, source_key: "CIN:180-0 mb above ground", units: "J kg-1", long_name: "Convective inhibition, 180-0 hPa above ground", valid_min: -3000, valid_max: 276.65, encoding: {dtype: uint16, scale: 0.05, offset: -3000}}
+  - {name: cin_90_0hpa_agl, source_key: "CIN:90-0 mb above ground", units: "J kg-1", long_name: "Convective inhibition, 90-0 hPa above ground", valid_min: -3000, valid_max: 276.65, encoding: {dtype: uint16, scale: 0.05, offset: -3000}}
+  - {name: cin_255_0hpa_agl, source_key: "CIN:255-0 mb above ground", units: "J kg-1", long_name: "Convective inhibition, 255-0 hPa above ground", valid_min: -3000, valid_max: 276.65, encoding: {dtype: uint16, scale: 0.05, offset: -3000}}
+  - {name: clmr_250hpa, source_key: "CLMR:250 mb", units: "kg kg-1", long_name: "Cloud (liquid water) mixing ratio, 250 hPa", valid_min: 0, valid_max: 0.00524264, encoding: {dtype: uint16, scale: 8e-08, offset: 0}}
+  - {name: clmr_500hpa, source_key: "CLMR:500 mb", units: "kg kg-1", long_name: "Cloud (liquid water) mixing ratio, 500 hPa", valid_min: 0, valid_max: 0.00524264, encoding: {dtype: uint16, scale: 8e-08, offset: 0}}
+  - {name: clmr_850hpa, source_key: "CLMR:850 mb", units: "kg kg-1", long_name: "Cloud (liquid water) mixing ratio, 850 hPa", valid_min: 0, valid_max: 0.00524264, encoding: {dtype: uint16, scale: 8e-08, offset: 0}}
+  - {name: clmr_1000hpa, source_key: "CLMR:1000 mb", units: "kg kg-1", long_name: "Cloud (liquid water) mixing ratio, 1000 hPa", valid_min: 0, valid_max: 0.00524264, encoding: {dtype: uint16, scale: 8e-08, offset: 0}}
+  - {name: cpofp_sfc, source_key: "CPOFP:surface", units: "%", long_name: "Percent frozen precipitation, surface", valid_min: -50, valid_max: 113.8325, encoding: {dtype: uint16, scale: 0.0025, offset: -50}}
+  - {name: crain_sfc, source_key: "CRAIN:surface", units: "1", long_name: "Categorical rain, surface", valid_min: 0, valid_max: 1, encoding: {dtype: uint16, scale: 1, offset: 0}}
+  - {name: csnow_sfc, source_key: "CSNOW:surface", units: "1", long_name: "Categorical snow, surface", valid_min: 0, valid_max: 1, encoding: {dtype: uint16, scale: 1, offset: 0}}
+  - {name: cwat_atm, source_key: "CWAT:entire atmosphere (considered as a single layer)", units: "kg m-2", long_name: "Cloud water, entire atmosphere (single layer)", valid_min: 0, valid_max: 16.38325, encoding: {dtype: uint16, scale: 0.00025, offset: 0}}
+  - {name: dpt_2m, source_key: "DPT:2 m above ground", units: "K", long_name: "Dew point temperature, 2 m", valid_min: 180, valid_max: 343.8325, encoding: {dtype: uint16, scale: 0.0025, offset: 180}}
+  - {name: dzdt_100hpa, source_key: "DZDT:100 mb", units: "m s-1", long_name: "Vertical velocity (geometric), 100 hPa", valid_min: -16, valid_max: 16.7665, encoding: {dtype: uint16, scale: 0.0005, offset: -16}}
+  - {name: dzdt_250hpa, source_key: "DZDT:250 mb", units: "m s-1", long_name: "Vertical velocity (geometric), 250 hPa", valid_min: -16, valid_max: 16.7665, encoding: {dtype: uint16, scale: 0.0005, offset: -16}}
+  - {name: dzdt_500hpa, source_key: "DZDT:500 mb", units: "m s-1", long_name: "Vertical velocity (geometric), 500 hPa", valid_min: -16, valid_max: 16.7665, encoding: {dtype: uint16, scale: 0.0005, offset: -16}}
+  - {name: dzdt_850hpa, source_key: "DZDT:850 mb", units: "m s-1", long_name: "Vertical velocity (geometric), 850 hPa", valid_min: -16, valid_max: 16.7665, encoding: {dtype: uint16, scale: 0.0005, offset: -16}}
+  - {name: dzdt_1000hpa, source_key: "DZDT:1000 mb", units: "m s-1", long_name: "Vertical velocity (geometric), 1000 hPa", valid_min: -16, valid_max: 16.7665, encoding: {dtype: uint16, scale: 0.0005, offset: -16}}
+  - {name: grle_100hpa, source_key: "GRLE:100 mb", units: "kg kg-1", long_name: "Graupel, 100 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: grle_250hpa, source_key: "GRLE:250 mb", units: "kg kg-1", long_name: "Graupel, 250 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: grle_500hpa, source_key: "GRLE:500 mb", units: "kg kg-1", long_name: "Graupel, 500 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: grle_850hpa, source_key: "GRLE:850 mb", units: "kg kg-1", long_name: "Graupel, 850 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: grle_1000hpa, source_key: "GRLE:1000 mb", units: "kg kg-1", long_name: "Graupel, 1000 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: gust_sfc, source_key: "GUST:surface", units: "m s-1", long_name: "Wind speed (gust), surface", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: hgt_100hpa, source_key: "HGT:100 mb", units: "m", long_name: "Geopotential height, 100 hPa", valid_min: 14000, valid_max: 19242.64, encoding: {dtype: uint16, scale: 0.08, offset: 14000}}
+  - {name: hgt_250hpa, source_key: "HGT:250 mb", units: "m", long_name: "Geopotential height, 250 hPa", valid_min: 8500, valid_max: 11776.65, encoding: {dtype: uint16, scale: 0.05, offset: 8500}}
+  - {name: hgt_500hpa, source_key: "HGT:500 mb", units: "m", long_name: "Geopotential height, 500 hPa", valid_min: 4400, valid_max: 7021.32, encoding: {dtype: uint16, scale: 0.04, offset: 4400}}
+  - {name: hgt_850hpa, source_key: "HGT:850 mb", units: "m", long_name: "Geopotential height, 850 hPa", valid_min: 400, valid_max: 2038.325, encoding: {dtype: uint16, scale: 0.025, offset: 400}}
+  - {name: hgt_1000hpa, source_key: "HGT:1000 mb", units: "m", long_name: "Geopotential height, 1000 hPa", valid_min: -800, valid_max: 838.325, encoding: {dtype: uint16, scale: 0.025, offset: -800}}
+  - {name: hgt_sfc, source_key: "HGT:surface", units: "m", long_name: "Geopotential height, surface", valid_min: -500, valid_max: 4742.64, encoding: {dtype: uint16, scale: 0.08, offset: -500}}
+  - {name: hgt_trop, source_key: "HGT:tropopause", units: "m", long_name: "Geopotential height, tropopause", valid_min: 4000, valid_max: 20383.25, encoding: {dtype: uint16, scale: 0.25, offset: 4000}}
+  - {name: hpbl_sfc, source_key: "HPBL:surface", units: "m", long_name: "Planetary boundary layer height, surface", valid_min: 0, valid_max: 6553.3, encoding: {dtype: uint16, scale: 0.1, offset: 0}}
+  - {name: iceg_10m_amsl, source_key: "ICEG:10 m above mean sea level", units: "m s-1", long_name: "Ice growth rate, 10 m above MSL", valid_min: 0, valid_max: 0.000262132, encoding: {dtype: uint16, scale: 4e-09, offset: 0}}
+  - {name: icetk_sfc, source_key: "ICETK:surface", units: "m", long_name: "Ice thickness, surface", valid_min: 0, valid_max: 13.1066, encoding: {dtype: uint16, scale: 0.0002, offset: 0}}
+  - {name: icmr_250hpa, source_key: "ICMR:250 mb", units: "kg kg-1", long_name: "Ice water mixing ratio, 250 hPa", valid_min: 0, valid_max: 0.00327665, encoding: {dtype: uint16, scale: 5e-08, offset: 0}}
+  - {name: icmr_500hpa, source_key: "ICMR:500 mb", units: "kg kg-1", long_name: "Ice water mixing ratio, 500 hPa", valid_min: 0, valid_max: 0.00327665, encoding: {dtype: uint16, scale: 5e-08, offset: 0}}
+  - {name: icmr_850hpa, source_key: "ICMR:850 mb", units: "kg kg-1", long_name: "Ice water mixing ratio, 850 hPa", valid_min: 0, valid_max: 0.00327665, encoding: {dtype: uint16, scale: 5e-08, offset: 0}}
+  - {name: icmr_1000hpa, source_key: "ICMR:1000 mb", units: "kg kg-1", long_name: "Ice water mixing ratio, 1000 hPa", valid_min: 0, valid_max: 0.00327665, encoding: {dtype: uint16, scale: 5e-08, offset: 0}}
+  - {name: lcdc_low, source_key: "LCDC:low cloud layer", units: "%", long_name: "Low cloud cover, low cloud layer", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: lftx_sfc, source_key: "LFTX:surface", units: "K", long_name: "Surface lifted index, surface", valid_min: -50, valid_max: 81.066, encoding: {dtype: uint16, scale: 0.002, offset: -50}}
+  - {name: mcdc_mid, source_key: "MCDC:middle cloud layer", units: "%", long_name: "Medium cloud cover, middle cloud layer", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: mslet_msl, source_key: "MSLET:mean sea level", units: "Pa", long_name: "MSLP (Eta model reduction), mean sea level", valid_min: 88000, valid_max: 114213.2, encoding: {dtype: uint16, scale: 0.4, offset: 88000}}
+  - {name: plpl_255_0hpa_agl, source_key: "PLPL:255-0 mb above ground", units: "Pa", long_name: "Pressure of level from which parcel was lifted, 255-0 hPa above ground", valid_min: 0, valid_max: 131066, encoding: {dtype: uint16, scale: 2, offset: 0}}
+  - {name: prate_sfc, source_key: "PRATE:surface", units: "mm h-1", long_name: "Precipitation rate (instantaneous), surface", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: pres_sfc, source_key: "PRES:surface", units: "Pa", long_name: "Pressure, surface", valid_min: 45000, valid_max: 1, encoding: {dtype: uint16, scale: 1, offset: 45000}}
+  - {name: pres_trop, source_key: "PRES:tropopause", units: "Pa", long_name: "Pressure, tropopause", valid_min: 4000, valid_max: 1, encoding: {dtype: uint16, scale: 1, offset: 4000}}
+  - {name: prmsl_msl, source_key: "PRMSL:mean sea level", units: "Pa", long_name: "Pressure reduced to MSL, mean sea level", valid_min: 88000, valid_max: 114213.2, encoding: {dtype: uint16, scale: 0.4, offset: 88000}}
+  - {name: pwat_atm, source_key: "PWAT:entire atmosphere (considered as a single layer)", units: "kg m-2", long_name: "Precipitable water, entire atmosphere (single layer)", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: refc_atm, source_key: "REFC:entire atmosphere", units: "dBZ", long_name: "Composite reflectivity, entire atmosphere", valid_min: -30, valid_max: 101.066, encoding: {dtype: uint16, scale: 0.002, offset: -30}}
+  - {name: rh_100hpa, source_key: "RH:100 mb", units: "%", long_name: "Relative humidity, 100 hPa", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: rh_250hpa, source_key: "RH:250 mb", units: "%", long_name: "Relative humidity, 250 hPa", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: rh_500hpa, source_key: "RH:500 mb", units: "%", long_name: "Relative humidity, 500 hPa", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: rh_850hpa, source_key: "RH:850 mb", units: "%", long_name: "Relative humidity, 850 hPa", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: rh_1000hpa, source_key: "RH:1000 mb", units: "%", long_name: "Relative humidity, 1000 hPa", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: rh_2m, source_key: "RH:2 m above ground", units: "%", long_name: "Relative humidity, 2 m", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: rh_atm, source_key: "RH:entire atmosphere (considered as a single layer)", units: "%", long_name: "Relative humidity, entire atmosphere (single layer)", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: rwmr_100hpa, source_key: "RWMR:100 mb", units: "kg kg-1", long_name: "Rain mixing ratio, 100 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: rwmr_250hpa, source_key: "RWMR:250 mb", units: "kg kg-1", long_name: "Rain mixing ratio, 250 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: rwmr_500hpa, source_key: "RWMR:500 mb", units: "kg kg-1", long_name: "Rain mixing ratio, 500 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: rwmr_850hpa, source_key: "RWMR:850 mb", units: "kg kg-1", long_name: "Rain mixing ratio, 850 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: rwmr_1000hpa, source_key: "RWMR:1000 mb", units: "kg kg-1", long_name: "Rain mixing ratio, 1000 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: snmr_100hpa, source_key: "SNMR:100 mb", units: "kg kg-1", long_name: "Snow mixing ratio, 100 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: snmr_250hpa, source_key: "SNMR:250 mb", units: "kg kg-1", long_name: "Snow mixing ratio, 250 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: snmr_500hpa, source_key: "SNMR:500 mb", units: "kg kg-1", long_name: "Snow mixing ratio, 500 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: snmr_850hpa, source_key: "SNMR:850 mb", units: "kg kg-1", long_name: "Snow mixing ratio, 850 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: snmr_1000hpa, source_key: "SNMR:1000 mb", units: "kg kg-1", long_name: "Snow mixing ratio, 1000 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: snod_sfc, source_key: "SNOD:surface", units: "m", long_name: "Snow depth, surface", valid_min: 0, valid_max: 13.1066, encoding: {dtype: uint16, scale: 0.0002, offset: 0}}
+  - {name: spfh_100hpa, source_key: "SPFH:100 mb", units: "kg kg-1", long_name: "Specific humidity, 100 hPa", valid_min: 0, valid_max: 0.000131066, encoding: {dtype: uint16, scale: 2e-09, offset: 0}}
+  - {name: spfh_250hpa, source_key: "SPFH:250 mb", units: "kg kg-1", long_name: "Specific humidity, 250 hPa", valid_min: 0, valid_max: 0.00262132, encoding: {dtype: uint16, scale: 4e-08, offset: 0}}
+  - {name: spfh_500hpa, source_key: "SPFH:500 mb", units: "kg kg-1", long_name: "Specific humidity, 500 hPa", valid_min: 0, valid_max: 0.0131066, encoding: {dtype: uint16, scale: 2e-07, offset: 0}}
+  - {name: spfh_850hpa, source_key: "SPFH:850 mb", units: "kg kg-1", long_name: "Specific humidity, 850 hPa", valid_min: 0, valid_max: 0.0262132, encoding: {dtype: uint16, scale: 4e-07, offset: 0}}
+  - {name: spfh_1000hpa, source_key: "SPFH:1000 mb", units: "kg kg-1", long_name: "Specific humidity, 1000 hPa", valid_min: 0, valid_max: 0.0524264, encoding: {dtype: uint16, scale: 8e-07, offset: 0}}
+  - {name: spfh_2m, source_key: "SPFH:2 m above ground", units: "kg kg-1", long_name: "Specific humidity, 2 m", valid_min: 0, valid_max: 0.0524264, encoding: {dtype: uint16, scale: 8e-07, offset: 0}}
+  - {name: tcdc_250hpa, source_key: "TCDC:250 mb", units: "%", long_name: "Total cloud cover, 250 hPa", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: tcdc_500hpa, source_key: "TCDC:500 mb", units: "%", long_name: "Total cloud cover, 500 hPa", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: tcdc_850hpa, source_key: "TCDC:850 mb", units: "%", long_name: "Total cloud cover, 850 hPa", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: tcdc_1000hpa, source_key: "TCDC:1000 mb", units: "%", long_name: "Total cloud cover, 1000 hPa", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: tcdc_atm, source_key: "TCDC:entire atmosphere", units: "%", long_name: "Total cloud cover, entire atmosphere", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: tmp_100hpa, source_key: "TMP:100 mb", units: "K", long_name: "Temperature, 100 hPa", valid_min: 160, valid_max: 291.066, encoding: {dtype: uint16, scale: 0.002, offset: 160}}
+  - {name: tmp_250hpa, source_key: "TMP:250 mb", units: "K", long_name: "Temperature, 250 hPa", valid_min: 180, valid_max: 311.066, encoding: {dtype: uint16, scale: 0.002, offset: 180}}
+  - {name: tmp_500hpa, source_key: "TMP:500 mb", units: "K", long_name: "Temperature, 500 hPa", valid_min: 190, valid_max: 321.066, encoding: {dtype: uint16, scale: 0.002, offset: 190}}
+  - {name: tmp_850hpa, source_key: "TMP:850 mb", units: "K", long_name: "Temperature, 850 hPa", valid_min: 210, valid_max: 341.066, encoding: {dtype: uint16, scale: 0.002, offset: 210}}
+  - {name: tmp_1000hpa, source_key: "TMP:1000 mb", units: "K", long_name: "Temperature, 1000 hPa", valid_min: 210, valid_max: 341.066, encoding: {dtype: uint16, scale: 0.002, offset: 210}}
+  - {name: tmp_sfc, source_key: "TMP:surface", units: "K", long_name: "Temperature, surface", valid_min: 200, valid_max: 363.8325, encoding: {dtype: uint16, scale: 0.0025, offset: 200}}
+  - {name: tmp_2m, source_key: "TMP:2 m above ground", units: "K", long_name: "Temperature, 2 m", valid_min: 200, valid_max: 363.8325, encoding: {dtype: uint16, scale: 0.0025, offset: 200}}
+  - {name: tmp_trop, source_key: "TMP:tropopause", units: "K", long_name: "Temperature, tropopause", valid_min: 160, valid_max: 291.066, encoding: {dtype: uint16, scale: 0.002, offset: 160}}
+  - {name: ugrd_100hpa, source_key: "UGRD:100 mb", units: "m s-1", long_name: "U-component of wind, 100 hPa", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: ugrd_250hpa, source_key: "UGRD:250 mb", units: "m s-1", long_name: "U-component of wind, 250 hPa", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: ugrd_500hpa, source_key: "UGRD:500 mb", units: "m s-1", long_name: "U-component of wind, 500 hPa", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: ugrd_850hpa, source_key: "UGRD:850 mb", units: "m s-1", long_name: "U-component of wind, 850 hPa", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: ugrd_1000hpa, source_key: "UGRD:1000 mb", units: "m s-1", long_name: "U-component of wind, 1000 hPa", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: ugrd_10m, source_key: "UGRD:10 m above ground", units: "m s-1", long_name: "U-component of wind, 10 m", valid_min: -65, valid_max: 66.066, encoding: {dtype: uint16, scale: 0.002, offset: -65}}
+  - {name: ugrd_trop, source_key: "UGRD:tropopause", units: "m s-1", long_name: "U-component of wind, tropopause", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: ustm_6000_0m_agl, source_key: "USTM:6000-0 m above ground", units: "m s-1", long_name: "U-component storm motion, 6000-0 m above ground", valid_min: -65, valid_max: 66.066, encoding: {dtype: uint16, scale: 0.002, offset: -65}}
+  - {name: vgrd_100hpa, source_key: "VGRD:100 mb", units: "m s-1", long_name: "V-component of wind, 100 hPa", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: vgrd_250hpa, source_key: "VGRD:250 mb", units: "m s-1", long_name: "V-component of wind, 250 hPa", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: vgrd_500hpa, source_key: "VGRD:500 mb", units: "m s-1", long_name: "V-component of wind, 500 hPa", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: vgrd_850hpa, source_key: "VGRD:850 mb", units: "m s-1", long_name: "V-component of wind, 850 hPa", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: vgrd_1000hpa, source_key: "VGRD:1000 mb", units: "m s-1", long_name: "V-component of wind, 1000 hPa", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: vgrd_10m, source_key: "VGRD:10 m above ground", units: "m s-1", long_name: "V-component of wind, 10 m", valid_min: -65, valid_max: 66.066, encoding: {dtype: uint16, scale: 0.002, offset: -65}}
+  - {name: vgrd_trop, source_key: "VGRD:tropopause", units: "m s-1", long_name: "V-component of wind, tropopause", valid_min: -130, valid_max: 132.132, encoding: {dtype: uint16, scale: 0.004, offset: -130}}
+  - {name: vis_sfc, source_key: "VIS:surface", units: "m", long_name: "Visibility, surface", valid_min: 0, valid_max: 26213.2, encoding: {dtype: uint16, scale: 0.4, offset: 0}}
+  - {name: vstm_6000_0m_agl, source_key: "VSTM:6000-0 m above ground", units: "m s-1", long_name: "V-component storm motion, 6000-0 m above ground", valid_min: -65, valid_max: 66.066, encoding: {dtype: uint16, scale: 0.002, offset: -65}}
+  - {name: vvel_100hpa, source_key: "VVEL:100 mb", units: "Pa s-1", long_name: "Vertical velocity (pressure), 100 hPa", valid_min: -4, valid_max: 9.1066, encoding: {dtype: uint16, scale: 0.0002, offset: -4}}
+  - {name: vvel_250hpa, source_key: "VVEL:250 mb", units: "Pa s-1", long_name: "Vertical velocity (pressure), 250 hPa", valid_min: -32, valid_max: 33.533, encoding: {dtype: uint16, scale: 0.001, offset: -32}}
+  - {name: vvel_500hpa, source_key: "VVEL:500 mb", units: "Pa s-1", long_name: "Vertical velocity (pressure), 500 hPa", valid_min: -32, valid_max: 33.533, encoding: {dtype: uint16, scale: 0.001, offset: -32}}
+  - {name: vvel_850hpa, source_key: "VVEL:850 mb", units: "Pa s-1", long_name: "Vertical velocity (pressure), 850 hPa", valid_min: -32, valid_max: 33.533, encoding: {dtype: uint16, scale: 0.001, offset: -32}}
+  - {name: vvel_1000hpa, source_key: "VVEL:1000 mb", units: "Pa s-1", long_name: "Vertical velocity (pressure), 1000 hPa", valid_min: -32, valid_max: 33.533, encoding: {dtype: uint16, scale: 0.001, offset: -32}}
+  - {name: vwsh_trop, source_key: "VWSH:tropopause", units: "s-1", long_name: "Vertical speed shear, tropopause", valid_min: -0.13, valid_max: 0.132132, encoding: {dtype: uint16, scale: 4e-06, offset: -0.13}}
+  - {name: weasd_sfc, source_key: "WEASD:surface", units: "kg m-2", long_name: "Water equivalent of accumulated snow depth, surface", valid_min: 0, valid_max: 3276.65, encoding: {dtype: uint16, scale: 0.05, offset: 0}}
+
+frame_variables:
+  - name: source_run_time
+    dtype: int64
+    fill_value: -1
+    long_name: start (initialisation) time of the GFS run this frame comes from (-1 = no frame)
+    units: seconds since 1970-01-01 00:00:00
+  - name: source_lead_h
+    dtype: int16
+    fill_value: -1
+    long_name: forecast lead of this frame in hours, valid time minus source_run_time (-1 = no frame)
+    units: h
+  - name: is_fallback
+    dtype: int8
+    fill_value: -1
+    long_name: frame taken from the previous run because the newest run's file is absent upstream
+    flag_values: [-1, 0, 1]
+    flag_meanings: [no_frame, newest_run, previous_run]
+  - name: n_fields_missing
+    dtype: int16
+    fill_value: -1
+    long_name: number of the 122 fields not available in this frame (-1 = no frame)
+
+extra:
+  readme: |
+    ## GFS specifics
+
+    - **Valid-time series.** Frame H = run floor6(H) at lead H - floor6(H) (0-5 h);
+      previous run at lead 6-11 when that file is absent upstream (`is_fallback`).
+      `source_run_time` / `source_lead_h` per frame.
+    - **Instantaneous fields only.** Codes: value = scale * code + offset (per field);
+      65534 = field not available for this frame, 65535 = undefined at this pixel
+      (GRIB bitmap, e.g. SNOD/WEASD over sea).
+    - **Era gaps** (from the archive itself, nothing substituted): 2021-01-01..2021-02-25
+      3-hourly only; GFS v15 (to 2021-03-22 06z) lacks CAPE/CIN 90-0 hPa, LCDC, MCDC,
+      instantaneous TCDC entire atmosphere; CLMR on pressure levels absent
+      2021-02-26..2023-02-02 and on 2023-05-01. `n_fields_missing` per frame.
+    - Bilinear from 0.25 deg (masked neighbours dropped, renormalised; < 50 % valid
+      weight -> undefined); CRAIN/CSNOW/CFRZR/CICEP/CPOFP nearest neighbour.
+    - `days/<YYYY>/<date>.json` says per day which run/lead made each hour, what was
+      absent upstream and what was clipped.
+  stream: s3
+  stream_job: gfs
+  timeline_origin: "2021-01-01T00:00:00Z"
+  stream_start: "2021-01-01T00:00:00Z"
+  s3:
+    # Virtual-hosted bucket endpoint: no bucket name in the path.
+    endpoint: https://noaa-gfs-bdp-pds.s3.amazonaws.com
+    bucket: ""
+    download_workers: 16
+    requests_per_second: 200.0
+  gfs:
+    state_leads: [0, 1, 2, 3, 4, 5]
+    fallback_previous_run: true
+    # The GFS 0.25 deg grid every message must be on.
+    source_grid: {ni: 1440, nj: 721, lat_first: 90.0, lon_first: 0.0, dlat: 0.25, dlon: 0.25}
+    prate:
+      # The companion store, filled by the same stream.
+      product: prate_16km
+      leads: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      # PRATE time means ("A-L hour ave fcst"): kg m-2 s-1 -> mm h-1.
+      factor: 3600.0
+      grib: [0, 1, 7, 1, 0, 255, null]
+    # Per field: the GRIB2 signature every message must match
+    # [discipline, category, number, surface1, value1, surface2, value2] (read from
+    # 2024-06-01 00z f001, identical in v15 files), and how it is regridded / scaled.
+    fields:
+      lftx4_sfc: {grib: [0, 7, 193, 1, 0, 255, null]}
+      absv_100hpa: {grib: [0, 2, 10, 100, 10000, 255, null]}
+      absv_250hpa: {grib: [0, 2, 10, 100, 25000, 255, null]}
+      absv_500hpa: {grib: [0, 2, 10, 100, 50000, 255, null]}
+      absv_850hpa: {grib: [0, 2, 10, 100, 85000, 255, null]}
+      absv_1000hpa: {grib: [0, 2, 10, 100, 100000, 255, null]}
+      cape_sfc: {grib: [0, 7, 6, 1, 0, 255, null]}
+      cape_180_0hpa_agl: {grib: [0, 7, 6, 108, 18000, 108, 0]}
+      cape_90_0hpa_agl: {grib: [0, 7, 6, 108, 9000, 108, 0]}
+      cape_255_0hpa_agl: {grib: [0, 7, 6, 108, 25500, 108, 0]}
+      cfrzr_sfc: {grib: [0, 1, 193, 1, 0, 255, null], regrid: nearest}
+      cicep_sfc: {grib: [0, 1, 194, 1, 0, 255, null], regrid: nearest}
+      cin_sfc: {grib: [0, 7, 7, 1, 0, 255, null]}
+      cin_180_0hpa_agl: {grib: [0, 7, 7, 108, 18000, 108, 0]}
+      cin_90_0hpa_agl: {grib: [0, 7, 7, 108, 9000, 108, 0]}
+      cin_255_0hpa_agl: {grib: [0, 7, 7, 108, 25500, 108, 0]}
+      clmr_250hpa: {grib: [0, 1, 22, 100, 25000, 255, null]}
+      clmr_500hpa: {grib: [0, 1, 22, 100, 50000, 255, null]}
+      clmr_850hpa: {grib: [0, 1, 22, 100, 85000, 255, null]}
+      clmr_1000hpa: {grib: [0, 1, 22, 100, 100000, 255, null]}
+      cpofp_sfc: {grib: [0, 1, 39, 1, 0, 255, null], regrid: nearest}
+      crain_sfc: {grib: [0, 1, 192, 1, 0, 255, null], regrid: nearest}
+      csnow_sfc: {grib: [0, 1, 195, 1, 0, 255, null], regrid: nearest}
+      cwat_atm: {grib: [0, 6, 6, 200, 0, 255, null]}
+      dpt_2m: {grib: [0, 0, 6, 103, 2, 255, null]}
+      dzdt_100hpa: {grib: [0, 2, 9, 100, 10000, 255, null]}
+      dzdt_250hpa: {grib: [0, 2, 9, 100, 25000, 255, null]}
+      dzdt_500hpa: {grib: [0, 2, 9, 100, 50000, 255, null]}
+      dzdt_850hpa: {grib: [0, 2, 9, 100, 85000, 255, null]}
+      dzdt_1000hpa: {grib: [0, 2, 9, 100, 100000, 255, null]}
+      grle_100hpa: {grib: [0, 1, 32, 100, 10000, 255, null]}
+      grle_250hpa: {grib: [0, 1, 32, 100, 25000, 255, null]}
+      grle_500hpa: {grib: [0, 1, 32, 100, 50000, 255, null]}
+      grle_850hpa: {grib: [0, 1, 32, 100, 85000, 255, null]}
+      grle_1000hpa: {grib: [0, 1, 32, 100, 100000, 255, null]}
+      gust_sfc: {grib: [0, 2, 22, 1, 0, 255, null]}
+      hgt_100hpa: {grib: [0, 3, 5, 100, 10000, 255, null]}
+      hgt_250hpa: {grib: [0, 3, 5, 100, 25000, 255, null]}
+      hgt_500hpa: {grib: [0, 3, 5, 100, 50000, 255, null]}
+      hgt_850hpa: {grib: [0, 3, 5, 100, 85000, 255, null]}
+      hgt_1000hpa: {grib: [0, 3, 5, 100, 100000, 255, null]}
+      hgt_sfc: {grib: [0, 3, 5, 1, 0, 255, null]}
+      hgt_trop: {grib: [0, 3, 5, 7, 0, 255, null]}
+      hpbl_sfc: {grib: [0, 3, 196, 1, 0, 255, null]}
+      iceg_10m_amsl: {grib: [10, 2, 6, 102, 10, 255, null]}
+      icetk_sfc: {grib: [10, 2, 1, 1, 0, 255, null]}
+      icmr_250hpa: {grib: [0, 1, 23, 100, 25000, 255, null]}
+      icmr_500hpa: {grib: [0, 1, 23, 100, 50000, 255, null]}
+      icmr_850hpa: {grib: [0, 1, 23, 100, 85000, 255, null]}
+      icmr_1000hpa: {grib: [0, 1, 23, 100, 100000, 255, null]}
+      lcdc_low: {grib: [0, 6, 3, 214, 0, 255, null]}
+      lftx_sfc: {grib: [0, 7, 192, 1, 0, 255, null]}
+      mcdc_mid: {grib: [0, 6, 4, 224, 0, 255, null]}
+      mslet_msl: {grib: [0, 3, 192, 101, 0, 255, null]}
+      plpl_255_0hpa_agl: {grib: [0, 3, 200, 108, 25500, 108, 0]}
+      prate_sfc: {grib: [0, 1, 7, 1, 0, 255, null], factor: 3600.0}
+      pres_sfc: {grib: [0, 3, 0, 1, 0, 255, null]}
+      pres_trop: {grib: [0, 3, 0, 7, 0, 255, null]}
+      prmsl_msl: {grib: [0, 3, 1, 101, 0, 255, null]}
+      pwat_atm: {grib: [0, 1, 3, 200, 0, 255, null]}
+      refc_atm: {grib: [0, 16, 196, 10, 0, 255, null]}
+      rh_100hpa: {grib: [0, 1, 1, 100, 10000, 255, null]}
+      rh_250hpa: {grib: [0, 1, 1, 100, 25000, 255, null]}
+      rh_500hpa: {grib: [0, 1, 1, 100, 50000, 255, null]}
+      rh_850hpa: {grib: [0, 1, 1, 100, 85000, 255, null]}
+      rh_1000hpa: {grib: [0, 1, 1, 100, 100000, 255, null]}
+      rh_2m: {grib: [0, 1, 1, 103, 2, 255, null]}
+      rh_atm: {grib: [0, 1, 1, 200, 0, 255, null]}
+      rwmr_100hpa: {grib: [0, 1, 24, 100, 10000, 255, null]}
+      rwmr_250hpa: {grib: [0, 1, 24, 100, 25000, 255, null]}
+      rwmr_500hpa: {grib: [0, 1, 24, 100, 50000, 255, null]}
+      rwmr_850hpa: {grib: [0, 1, 24, 100, 85000, 255, null]}
+      rwmr_1000hpa: {grib: [0, 1, 24, 100, 100000, 255, null]}
+      snmr_100hpa: {grib: [0, 1, 25, 100, 10000, 255, null]}
+      snmr_250hpa: {grib: [0, 1, 25, 100, 25000, 255, null]}
+      snmr_500hpa: {grib: [0, 1, 25, 100, 50000, 255, null]}
+      snmr_850hpa: {grib: [0, 1, 25, 100, 85000, 255, null]}
+      snmr_1000hpa: {grib: [0, 1, 25, 100, 100000, 255, null]}
+      snod_sfc: {grib: [0, 1, 11, 1, 0, 255, null]}
+      spfh_100hpa: {grib: [0, 1, 0, 100, 10000, 255, null]}
+      spfh_250hpa: {grib: [0, 1, 0, 100, 25000, 255, null]}
+      spfh_500hpa: {grib: [0, 1, 0, 100, 50000, 255, null]}
+      spfh_850hpa: {grib: [0, 1, 0, 100, 85000, 255, null]}
+      spfh_1000hpa: {grib: [0, 1, 0, 100, 100000, 255, null]}
+      spfh_2m: {grib: [0, 1, 0, 103, 2, 255, null]}
+      tcdc_250hpa: {grib: [0, 6, 1, 100, 25000, 255, null]}
+      tcdc_500hpa: {grib: [0, 6, 1, 100, 50000, 255, null]}
+      tcdc_850hpa: {grib: [0, 6, 1, 100, 85000, 255, null]}
+      tcdc_1000hpa: {grib: [0, 6, 1, 100, 100000, 255, null]}
+      tcdc_atm: {grib: [0, 6, 1, 10, 0, 255, null]}
+      tmp_100hpa: {grib: [0, 0, 0, 100, 10000, 255, null]}
+      tmp_250hpa: {grib: [0, 0, 0, 100, 25000, 255, null]}
+      tmp_500hpa: {grib: [0, 0, 0, 100, 50000, 255, null]}
+      tmp_850hpa: {grib: [0, 0, 0, 100, 85000, 255, null]}
+      tmp_1000hpa: {grib: [0, 0, 0, 100, 100000, 255, null]}
+      tmp_sfc: {grib: [0, 0, 0, 1, 0, 255, null]}
+      tmp_2m: {grib: [0, 0, 0, 103, 2, 255, null]}
+      tmp_trop: {grib: [0, 0, 0, 7, 0, 255, null]}
+      ugrd_100hpa: {grib: [0, 2, 2, 100, 10000, 255, null]}
+      ugrd_250hpa: {grib: [0, 2, 2, 100, 25000, 255, null]}
+      ugrd_500hpa: {grib: [0, 2, 2, 100, 50000, 255, null]}
+      ugrd_850hpa: {grib: [0, 2, 2, 100, 85000, 255, null]}
+      ugrd_1000hpa: {grib: [0, 2, 2, 100, 100000, 255, null]}
+      ugrd_10m: {grib: [0, 2, 2, 103, 10, 255, null]}
+      ugrd_trop: {grib: [0, 2, 2, 7, 0, 255, null]}
+      ustm_6000_0m_agl: {grib: [0, 2, 194, 103, 6000, 103, 0]}
+      vgrd_100hpa: {grib: [0, 2, 3, 100, 10000, 255, null]}
+      vgrd_250hpa: {grib: [0, 2, 3, 100, 25000, 255, null]}
+      vgrd_500hpa: {grib: [0, 2, 3, 100, 50000, 255, null]}
+      vgrd_850hpa: {grib: [0, 2, 3, 100, 85000, 255, null]}
+      vgrd_1000hpa: {grib: [0, 2, 3, 100, 100000, 255, null]}
+      vgrd_10m: {grib: [0, 2, 3, 103, 10, 255, null]}
+      vgrd_trop: {grib: [0, 2, 3, 7, 0, 255, null]}
+      vis_sfc: {grib: [0, 19, 0, 1, 0, 255, null]}
+      vstm_6000_0m_agl: {grib: [0, 2, 195, 103, 6000, 103, 0]}
+      vvel_100hpa: {grib: [0, 2, 8, 100, 10000, 255, null]}
+      vvel_250hpa: {grib: [0, 2, 8, 100, 25000, 255, null]}
+      vvel_500hpa: {grib: [0, 2, 8, 100, 50000, 255, null]}
+      vvel_850hpa: {grib: [0, 2, 8, 100, 85000, 255, null]}
+      vvel_1000hpa: {grib: [0, 2, 8, 100, 100000, 255, null]}
+      vwsh_trop: {grib: [0, 2, 192, 7, 0, 255, null]}
+      weasd_sfc: {grib: [0, 1, 13, 1, 0, 255, null]}
