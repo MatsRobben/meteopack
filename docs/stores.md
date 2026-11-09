@@ -187,7 +187,7 @@ them**:
 
 | chain | files | until / from | data window | `chain` | `source_layout_id` |
 |---|---|---|---|---|---|
-| ODYSSEY | `OPERA@YYYYMMDDTHHMM@0@QIND_RATE.h5` (ODIM 2.0) | up to and including 2024-07-05 06:00 | T-10 .. T+5 min | 1 | 2 |
+| ODYSSEY | `OPERA@YYYYMMDDTHHMM@0@QIND_RATE.h5` (ODIM 2.0) | up to and including 2024-07-05 06:00, and 2024-12-03..09 (below) | T-10 .. T+5 min | 1 | 2 |
 | NIMBUS | `OPERA@YYYYMMDDTHHMM@0@RATE.h5` (ODIM 2.4) | from 2024-07-05 06:15 | instantaneous at T | 2 | 3 |
 
 Both chains publish 05:30-06:00 on 2024-07-05; the cutover rule takes exactly
@@ -227,9 +227,14 @@ that fails is never packed: its frame is flagged corrupt, the file is kept in
 structural fingerprint of each chain is pinned in the product config
 (`extra.opera.pinned_fingerprints`); others are reported as drift.
 
-Known gaps in the archive (no rain-rate file at all): 2024-12-03..09 (only
-ODYSSEY files exist those days, which the cutover rule ignores),
-2025-05-02..15, 2026-05-24..25, and several partial days (e.g. 2024-02-20,
+**ODYSSEY fallback days.** On 2024-12-03..09 NIMBUS published no rain rate
+at all while ODYSSEY published every step; those seven days are listed in
+`extra.opera.odyssey_fallback_days` and take the ODYSSEY files (`chain` = 1),
+under the same checks. Only listed days do this - elsewhere a file of the
+wrong chain is ignored, never used to fill a gap. Select chains by `chain`,
+not by date.
+
+Known gaps in the archive (no rain-rate file at all): 2025-05-02..15, 2026-05-24..25, and several partial days (e.g. 2024-02-20,
 2025-05-01, 2025-11-05). Per-day status: `days/<YYYY>/<YYYY-MM-DD>.json`
 (`done`, `partial`, `empty`), as for the 3D composite.
 

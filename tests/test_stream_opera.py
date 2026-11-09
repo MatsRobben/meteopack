@@ -256,3 +256,36 @@ def test_a_failed_download_leaves_the_frame_missing_until_a_rerun(tmp_path, upst
     assert stream_kdp.read_status(cfg, root, DAY1)["state"] == "done"
     g = zarr.open_group(gridded.zarr_path(root, cfg.store_id), mode="r")
     assert not g["is_missing_frame"][row] and g["chain"][row] == 2
+
+
+def test_a_configured_fallback_day_is_packed_from_odyssey(tmp_path: Path):
+    """A day on extra.opera.odyssey_fallback_days takes the ODYSSEY files (NIMBUS has
+    none) and records chain = ODYSSEY; the next day is NIMBUS again."""
+    cfg = tiny_cfg()
+    extra = dict(cfg.extra)
+    extra["opera"] = {**extra["opera"], "odyssey_fallback_days": [f"{DAY2:%Y-%m-%d}"]}
+    cfg = cfg.model_copy(update={"extra": extra})
+    up = tmp_path / "up"
+    up.mkdir()
+    day3 = DAY2 + timedelta(days=1)
+    for when in opera.day_slots(DAY2, STEP):
+        write_odim(up, when, opera.ODYSSEY, rates(seed(when)))
+    for when in opera.day_slots(day3, STEP)[:4]:
+        write_odim(up, when, opera.NIMBUS, rates(seed(when) + 500))
+        write_odim(up, when, opera.ODYSSEY, rates(seed(when)))    # strays: ignored
+    root = tmp_path / "root"
+    lines: list[str] = []
+    code = stream_kdp.run(cfg, root, DAY2, day3 + timedelta(days=1), client=FakeBucket(up),
+                          pack_workers=2, download_workers=4, log=lines.append)
+    assert code == stream_kdp.EXIT_DONE, lines
+    assert stream_kdp.read_status(cfg, root, DAY2)["state"] == "done"
+    ds = gridded.read(cfg.store_id, root, decode=False,
+                      time_range=(DAY2, day3 + timedelta(days=1)))
+    chain = ds["chain"].values
+    assert (chain[:96] == opera.CHAIN_CODES[opera.ODYSSEY]).all()
+    assert (chain[96:100] == opera.CHAIN_CODES[opera.NIMBUS]).all()
+    assert (ds["source_layout_id"].values[:96] == opera.LAYOUT_ODYSSEY).all()
+    np.testing.assert_array_equal(ds["rain_rate_mmh"].values[10],
+                                  expected_codes(rates(seed(DAY2 + 10 * STEP))))
+    np.testing.assert_array_equal(ds["rain_rate_mmh"].values[97],
+                                  expected_codes(rates(seed(day3 + STEP) + 500)))

@@ -113,8 +113,9 @@ extra:
 
     - **Two chains, one break.** `chain` 1 = ODYSSEY (`QIND_RATE.h5`, up to and
       including 2024-07-05 06:00, data window T-10..T+5 min), 2 = NIMBUS
-      (`RATE.h5`, from 06:15, instantaneous). Values are as the files give them;
-      calibrate each chain separately.
+      (`RATE.h5`, from 06:15, instantaneous). Exception: 2024-12-03..09 are
+      ODYSSEY (NIMBUS published nothing those days). Values are as the files
+      give them; calibrate each chain separately by `chain`, not by date.
     - Codes: 0 = no rain (the file's undetect), 65535 = no radar coverage (nodata),
       65534 = no data for this frame; rates above 655.33 mm/h are clipped
       (`n_clipped` in provenance.parquet).
@@ -132,8 +133,9 @@ extra:
   # to 2013 without a rebuild: unwritten steps cost no disk and read as missing
   # frames (is_missing_frame).
   timeline_origin: "2013-01-01T00:00:00Z"
-  # Where `meteopack stream` starts without --window (to the start of today).
-  stream_start: "2023-11-01T00:00:00Z"
+  # Where `meteopack stream` starts without --window (to the start of today):
+  # 2021-01, the start of RainPro-NL pretraining (matches the GFS archive).
+  stream_start: "2021-01-01T00:00:00Z"
   s3:
     endpoint: https://s3.waw3-1.cloudferro.com
     bucket: openradar-archive
@@ -144,6 +146,13 @@ extra:
   opera:
     # Last ODYSSEY frame. ODYSSEY up to and including this instant, NIMBUS after.
     cutover: "2024-07-05T06:00:00Z"
+    # Whole UTC days after the cutover that take ODYSSEY QIND_RATE anyway:
+    # NIMBUS published no RATE file at all on these days while ODYSSEY
+    # published all 96 (archive scan 2026-11-09). An explicit list, never a
+    # "whatever exists" rule; every file still passes the full schema check,
+    # and `chain` says ODYSSEY.
+    odyssey_fallback_days: ["2024-12-03", "2024-12-04", "2024-12-05", "2024-12-06",
+                            "2024-12-07", "2024-12-08", "2024-12-09"]
     gain: 1.0
     offset: 0.0
     nodata: -9999000.0

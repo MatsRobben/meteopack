@@ -85,7 +85,7 @@ wait $pid; while kill -0 $pid 2>/dev/null; do wait $pid; done
 stops cleanly on Slurm's USR1 warning. Point `METEOPACK_REPO` at a checkout
 nobody edits while it runs.
 
-The OPERA rain rate, 2023-11-01 to the start of today (measured 2026-11-09 on
+The OPERA rain rate, 2021-01-01 to the start of today (measured 2026-11-09 on
 6 CPUs: ~7 s and ~10 MB a day, ~500 days an hour, 1.2 GB resident; the
 download, ~120 MB a day at ~45 MB/s over 8 connections, overlaps the packing):
 
@@ -99,9 +99,10 @@ sbatch --output=/path/to/logs/%x-%j.out scripts/stream_kdp.slurm opera --product
 The script's own `#SBATCH` lines (das-large, 6 CPUs, 24 GB, 2 days) are what
 a resubmitted successor gets too, so prefer them to command-line overrides.
 
-Without `--window` it streams from `extra.stream_start` (2023-11-01) to the
+Without `--window` it streams from `extra.stream_start` (2021-01-01, the start
+of RainPro-NL pretraining) to the
 start of today; rerunning later adds only the new days. Extend it back with
-`--window 2013-01-01/2023-11-01`: the store's axis already starts in 2013.
+`--window 2013-01-01/2021-01-01`: the store's axis already starts in 2013.
 
 ## /dev/shm is wiped when any of your jobs on the node ends
 
