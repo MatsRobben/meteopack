@@ -24,6 +24,8 @@
 #   METEOPACK_REPO        checkout to run from (default: this repo). Point it at
 #                         a pinned worktree: editing the code under a running
 #                         job breaks it.
+#   METEOPACK_PY          the Python to run (default: the main checkout's venv); NOAA GFS
+#                         needs one synced with `--extra nwp` (ecCodes)
 #   STREAM_LOG_DIR        where successors write their logs (required)
 #   STREAM_BUDGET_HOURS   hours after which no new day is started (default 46)
 #   STREAM_NO_RESUBMIT=1  do not chain
@@ -33,7 +35,7 @@
 set -uo pipefail
 
 REPO="${METEOPACK_REPO:-/vol/knmimo-nobackup/users/mrobben/meteopack}"
-PY="/vol/knmimo-nobackup/users/mrobben/meteopack/.venv/bin/python"
+PY="${METEOPACK_PY:-/vol/knmimo-nobackup/users/mrobben/meteopack/.venv/bin/python}"
 : "${METEOPACK_DATA_ROOT:?set METEOPACK_DATA_ROOT}"
 : "${STREAM_LOG_DIR:?set STREAM_LOG_DIR}"
 export METEOPACK_DATA_ROOT
