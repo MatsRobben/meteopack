@@ -449,6 +449,39 @@ wheels = [
 ]
 
 [[package]]
+name = "eccodeslib"
+version = "2.50.0.34"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "eckitlib" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/81/07/6c46a6a6a8f79a18779cd32d6b34df2842d96507f13f317c69a094c5ea03/eccodeslib-2.50.0.34-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:2b5ff86be33b23159b01e800378acc29c6389b34e1d9cc2a517af045d7466436", size = 9214117, upload-time = "2026-11-06T07:31:42.229Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/3b/1504128bbee24e483a866c294396452070ba5285c7a3722f701425f8191b/eccodeslib-2.50.0.34-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:e2da2e099f4b7a196cf9dcddeb1b651dd35d0f7fa693dc2ecc24800ad1ec9ba6", size = 8998185, upload-time = "2026-11-06T07:26:49.784Z" },
+    { url = "https://files.pythonhosted.org/packages/54/4f/473bfe562fbca7fd679b247363e7059bd8883f8fa40429f97350da74f495/eccodeslib-2.50.0.34-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:25b73ba3ce076aefdb6971d71fbe4590e4ed6110982e1b7a7b654816e6740a59", size = 9214118, upload-time = "2026-11-06T07:29:31.459Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/2a/9648ae4e6f8b97d2e63090c346dde63753e762a05f2ee8cea2d045f736b2/eccodeslib-2.50.0.34-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:1e79efc7243f7d4a299f55d77e40db5e79131e714116296e0f847ba890e91484", size = 8998188, upload-time = "2026-11-06T07:27:50.848Z" },
+    { url = "https://files.pythonhosted.org/packages/10/07/7e52e811664ed9e9fb8bd9600b79ac47081d023d08ffe43c3161705a032d/eccodeslib-2.50.0.34-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:16fbcccc98f98c238c70d31ccb2893953b18df992011188bc3747a2cb3097474", size = 9214117, upload-time = "2026-11-06T07:29:12.101Z" },
+    { url = "https://files.pythonhosted.org/packages/ea/0d/436c10a28d94eff65e37f32d993788d8bcbc79d514bd698f2f4f81069236/eccodeslib-2.50.0.34-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:97306fa882713f5c865a2b2bef8ec3266f65361f95ea739a1458f765c4dc50eb", size = 8998187, upload-time = "2026-11-06T07:27:53.135Z" },
+    { url = "https://files.pythonhosted.org/packages/e5/16/36aafea6dacd76d2a20acfb27e86fa0d59e15de6149635cd51a68cac08b6/eccodeslib-2.50.0.34-cp315-cp315-manylinux_2_28_aarch64.whl", hash = "sha256:7f67b91529af933fceaa84100df80b9eb2abf20d3fc9a86f6db6c9f90b98732d", size = 9214117, upload-time = "2026-11-06T07:28:54.131Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/e8/12974de3c9ea20a237d104aac67a1c7487209902da51664ed44184fb7e2a/eccodeslib-2.50.0.34-cp315-cp315-manylinux_2_28_x86_64.whl", hash = "sha256:951a987c1680d679708ffffca2d6bf1e417c8608020c70c8b3d05d3d9d641231", size = 8998187, upload-time = "2026-11-06T07:27:29.448Z" },
+]
+
+[[package]]
+name = "eckitlib"
+version = "2.5.0.34"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/9b/8be55f0e26b43876380915c11b0a88748878611f4b8dcd88acd1647e7cdf/eckitlib-2.5.0.34-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:e89ce6d92cd7c601e4bdbda87fbe52f27f6390631b85c6ea06b41c7ff6eb3c5b", size = 35218197, upload-time = "2026-11-06T07:31:47.758Z" },
+    { url = "https://files.pythonhosted.org/packages/4b/c7/90e2867b35a2397b4c9bf4486c50a54adc6cfb0c0f8bfc631a1573e0d1aa/eckitlib-2.5.0.34-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:3a28e1a7e2ab1b341e1ffa5688d42a1cf2249eede379b3ec5b4dde044e0cebc4", size = 36168597, upload-time = "2026-11-06T07:27:00.27Z" },
+    { url = "https://files.pythonhosted.org/packages/87/98/d7f7bc923a255f274f38a37a80988b152f0104ecd110467310a26f29ae5a/eckitlib-2.5.0.34-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:de99aa7025079830e472b4462ec946ff34ee7534ddaeba5cfcc525c1fe00536c", size = 35218199, upload-time = "2026-11-06T07:29:36.501Z" },
+    { url = "https://files.pythonhosted.org/packages/77/09/ee7aff943abbf5cc6fbd775142a373d996582122aa946218dc9a187e2f01/eckitlib-2.5.0.34-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:e295faabc0c050cf78847e92f8e2f468428eea58c8ba843797a09c532b6744a2", size = 36168598, upload-time = "2026-11-06T07:27:59.042Z" },
+    { url = "https://files.pythonhosted.org/packages/74/b0/39325441a1cddb54a38b49a3310832d17d5bd05781571c2711f3f3ff9e02/eckitlib-2.5.0.34-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:b4041cf50fd9e8c4fb33e6e9978ef0170d51cc419824a77b5c9e75e9cd196b62", size = 35218200, upload-time = "2026-11-06T07:29:17.101Z" },
+    { url = "https://files.pythonhosted.org/packages/45/9f/0bb904d2fa6b01c9bc976a14f77d06e35e1ee08ff4b42ef93fff37d39cf9/eckitlib-2.5.0.34-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:b6d83c9c3090c580e9a747ab2f1fbcb1dd8ae19aa0dcd2bef2c7040414309494", size = 36168593, upload-time = "2026-11-06T07:28:02.158Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/7c/3646ae93d512cbe0fb3f5a9f38cc792e29df10a79049ae0b9f041d67429c/eckitlib-2.5.0.34-cp315-cp315-manylinux_2_28_aarch64.whl", hash = "sha256:0faee38b999256b4a2b402a875e9a1aed2c1b1a90d929d3c65d546ac4c455dba", size = 35218202, upload-time = "2026-11-06T07:28:59.119Z" },
+    { url = "https://files.pythonhosted.org/packages/be/2f/ded80d7f55ddd1474ff701aaa6aba47c23b7012f95c5c5a71f0699f3a3f1/eckitlib-2.5.0.34-cp315-cp315-manylinux_2_28_x86_64.whl", hash = "sha256:5931c45cbce0ca5fffcbe8be0729236fd1f48f8bf8ceb8c7e98af432bfaa9bf1", size = 36168595, upload-time = "2026-11-06T07:27:37.938Z" },
+]
+
+[[package]]
 name = "eumdac"
 version = "3.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -718,6 +751,7 @@ dev = [
 nwp = [
     { name = "cfgrib" },
     { name = "eccodes" },
+    { name = "eccodeslib", marker = "sys_platform == 'linux'" },
 ]
 qc = [
     { name = "titanlib" },
@@ -736,6 +770,7 @@ requires-dist = [
     { name = "cfgrib", marker = "extra == 'nwp'", specifier = ">=0.9" },
     { name = "duckdb", specifier = ">=1.1" },
     { name = "eccodes", marker = "extra == 'nwp'", specifier = ">=2.38" },
+    { name = "eccodeslib", marker = "sys_platform == 'linux' and extra == 'nwp'", specifier = ">=2.38" },
     { name = "eumdac", marker = "extra == 'satellite'", specifier = ">=3.0" },
     { name = "h5netcdf", marker = "extra == 'radar'", specifier = ">=1.4" },
     { name = "h5py", marker = "extra == 'radar'", specifier = ">=3.12" },
