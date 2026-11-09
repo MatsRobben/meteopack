@@ -80,6 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "remain, so a Slurm job can resubmit itself")
     p.add_argument("--download-workers", type=int, default=None,
                    help="stream: concurrent downloads (default: extra.kdp.download_workers)")
+    p.add_argument("--requests-per-second", type=float, default=None,
+                   help="stream: API request rate for whichever key is in use (default: "
+                        "extra.kdp.requests_per_second for that key file); the quota itself "
+                        "is always read from the API's X-Ratelimit headers")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="derive (kind: regularise or qc): override one config value for this run, "
                         "e.g. --set step_seconds=300 --set rain.rule=naive (repeatable)")
@@ -2230,6 +2234,7 @@ def stage_stream(ctx: Context) -> int:
                           download_workers=ctx.args.download_workers,
                           pack_workers=ctx.args.workers, redo=ctx.args.redo,
                           time_budget_s=budget, max_days=ctx.args.limit, stop=stop,
+                          requests_per_second=ctx.args.requests_per_second,
                           log=lambda line: print(line, flush=True))
 
 

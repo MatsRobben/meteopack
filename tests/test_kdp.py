@@ -174,3 +174,21 @@ def test_download_checks_the_size_and_keeps_a_complete_file(tmp_path: Path, monk
         c.download(remote, dest, attempts=2)
     assert "listing says 12" in seen["error"]
     assert calls == ["f.nc", "f.nc"]                  # a fresh URL per attempt
+
+
+def test_download_timings_separate_the_url_from_the_transfer(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv(kdp.KEY_FILE_ENV, raising=False)
+    c, _ = client(tmp_path, [])
+    monkeypatch.setattr(c, "download_url", lambda name: "https://s3/x")
+    body = b"\x89HDF\r\n\x1a\n" + b"1234"
+
+    def fake_fetch(url, dest, *, check, unit_key, **kw):
+        dest.write_bytes(body)
+        check(dest)
+        return kdp.RawFile(path=dest, sha256="", n_bytes=len(body), unit_key=unit_key,
+                           attempts=1)
+
+    monkeypatch.setattr(kdp.http, "fetch_file", fake_fetch)
+    c.download(kdp.RemoteFile("f.nc", size=len(body)), tmp_path / "f.nc")
+    assert c.stats["files"] == 1 and c.stats["bytes"] == len(body)
+    assert c.stats["url_s"] >= 0 and c.stats["transfer_s"] >= 0

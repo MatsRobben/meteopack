@@ -112,6 +112,9 @@ class Fetched:
     requests: int = 0
     key_file: str = ""
     skipped_known: int = 0
+    url_s: float = 0.0
+    transfer_s: float = 0.0
+    dl_wall_s: float = 0.0
 
 
 def _day(value: datetime) -> datetime:
@@ -153,14 +156,17 @@ class Stream:
                  client: kdp.KdpClient | None = None,
                  download_workers: int | None = None,
                  pack_workers: int | None = None,
-                 redo: bool = False) -> None:
+                 redo: bool = False,
+                 requests_per_second: float | None = None) -> None:
         self.cfg = cfg
         self.root = Path(root)
         self.settings = Settings.from_config(cfg)
+        # An explicit rate applies to whichever key is in use.
+        rates = {} if requests_per_second else self.settings.rates
         self.client = client or kdp.KdpClient(
             self.settings.dataset, self.settings.version,
             key_files=self.settings.key_files, base_url=self.settings.base_url,
-            rates=self.settings.rates, default_rate=self.settings.default_rate,
+            rates=rates, default_rate=requests_per_second or self.settings.default_rate,
             reserve=self.settings.reserve)
         self.download_workers = download_workers or self.settings.download_workers
         self.pack_workers = pack_workers or max(1, min(8, os.cpu_count() or 1))
@@ -205,6 +211,9 @@ class Stream:
         target = raw_dir(self.cfg, self.root, day)
         target.mkdir(parents=True, exist_ok=True)
 
+        stats0 = dict(getattr(self.client, "stats", {}) or {})
+        t_dl = time.perf_counter()
+
         def one(item):
             when, remote = item
             s = time.perf_counter()
@@ -227,6 +236,10 @@ class Stream:
                 if raw.attempts:
                     out.download_s.append(seconds)
                     out.bytes += raw.n_bytes
+        out.dl_wall_s = time.perf_counter() - t_dl
+        stats1 = dict(getattr(self.client, "stats", {}) or {})
+        out.url_s = stats1.get("url_s", 0.0) - stats0.get("url_s", 0.0)
+        out.transfer_s = stats1.get("transfer_s", 0.0) - stats0.get("transfer_s", 0.0)
         out.requests = self.client.requests_made - before
         out.wall_s = time.perf_counter() - t0
         return out
@@ -417,6 +430,14 @@ class Stream:
                 "download_s_per_file_mean": round(sum(fetched.download_s) / n_dl, 3)
                 if n_dl else None,
                 "download_mb": round(fetched.bytes / 1e6, 1),
+                # Per file: waiting for a URL (the key's rate and quota) vs
+                # moving the bytes (the network), and the day's aggregate rate.
+                "url_s_per_file_mean": round(fetched.url_s / n_dl, 3) if n_dl else None,
+                "transfer_s_per_file_mean": round(fetched.transfer_s / n_dl, 3)
+                if n_dl else None,
+                "download_wall_s": round(fetched.dl_wall_s, 2),
+                "download_mb_per_s": round(fetched.bytes / 1e6 / fetched.dl_wall_s, 1)
+                if fetched.dl_wall_s > 0 and n_dl else None,
                 "pack_s_per_file_mean": round(sum(pack_s) / len(pack_s), 3) if pack_s else None,
                 "pack_wall_s": round(pack_wall_s, 2),
                 "write_s": round(write_s, 2),
@@ -512,13 +533,15 @@ def run(cfg: ProductConfig, root: Path, start: datetime, end: datetime, *,
         download_workers: int | None = None, pack_workers: int | None = None,
         redo: bool = False, time_budget_s: float | None = None, max_days: int | None = None,
         stop: threading.Event | None = None, client: kdp.KdpClient | None = None,
+        requests_per_second: float | None = None,
         log: Callable[[str], None] = print) -> int:
     """Stream every day in ``[start, end)``. See the module docstring for exit codes."""
     t_start = time.monotonic()
     stop = stop or threading.Event()
     try:
         stream = Stream(cfg, root, client=client, download_workers=download_workers,
-                        pack_workers=pack_workers, redo=redo)
+                        pack_workers=pack_workers, redo=redo,
+                        requests_per_second=requests_per_second)
     except kdp.CredentialError as exc:
         log(f"error: {exc}")
         return EXIT_CREDENTIALS
@@ -579,7 +602,9 @@ def run(cfg: ProductConfig, root: Path, start: datetime, end: datetime, *,
                 f"failed_dl {len(status['failed_downloads'])} "
                 f"schema_fail {len(status['schema_failed'])} "
                 f"req {status['api_requests']} dl {t['download_mb']} MB "
-                f"dl/file {t['download_s_per_file_mean']} s pack/file "
+                f"dl/file {t['download_s_per_file_mean']} s (url {t['url_s_per_file_mean']} s, "
+                f"transfer {t['transfer_s_per_file_mean']} s, {t['download_mb_per_s']} MB/s) "
+                f"pack/file "
                 f"{t['pack_s_per_file_mean']} s write {t['write_s']} s "
                 f"shard {status['shard_bytes'] / 1e6:.1f} MB day {t['day_wall_s']} s "
                 f"(+fetch {t['fetch_wall_s']} s) quota {stream.client.limiter.state}")

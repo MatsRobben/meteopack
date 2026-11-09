@@ -227,6 +227,11 @@ class KdpClient:
         self.key: ApiKey | None = None
         self.limiter = QuotaLimiter(self.default_rate, reserve=reserve)
         self.requests_made = 0
+        #: Seconds spent obtaining URLs (including waiting on the limiter) and
+        #: transferring bytes from S3, summed over downloads. They separate
+        #: what the key's quota costs from what the network costs.
+        self.stats = {"url_s": 0.0, "transfer_s": 0.0, "files": 0, "bytes": 0}
+        self._stats_lock = threading.Lock()
         self.refresh_key()
 
     # ------------------------------------------------------------------ keys
@@ -358,15 +363,25 @@ class KdpClient:
                                unit_key=remote.filename, attempts=0)
         last: Exception | None = None
         for _ in range(attempts):
+            t0 = time.perf_counter()
             url = self.download_url(remote.filename)
+            t1 = time.perf_counter()
             try:
-                return http.fetch_file(url, dest, unit_key=remote.filename,
-                                       session=self.download_session, limiter=None,
-                                       retries=self.retries, backoff=self.backoff,
-                                       timeout=self.timeout, overwrite=True, check=check)
+                raw = http.fetch_file(url, dest, unit_key=remote.filename,
+                                      session=self.download_session, limiter=None,
+                                      retries=self.retries, backoff=self.backoff,
+                                      timeout=self.timeout, overwrite=True, check=check)
             except FetchError as exc:
                 last = exc
                 if exc.status is not None and exc.status not in (403, 400):
                     break
+            else:
+                t2 = time.perf_counter()
+                with self._stats_lock:
+                    self.stats["url_s"] += t1 - t0
+                    self.stats["transfer_s"] += t2 - t1
+                    self.stats["files"] += 1
+                    self.stats["bytes"] += raw.n_bytes
+                return raw
         assert last is not None
         raise last
