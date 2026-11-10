@@ -1,0 +1,19 @@
+# UTC ranges are half-open. Set end for a small pilot; null uses the source end.
+source: /vol/knmimo-nobackup/users/mrobben/meteopack_data/packed/radar/knmi_radar/rtcor_5min/v1/dataset.zarr
+output: /vol/knmimo-nobackup/users/mrobben/meteopack_data/training/radar/rtcor_central256/v1
+start: '2023-11-01T00:00:00Z'
+end: null
+cadence_seconds: 300
+crop: [254, 510, 222, 478]  # y start/stop, x start/stop
+encoding:
+  dry_threshold_mm: 0.01  # <= 0.01 mm is dry
+  step_mm: 0.02            # ties round up; values above 5.08 mm saturate
+storage:
+  chunk_frames: 4
+  shard_frames: 288
+  zstd_level: 3
+samples:
+  history: 4
+  forecast: 18
+  stride: 4
+  origin: '2023-11-01T00:00:00Z'

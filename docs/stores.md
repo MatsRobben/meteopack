@@ -116,6 +116,51 @@ All three were packed from the complete KNMI archives on 2026-11-01, passed
 sampled frames each (every variable of every sampled frame), checked by a
 script that decodes the HDF5 independently of meteopack's own code.
 
+### The 3D radar composite
+
+`packed/radar/knmi_radar/composite3d_5min/v1/` holds KNMI's 3D reflectivity
+composite (KNMI Data Platform dataset `3d-radar-composite` v1.0, files
+`3D_RADAR_COMPOSITE_YYYYMMDDHHMM.nc`) as **`(time, z, y, x)`**:
+
+| | |
+|---|---|
+| `reflectivity_dbz` | uint8, `dBZ = 0.5 * code - 32` (the calibration of `refl_5min`) |
+| code 0 | **no echo** (the file's -30 dBZ floor, native code 0) - the same "no echo" as `refl_5min`; codes 1-3 never occur, so a weak echo at -30 dBZ (code 4) stays distinct from no echo |
+| code 254 | **not observed** (the file's fill 65535: beyond the radars' reach at that height, or outside the composite) |
+| code 255 | **no data for this frame** (the fill value); the frame is flagged `is_missing_frame` or `is_corrupt_frame` |
+| `z` | 32 levels, 0.375 to 15.875 km every 500 m: the source's levels 1, 3, ..., 63 of 64 (subsampled, not averaged; `z.attrs["source_indices"]`) |
+| `y`, `x` | the `knmi_1km_stereo` grid, **north-up** - flipped from the south-up file, so pixel `[i, j]` is the same place as in `rtcor_5min` |
+| chunks | one time step, all levels, the whole 765 x 700 frame; one UTC day (288 steps) per shard; zstd 3 |
+
+`xr.open_zarr(...)` or `gridded.read(...)` decode it to dBZ with NaN for both
+254 and 255. To keep "no echo" as a value rather than -32 dBZ, read with
+`decode=False` and test `code == 0`.
+
+Every file is checked before it is packed (variables, dtype, shape and dims,
+the 64 heights, x/y against the RTCOR grid, projection, fill, units,
+add_offset, a per-file scale_factor in [0.0004, 0.0025], and the file's time
+against its name); a file that fails is never packed, its frame is flagged
+corrupt, the raw file is kept in `raw/radar/knmi_radar/composite3d_5min/quarantine/`,
+and the day's status says why. Each file is decoded with **its own**
+`scale_factor` - KNMI stretches every file's maximum to the top of the uint16
+range (0.0012-0.0018 seen). The structural fingerprint is pinned in the
+product config (`schema_fingerprint`); the manifest records every fingerprint
+and storage layout seen (`extra.schema_fingerprints`, `extra.storage_layouts`).
+Up to mid-2024 the files are chunked `(1, 32, 383, 350)`, later
+`(1, 1, 765, 700)`; that is storage, not content, and is not drift.
+
+Per-day status: `days/<YYYY>/<YYYY-MM-DD>.json` beside `dataset.zarr` -
+`state` (`done`, `partial`, `empty`, `failed`), the timestamps missing
+upstream, downloads that failed, files that failed their check, the scale
+range, the key file used, and timings. The manifest carries the per-day
+counts (`extra.days`). The archive's first file is
+`3D_RADAR_COMPOSITE_202405070850.nc` (not the documented 2023-11-01), so the
+store's axis starts 2024-05-07 00:00 and that first day is `partial`.
+
+Checked on 2026-11-09 against 219 local sample files that the stream never
+touched (2024-05-10, 2024-06-10, 2024-07-09): decoded values within 0.25 dBZ of the
+file, and the not-observed and no-echo masks identical pixel for pixel.
+
 ## Points stores (station networks)
 
 ```

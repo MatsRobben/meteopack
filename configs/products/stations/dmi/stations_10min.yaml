@@ -38,6 +38,7 @@ store:
 raw_layout:
   archive: none               # one JSON page per station-parameter-window
   granularity: year
+  compression: xz              # cold raw JSON; lossless xz after fetch
 
 retention:
   raw:

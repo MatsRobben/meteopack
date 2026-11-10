@@ -66,7 +66,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from meteopack.core import grids
+from meteopack.core import grids, raw_compression
 from meteopack.core.config import ProductConfig, RateLimit, SourceConfig, Variable
 from meteopack.core.timeline import Timeline
 from meteopack.sources.base import RawFile, TimeWindow, Unit
@@ -906,12 +906,13 @@ class MidasOpen:
         import polars as pl
 
         newest: dict[str, tuple[str, Path]] = {}
-        for path in Path(raw_root).rglob("*.csv"):
-            if path.name.startswith(".") or not path.stem.isdigit():
+        for path in Path(raw_root).rglob("*.csv*"):
+            name = raw_compression.logical_path(path)  # 2019.csv or 2019.csv.xz
+            if name.suffix != ".csv" or name.name.startswith(".") or not name.stem.isdigit():
                 continue
             sid = path.parent.name
-            if sid not in newest or path.stem > newest[sid][0]:
-                newest[sid] = (path.stem, path)
+            if sid not in newest or name.stem > newest[sid][0]:
+                newest[sid] = (name.stem, path)
         rows = []
         for _, path in newest.values():
             meta: dict[str, list[str]] = {}
@@ -1067,7 +1068,7 @@ class MidasOpen:
 
 
 def _head(path: Path, n: int = 4096) -> str:
-    with Path(path).open("rb") as f:
+    with raw_compression.open_logical(path) as f:
         return f.read(n).decode("utf-8", errors="replace")
 
 

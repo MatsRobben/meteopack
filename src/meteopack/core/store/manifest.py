@@ -30,8 +30,22 @@ def config_hash(cfg: BaseModel | dict[str, Any]) -> str:
     change the digest; only actual setting changes do.
     """
     payload = cfg.model_dump(mode="json") if isinstance(cfg, BaseModel) else cfg
+    payload = _without_unset_additions(payload)
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+#: Config fields added after stores were built, which hash as though they were
+#: absent while unset. Adding a field to ProductConfig puts `"field": null` in
+#: every dump, which would change the hash of every existing config and make
+#: `validate` call every store on disk stale.
+_ADDED_OPTIONAL = frozenset({"levels"})
+
+
+def _without_unset_additions(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    return {k: v for k, v in payload.items() if not (k in _ADDED_OPTIONAL and v is None)}
 
 
 #: Config fields that describe a store without changing a single stored value:

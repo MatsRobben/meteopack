@@ -211,7 +211,7 @@ def validate_gridded(cfg: ProductConfig, root: Path, *, layer: Layer = "packed",
         return report
 
     shape = tuple(int(n) for n in group[names[0]].shape)
-    report.stats["dims"] = dict(zip(gridded.DIMS, shape, strict=True))
+    report.stats["dims"] = dict(zip(gridded._dims_of(group[names[0]]), shape, strict=True))
     report.add("has a time axis", shape[0] > 0, f"{shape[0]} steps")
 
     stamps = np.asarray(group[gridded.TIME_NAME][:]).astype("datetime64[ns]")

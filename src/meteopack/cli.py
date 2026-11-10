@@ -1,4 +1,4 @@
-"""meteopack {scan,list,fetch,parse,pack,derive,validate,catalog} <target>
+"""meteopack {scan,list,fetch,parse,pack,stream,derive,validate,catalog} <target>
 
 Every stage is re-runnable. For `fetch` the ledger decides what is left to do,
 so running it twice is cheap and a preempted Slurm task costs at most its
@@ -20,6 +20,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from meteopack.core import raw_compression
+
 if TYPE_CHECKING:
     from meteopack.sources.base import RawFile, TimeWindow
 
@@ -29,10 +31,14 @@ logger = logging.getLogger("meteopack")
 _STARTED = time.time()
 
 #: Stages that write into the data root. Everything else only reads it.
-_WRITING_STAGES = frozenset({"fetch", "pack"})
+_WRITING_STAGES = frozenset({"fetch", "pack", "stream"})
 
-STAGES = ("scan", "list", "fetch", "parse", "pack", "derive", "validate", "catalog",
+STAGES = ("scan", "list", "fetch", "parse", "pack", "stream", "derive", "validate", "catalog",
           "credentials")
+
+#: Stages that go through a source's local raw layer; a product that is
+#: streamed (extra.stream) has none and is packed by `stream` instead.
+_RAW_STAGES = frozenset({"scan", "list", "fetch", "parse", "pack"})
 
 
 # --------------------------------------------------------------------- args
@@ -67,6 +73,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="catalog: what the source's raw layer is missing and why, per file "
                         "and per station x year, from the last fetch's listing and the ledger")
     p.add_argument("--out", help="catalog --gaps: directory to write the full tables to (CSV)")
+    p.add_argument("--redo", action="store_true",
+                   help="stream: re-pack days already done, from scratch")
+    p.add_argument("--time-budget", type=float, default=None, metavar="HOURS",
+                   help="stream: start no new day after this many hours; exit 75 if days "
+                        "remain, so a Slurm job can resubmit itself")
+    p.add_argument("--download-workers", type=int, default=None,
+                   help="stream: concurrent downloads (default: extra.kdp.download_workers)")
+    p.add_argument("--requests-per-second", type=float, default=None,
+                   help="stream: API request rate for whichever key is in use (default: "
+                        "extra.kdp.requests_per_second for that key file); the quota itself "
+                        "is always read from the API's X-Ratelimit headers")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="derive (kind: regularise or qc): override one config value for this run, "
                         "e.g. --set step_seconds=300 --set rain.rule=naive (repeatable)")
@@ -174,10 +191,15 @@ class Context:
     SIDECARS = frozenset({"station_catalog.json"})
 
     def raw_files(self) -> list[Path]:
-        return sorted(
+        files = {
             p for p in self.raw_root.rglob("*")
             if p.is_file() and p.suffix != ".part" and p.name not in self.SIDECARS
-        )
+        }
+        # `compress` publishes the verified .xz before it removes the original,
+        # so a crash in between leaves both; they hold the same bytes.
+        return sorted(p for p in files
+                      if raw_compression.compressed_path(p) == p
+                      or raw_compression.compressed_path(p) not in files)
 
     def plan(self, stage: str):
         from meteopack.jobs.plan import build_plan
@@ -214,6 +236,12 @@ def _outcome_of(raw) -> str:
     if raw.n_bytes == 0 or (content is not None and content.n_records == 0):
         return "empty"
     return "done"
+
+
+def _fetch_and_store(src, unit, raw_root: Path, codec: str):
+    """Fetch one unit and apply the product's storage compression to it."""
+    raw = src.fetch(unit, raw_root)
+    return None if raw is None else raw_compression.compress_raw(raw, codec)
 
 
 def _failure_fields(exc: BaseException) -> dict:
@@ -305,7 +333,9 @@ def stage_fetch(ctx: Context) -> int:
         previous = None
     pool = cf.ThreadPoolExecutor(max_workers=workers)
     try:
-        futures = {pool.submit(ctx.src.fetch, u, ctx.raw_root): (u, changing)
+        codec = ctx.cfg.raw_layout.compression
+        futures = {pool.submit(_fetch_and_store, ctx.src, u, ctx.raw_root, codec):
+                   (u, changing)
                    for u, changing in units}
         for future in cf.as_completed(futures):
             unit, changing = futures[future]
@@ -412,7 +442,8 @@ def _parse_gridded(ctx: Context, files: list[Path]) -> int:
     failed = 0
     for raw in _as_raw(files):
         try:
-            ds = ctx.src.parse(raw, ctx.cfg)
+            with raw_compression.materialized_raw(raw) as readable:
+                ds = ctx.src.parse(readable, ctx.cfg)
         except Exception as exc:                          # noqa: BLE001
             logger.error("parse failed for %s: %s", Path(raw.path).name, exc)
             failed += 1
@@ -431,7 +462,8 @@ def _parse_all(ctx: Context, files: list[Path]):
     for raw in _as_raw(files):
         path = raw.path
         try:
-            frame = ctx.src.parse(raw, ctx.cfg)
+            with raw_compression.materialized_raw(raw) as readable:
+                frame = ctx.src.parse(readable, ctx.cfg)
         except Exception as exc:                          # noqa: BLE001
             logger.error("parse failed for %s: %s", path.name, exc)
             continue
@@ -772,7 +804,8 @@ def _span_of(ctx: Context, path: Path):
     if not callable(reader):
         return None
     try:
-        return reader(path, cfg=ctx.cfg) if _takes_cfg(reader) else reader(path)
+        logical = raw_compression.logical_path(path)  # spans are read off the name
+        return reader(logical, cfg=ctx.cfg) if _takes_cfg(reader) else reader(logical)
     except Exception:  # noqa: BLE001 - an unreadable name is just one less span
         return None
 
@@ -1630,7 +1663,8 @@ def _run_scan(ctx: Context, files: list[Path], scan) -> dict:
     """
     workers = ctx.args.workers or len(os.sched_getaffinity(0))
     if workers <= 1 or len(files) < workers * 2:
-        return scan(_as_raw(files))
+        with raw_compression.materialized_all(files) as readable:
+            return scan(_as_raw(readable))
 
     from meteopack.jobs import packing
 
@@ -2164,8 +2198,49 @@ def _credential_state(name: str, registry) -> tuple[str, str]:
 
 # --------------------------------------------------------------------- main
 
+def stage_stream(ctx: Context) -> int:
+    """Download, check, pack and delete, one UTC day at a time (KDP products).
+
+    Without --window: from the product's first day to the start of today (UTC),
+    i.e. every complete day. Resumable: days already done are skipped.
+    """
+    import signal
+    import threading
+
+    from meteopack.jobs import stream_kdp
+
+    cfg = ctx.cfg
+    if cfg.extra.get("stream") != "kdp":
+        print(f"error: {cfg.store_id} is not a streamed product (extra.stream: kdp)",
+              file=sys.stderr)
+        return 2
+    if ctx.args.window:
+        start, end = ctx.window.start, ctx.window.end
+    else:
+        start = datetime.fromisoformat(str(cfg.extra["timeline_origin"]))
+        now = datetime.now(UTC)
+        end = datetime(now.year, now.month, now.day, tzinfo=UTC)
+    stop = threading.Event()
+
+    def on_term(signum, frame):  # pragma: no cover - exercised by Slurm
+        print(f"[stream] signal {signum}: finishing the current day, then stopping",
+              flush=True)
+        stop.set()
+
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGUSR1, on_term)
+    budget = ctx.args.time_budget * 3600 if ctx.args.time_budget else None
+    return stream_kdp.run(cfg, ctx.root, start, end,
+                          download_workers=ctx.args.download_workers,
+                          pack_workers=ctx.args.workers, redo=ctx.args.redo,
+                          time_budget_s=budget, max_days=ctx.args.limit, stop=stop,
+                          requests_per_second=ctx.args.requests_per_second,
+                          log=lambda line: print(line, flush=True))
+
+
 _STAGE_FUNCS = {
     "list": stage_list, "fetch": stage_fetch, "parse": stage_parse, "pack": stage_pack,
+    "stream": stage_stream,
     "scan": stage_scan, "validate": stage_validate, "catalog": stage_catalog,
 }
 
@@ -2187,6 +2262,10 @@ def main(argv: list[str] | None = None) -> int:
         ctx = Context(args)
     except (FileNotFoundError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.stage in _RAW_STAGES and ctx.cfg.extra.get("stream"):
+        print(f"error: {ctx.cfg.store_id} is streamed, not packed from a raw archive: run "
+              f"`meteopack stream {args.target} --product {ctx.cfg.product}`", file=sys.stderr)
         return 2
     return _STAGE_FUNCS[args.stage](ctx)
 

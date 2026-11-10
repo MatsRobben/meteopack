@@ -134,6 +134,26 @@ These are rate-limited rather than authenticated. The limits are in
 KNMI in particular counts requests, which is why one-file-per-observation
 sources are archived into tars on ingest.
 
+### KNMI Data Platform (the 3D radar composite)
+
+`meteopack stream knmi_radar --product composite3d_5min` reads its key from
+the first file that exists in `extra.kdp.api_key_files`
+(`~/.knmi_bulk_key`, then `~/.knmi_api_key`); `$KNMI_API_KEY_FILE` names
+another file and wins. The file holds the key alone, mode 600. The key is
+never logged; the status records name only the file it came from.
+
+| key | rate (documented) | quota | used here at |
+|---|---|---|---|
+| registered (<https://developer.dataplatform.knmi.nl/>, minutes) | 200 req/s | 1000 req/hour | 2 req/s |
+| bulk (on request from KNMI) | 100 req/s | the number of files in the dataset | 20 req/s |
+
+Each file costs one request (its download URL) and each day one listing; the
+download itself is S3 and free. The quota is read from the `X-Ratelimit-*`
+headers of every answer, so no quota setting exists. **A bulk key is picked up
+at the next day boundary** of a running stream - drop it at
+`~/.knmi_bulk_key` and nothing needs restarting; the per-key rate is
+`extra.kdp.requests_per_second`, or `--requests-per-second` for one run.
+
 ---
 
 ## 4. Not wired up yet — what to request, and from whom
@@ -144,7 +164,6 @@ take weeks.
 
 | what | where | why it matters | lead time |
 |---|---|---|---|
-| **KNMI Data Platform** (`KNMI_API_KEY`) | <https://developer.dataplatform.knmi.nl/> | re-pulling the in-situ and radar archives from the API instead of the delivered tars | minutes, self-service |
 | **EUMETNET OPERA** composites | via KNMI's OPERA membership | the pan-European radar leg | institutional, ask internally first |
 | **Météo-France portail-api** | <https://portail-api.meteofrance.fr/> | near-real-time French observations; the archive leg needs no key | days |
 | **MET Norway Frost** | <https://frost.met.no/auth/requestCredentials.html> | Norwegian archive; free client ID | minutes |

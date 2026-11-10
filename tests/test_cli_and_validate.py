@@ -862,7 +862,7 @@ def test_a_done_unit_whose_file_has_gone_is_fetched_again(tmp_path):
     ctx = _ctx(tmp_path, "fetch", "dmi")
     ctx._src = _feed(tmp_path, plan)
     stage_fetch(ctx)
-    next(ctx.raw_root.rglob("2012.csv")).unlink()
+    next(ctx.raw_root.rglob("2012.csv*")).unlink()  # .csv.xz: dmi compresses raw
     again = _ctx(tmp_path, "fetch", "dmi")
     again._src = _feed(tmp_path, plan)
     stage_fetch(again)
