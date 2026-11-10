@@ -1,0 +1,25 @@
+# KNMI HARMONIE-AROME forecasts from the KNMI Data Platform (KDP).
+#
+# Nothing here is fetched with `meteopack fetch`: the products are STREAMED
+# day by day (`meteopack stream knmi_harmonie --product cy43_nl_4km`, see the
+# product config), so there is no raw archive and no Source class. This file
+# exists because every source has one: it names the host and the polite rate.
+#
+# Loads into meteopack.core.config.SourceConfig.
+
+name: knmi_harmonie
+
+base_url: https://api.dataplatform.knmi.nl/open-data/v1
+
+rate_limit:
+  # The KDP meters requests, not bytes: a registered key allows 1000 an hour
+  # (read from the X-Ratelimit headers by meteopack.core.kdp). The stream's own
+  # settings are extra.kdp in the product config.
+  requests_per_second: 2.0
+  max_workers: 6
+  max_retries: 6
+  backoff_seconds: 2.0
+
+# The key is read from a file (~/.knmi_api_key, or $KNMI_API_KEY_FILE), never
+# from the environment or the config.
+credentials_env: []

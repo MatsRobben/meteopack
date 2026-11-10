@@ -1,0 +1,335 @@
+# KNMI HARMONIE-AROME Cy43 (UWC-West, NL domain) forecasts on HARMONIE's own
+# native regular lat/lon grid (~2 km). Twin of cy43_nl_4km.yaml (the same grid
+# coarsened 2 x 2): the two differ only in product, description, grid_id,
+# coarsen_factor and the spatial chunk - pick one to stream.
+#
+# STREAMED from the KNMI Data Platform day by day (24 hourly runs a day) -
+#   list -> download each run's files -> check schema -> coarsen + pack -> delete raw
+# - by `meteopack stream knmi_harmonie --product cy43_nl_2km`
+# (meteopack.jobs.stream_kdp with the `harmonie_cy43` format, reader
+# meteopack.sources.nwp.knmi_harmonie). Raw files never accumulate. Nothing
+# is reprojected: a consumer regrids at load time.
+#
+# One model run, two packagings, switched per run at extra.harmonie.p1_from:
+#   uwcw_extra_lv_ha43_nl_2km v1.0  NetCDF, one file per parameter, +1..+60 h
+#       2024-06-25T06 -> now (9 files, 9 API requests, ~200 MB a run)
+#   harmonie_arome_cy43_p1 v1.0     GRIB1 tar, one member per lead, +0..+60 h
+#       2026-01-07T22 -> now (1 API request; the 13 members are ranged reads
+#       of the tar, ~200 MB a run, no quota)
+# Both are the same model output: every field agrees to the source's packing
+# precision once the units are converted (checked on 2026-01-08). A run P1
+# lacks falls back to the NetCDF.
+#
+# Store: (time, lead_time, y, x) per field. `time` is the run (forecast
+# reference) time, hourly; `lead_time` 0..12 h; valid time = time +
+# lead_time. Lead 0 exists only in P1 runs (from 2026-01-08), and not for the
+# two past-hour fields (gust, 1 h precipitation): elsewhere it is missing.
+source: knmi_harmonie
+description: >-
+  KNMI HARMONIE-AROME Cy43 NL forecasts, hourly runs from 2024-06-25, leads +0..+12 h,
+  10 near-surface fields on HARMONIE's own lat/lon grid, not resampled
+  (390 x 390, 0.029 x 0.018 deg, ~2 km), 16-bit.
+product: cy43_nl_2km
+version: 1
+
+cadence_seconds: 3600          # one run an hour; `time` is the run time
+grid_id: harmonie_nl_2km
+
+levels:
+  name: lead_time
+  units: hours
+  standard_name: forecast_period
+  long_name: forecast lead time (valid time = time + lead_time)
+  positive: null
+  values: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+
+store:
+  kind: gridded
+  # One run of one field per chunk (all 13 leads, the whole frame): a training
+  # sample reads one chunk per field. One UTC day of runs (24) per shard, so a
+  # stream day writes exactly one shard file per field and never shares it.
+  chunks: {time: 1, lead_time: 13, y: 390, x: 390}
+  shard: {time: 24, lead_time: 13, y: 390, x: 390}
+  # Blosc-zstd with byte shuffle, as OPERA, but at level 9: 8.8 % smaller than
+  # level 5 on the same chunks (trial runs, 2026-11-09), at a write cost that
+  # is noise next to the KDP quota.
+  compressor: blosc
+  compression_level: 9
+  partition_by: [year]
+
+raw_layout: {archive: none, granularity: day}
+
+retention:
+  raw: {keep: false, after: pack}
+  canonical: {keep: true}
+  derived: {keep: true}
+
+attrs:
+  title: KNMI HARMONIE-AROME Cy43 NL forecasts, leads 0-12 h, native lat/lon grid
+  institution: Royal Netherlands Meteorological Institute (KNMI); packed by meteopack
+  source: >-
+    KNMI Data Platform: uwcw_extra_lv_ha43_nl_2km v1.0 (NetCDF, runs before
+    2026-01-08T00) and harmonie_arome_cy43_p1 v1.0 (GRIB1, from 2026-01-08T00),
+    HARMONIE-AROME Cy43 UWC-West, NL 390x390 regular lat/lon grid
+    (0.029 x 0.018 deg, ~2 km).
+  references: https://dataplatform.knmi.nl/dataset/uwcw-extra-lv-ha43-nl-2km-1-0
+  comment: >-
+    HARMONIE's own regular lat/lon grid, not reprojected or resampled,
+    north-up. time
+    is the run (forecast reference) time; lead_time 0..12 h; valid time = time
+    + lead_time. Lead 0 only from P1 (2026-01-08 on), not for gust and 1 h
+    precipitation. Winds are earth-relative (eastward u, northward v).
+    cloud_base code 65533 = NO CLOUD BASE (cloud-free): mask it.
+
+# Names, units and calibration of the store. The steps are well below what the
+# model resolves (0.1 hPa, 0.05 K, 0.1 % RH, 0.05-0.1 m/s, 2-10 m) and set the
+# store's size: finer steps (1 Pa, 0.01 K, 1e-4, 0.01 m/s, 0.25-1 m) cost 40 %
+# more on the first trial day. Precipitation keeps 0.01 mm. `source_key` is the NetCDF
+# parameter (file name part); how each field is read from each packaging is
+# under extra.harmonie.fields. valid_min/valid_max are sanity limits on the
+# converted source values: a file outside them (a unit change upstream) fails
+# its check and is never packed.
+variables:
+  - name: mslp
+    source_key: air-pressure-at-mean-sea-level-hagl
+    units: Pa
+    standard_name: air_pressure_at_mean_sea_level
+    long_name: air pressure at mean sea level
+    valid_min: 85000.0
+    valid_max: 110000.0
+    encoding: {dtype: uint16, scale: 10.0, offset: 80000.0}
+  - name: t2m
+    source_key: air-temperature-hagl
+    units: K
+    standard_name: air_temperature
+    long_name: air temperature at 2 m
+    valid_min: 200.0
+    valid_max: 340.0
+    encoding: {dtype: uint16, scale: 0.05, offset: 200.0}
+  - name: rh2m
+    source_key: relative-humidity-hagl
+    units: "1"
+    standard_name: relative_humidity
+    long_name: relative humidity at 2 m (fraction, 0-1)
+    valid_min: -0.01
+    valid_max: 1.5
+    encoding: {dtype: uint16, scale: 0.001, offset: 0.0}
+  - name: u10
+    source_key: wind-speed-components-hagl
+    units: m s-1
+    standard_name: eastward_wind
+    long_name: eastward wind at 10 m (earth-relative)
+    valid_min: -120.0
+    valid_max: 120.0
+    encoding: {dtype: int16, scale: 0.05, offset: 0.0}
+  - name: v10
+    source_key: wind-speed-components-hagl
+    units: m s-1
+    standard_name: northward_wind
+    long_name: northward wind at 10 m (earth-relative)
+    valid_min: -120.0
+    valid_max: 120.0
+    encoding: {dtype: int16, scale: 0.05, offset: 0.0}
+  - name: gust10
+    source_key: wind-speed-of-gust-01h-hagl
+    units: m s-1
+    standard_name: wind_speed_of_gust
+    long_name: wind gust speed at 10 m, maximum over the past hour (coarsened - block maximum); no lead 0
+    valid_min: 0.0
+    valid_max: 150.0
+    encoding: {dtype: uint16, scale: 0.1, offset: 0.0}
+  - name: mld
+    source_key: mixed-layer-depth-atm
+    units: m
+    standard_name: atmosphere_boundary_layer_thickness
+    long_name: mixed-layer depth (boundary-layer height)
+    valid_min: 0.0
+    valid_max: 12000.0
+    encoding: {dtype: uint16, scale: 2.0, offset: 0.0}
+  - name: cloud_base
+    source_key: cloud-base-altitude-atm
+    units: m
+    standard_name: cloud_base_altitude
+    long_name: "cloud base altitude. MASK code 65533 (decodes to 327665 m): NO CLOUD BASE (cloud-free)"
+    valid_min: 0.0
+    valid_max: 25000.0
+    encoding: {dtype: uint16, scale: 5.0, offset: 0.0}
+  - name: visibility
+    source_key: visibility-in-air-hagl
+    units: m
+    standard_name: visibility_in_air
+    long_name: visibility (the model caps it at 50 km)
+    valid_min: 0.0
+    valid_max: 100000.0
+    encoding: {dtype: uint16, scale: 10.0, offset: 0.0}
+  - name: tp_1h
+    source_key: total-precipitation-accumulation-01h-hagl
+    units: mm
+    standard_name: precipitation_amount
+    long_name: total precipitation over the hour ending at the valid time; no lead 0
+    valid_min: -0.05
+    valid_max: 500.0
+    encoding: {dtype: uint16, scale: 0.01, offset: 0.0}
+
+frame_variables:
+  - name: source_dataset
+    dtype: uint8
+    fill_value: 0
+    long_name: KDP dataset this run was packed from
+    flag_values: [0, 1, 2]
+    flag_meanings: [no_run, uwcw_extra_lv_ha43_nl_2km_netcdf, harmonie_arome_cy43_p1_grib]
+  - name: fields_present
+    dtype: uint16
+    fill_value: 0
+    long_name: >-
+      bit mask of the fields packed for this run, bit i = variable i in the order
+      mslp t2m rh2m u10 v10 gust10 mld cloud_base visibility tp_1h (1023 = all)
+  - name: is_partial_run
+    dtype: int8
+    fill_value: -1
+    long_name: run packed with some fields missing (missing upstream or failed their check)
+    flag_values: [-1, 0, 1]
+    flag_meanings: [no_run, complete, partial]
+
+extra:
+  readme: |
+    ## HARMONIE specifics
+
+    - **`cloud_base`: code 65533 means NO CLOUD BASE (a cloud-free column).** It
+      decodes to 327665 m - not a height, and not NaN. Mask it, e.g.
+      `cb.where(cb < 3e5)` decoded or `code != attrs["cloud_free_code"]` raw.
+      Coarsened, a block is cloud-free when less than half of its cells have a
+      cloud base; otherwise it holds the mean over its cloudy cells.
+    - **Axes.** `time` is the run (forecast reference) time, hourly; `lead_time`
+      is 0..12 h; the field at `[t, k]` is valid at `time[t] + lead_time[k]`.
+      For an issue time t0 the newest run started at or before t0 is
+      `floor(t0, 1 h)`; its first valid hour after t0 is lead 1.
+    - **Lead 0** exists only for runs packed from P1 (`source_dataset == 2`,
+      from 2026-01-08): the NetCDF archive has no +0 and holds the missing code
+      there. Gust and 1 h precipitation are over the past hour and are missing
+      at lead 0 in every run.
+    - **Grid.** HARMONIE's own regular lat/lon grid (spherical earth, radius
+      6367470 m), not reprojected; `x` = longitude, `y` = latitude of the cell
+      centres, north-up (row 0 northernmost); `lat`/`lon` per cell. The native
+      grid is 390 x 390 cells of 0.029 x 0.018 deg (~2 km); a coarsening factor
+      f averages f x f blocks (no interpolation; gust takes the block maximum)
+      and, if f does not divide 390, drops the last 390 % f rows (north) and
+      columns (east) - none for f = 1 or 2. 65534 / 32766 = missing (no run,
+      or no such lead); the out-of-image code is never used.
+    - **Units.** Pa, K, 1 (fraction), m s-1, m, mm, converted from the NetCDF's
+      hPa, degC, kt (1 kt = 1852/3600 m s-1) and ft (0.3048 m). Winds are
+      earth-relative (east/north).
+    - **Precipitation** is the accumulation over the hour ending at the valid
+      time. From P1 it is APCP(L) - APCP(L-1) of the run-accumulated GRIB field
+      (negative packing noise, < 0.003 mm, clipped to 0); it agrees with the
+      NetCDF's own 1 h field to < 0.003 mm.
+    - **Per run:** `source_dataset` (1 NetCDF, 2 P1), `fields_present` (bit mask),
+      `is_partial_run`; `provenance.parquet` lists the run's files.
+      `days/<YYYY>/<date>.json` says per day what was packed and what was missing
+      upstream.
+  stream: kdp
+  stream_format: harmonie_cy43
+  # The store's time axis starts at the first run's day; days with no runs
+  # (2024-08-05..20, missing upstream) are written as missing runs.
+  timeline_origin: "2024-06-25T00:00:00Z"
+  stream_start: "2024-06-25T00:00:00Z"
+  kdp:
+    base_url: https://api.dataplatform.knmi.nl/open-data/v1
+    # The client's own dataset; P1 is listed and fetched with the same key
+    # (extra.harmonie.p1.dataset).
+    dataset: uwcw_extra_lv_ha43_nl_2km
+    version: "1.0"
+    filename_prefix: uwcw_ha43_nl_2km_
+    # Walked at every day boundary; the first file that exists wins
+    # ($KNMI_API_KEY_FILE overrides). Not ~/.knmi_bulk_key: that is the 3D
+    # radar composite's dataset key. A KDP bulk key is issued per dataset: one
+    # for uwcw_extra_lv_ha43_nl_2km speeds up the NetCDF era (runs before
+    # p1_from) only - P1 requests with it would be refused (403, the stream
+    # stops with exit 2), so remove it before the stream reaches 2026-01-08.
+    api_key_files: ["~/.knmi_bulk_key_harmonie", "~/.knmi_api_key"]
+    requests_per_second:
+      "~/.knmi_bulk_key_harmonie": 20.0
+    default_requests_per_second: 2.0
+    quota_reserve: 5
+    # Runs fetched at once (each run's files one after the other).
+    download_workers: 6
+  harmonie:
+    # Runs at or after this instant come from P1 (when listed); earlier ones
+    # from the NetCDF archive. P1's archive starts at 2026-01-07T22.
+    p1_from: "2026-01-08T00:00:00Z"
+    # A month of listings is fetched at once (one request per dataset and
+    # parameter) and reused for this long.
+    listing_ttl_s: 21600
+    source_grid:
+      lat0: 49.0
+      dlat: 0.018
+      nlat: 390
+      lon0: 0.0
+      dlon: 0.029
+      nlon: 390
+      tolerance_deg: 0.0001
+    # Block-mean coarsening on the native grid: 1 = none (this product), 2 =
+    # 2 x 2 blocks (cy43_nl_4km). Must match grid_id (checked at start-up).
+    coarsen_factor: 1
+    # A block holds a value if at least this share of its cells has one (cloud
+    # base: a cloud base, else "no cloud base").
+    min_valid: 0.5
+    netcdf:
+      prefix: uwcw_ha43_nl_2km_
+      grid_mapping_proj4: "+proj=longlat +a=6367470 +e=0 +no_defs"
+    p1:
+      dataset: harmonie_arome_cy43_p1
+      version: "1.0"
+      tar: "HARM43_V1_P1_{run:%Y%m%d%H}.tar"
+      member: "HA43_N20_{run:%Y%m%d%H}00_{lead:03d}00_GB"
+      table2_version: 253
+      centre: 99
+    # How each store field is read. NetCDF: file parameter, variable, the
+    # `units` attribute the file must carry, the height level it must name,
+    # and value = factor * file + offset. P1: GRIB1 keys
+    # [indicatorOfParameter, indicatorOfTypeOfLevel, level, timeRangeIndicator]
+    # and how they combine: `single`, `hypot` (gust speed from its
+    # components), `accumulation` (APCP(L) - APCP(L-1); APCP(0) = 0).
+    # `aggregate` (mean, max) reduces a coarsening block; `lead0: false` marks
+    # a field with no +0.
+    fields:
+      mslp:
+        nc: {param: air-pressure-at-mean-sea-level-hagl, var: air-pressure-at-mean-sea-level-hagl, units: hPa, level: 0, factor: 100.0}
+        p1: {keys: [[1, 103, 0, 0]], combine: single}
+      t2m:
+        nc: {param: air-temperature-hagl, var: air-temperature-hagl, units: C, level: 2, offset: 273.15}
+        p1: {keys: [[11, 105, 2, 0]], combine: single}
+      rh2m:
+        nc: {param: relative-humidity-hagl, var: relative-humidity-hagl, units: "-", level: 2}
+        p1: {keys: [[52, 105, 2, 0]], combine: single}
+      u10:
+        nc: {param: wind-speed-components-hagl, var: x-wind-hagl, units: kts, level: 10, factor: 0.5144444444444445}
+        p1: {keys: [[33, 105, 10, 0]], combine: single}
+      v10:
+        nc: {param: wind-speed-components-hagl, var: y-wind-hagl, units: kts, level: 10, factor: 0.5144444444444445}
+        p1: {keys: [[34, 105, 10, 0]], combine: single}
+      gust10:
+        nc: {param: wind-speed-of-gust-01h-hagl, var: wind-speed-of-gust-01h-hagl, units: kts, level: 10, factor: 0.5144444444444445}
+        p1: {keys: [[162, 105, 10, 2], [163, 105, 10, 2]], combine: hypot}
+        aggregate: max   # a maximum: coarsened by the block maximum, not the mean
+        lead0: false     # the max over the past hour: no +0
+      mld:
+        nc: {param: mixed-layer-depth-atm, var: mixed-layer-depth-atm, units: m, level: 0}
+        p1: {keys: [[67, 105, 0, 0]], combine: single}
+      cloud_base:
+        nc: {param: cloud-base-altitude-atm, var: cloud-base-altitude-atm, units: ft, level: 0, factor: 0.3048}
+        p1: {keys: [[186, 200, 0, 0]], combine: single}
+        # NaN (NetCDF) / outside the bitmap (GRIB) = no cloud base, not missing.
+        undefined: cloud_free
+      visibility:
+        nc: {param: visibility-in-air-hagl, var: visibility-in-air-hagl, units: m, level: 2}
+        p1: {keys: [[20, 105, 0, 0]], combine: single}
+      tp_1h:
+        nc: {param: total-precipitation-accumulation-01h-hagl, var: total-precipitation-accumulation-01h-hagl, units: mm, level: 0}
+        p1: {keys: [[61, 105, 0, 4]], combine: accumulation}
+        clip_min: 0.0
+        lead0: false     # the hour ending at the valid time: no +0
+    # Structural fingerprints (knmi_harmonie run descriptor) per packaging. A
+    # run with another fingerprint that passes every check is packed and
+    # reported as drift; one that fails a check is never packed.
+    pinned_fingerprints: {}

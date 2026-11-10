@@ -1,0 +1,170 @@
+# EUMETNET OPERA European radar rain-rate composite, 15-minute, 2 km, cropped
+# natively to a window around the Netherlands.
+#
+# STREAMED from the public archive bucket day by day -
+#   list -> download 96 files -> check schema -> crop + pack -> delete raw -> status
+# - by `meteopack stream opera --product rate_15min` (meteopack.jobs.stream_kdp
+# with the `opera_odim` format, reader meteopack.sources.radar.opera), so the
+# raw archive (~120 MB/day) never accumulates. `fetch`/`pack` refuse it.
+#
+# Two production chains, one store, the chain recorded per frame:
+#   ODYSSEY  OPERA@...@0@QIND_RATE.h5  2012-09 .. 2024-07-05 06:00 (inclusive)
+#   NIMBUS   OPERA@...@0@RATE.h5       2024-07-05 05:30 ..
+# The series has a BREAK at the cutover (different algorithms); nothing here
+# corrects for it - values are packed as the files give them.
+source: opera
+description: >-
+  EUMETNET OPERA radar rain rate, 15-minute, native 2 km LAEA grid, 880x880
+  window around the 1536 km KNMI training square; ODYSSEY to 2024-07-05 06:00,
+  NIMBUS after (per-frame `chain`).
+product: rate_15min
+version: 1
+
+cadence_seconds: 900
+grid_id: opera_2km_laea_nl
+
+store:
+  kind: gridded
+  # One time step per inner chunk in 2 x 2 spatial tiles of 440 x 440: a
+  # whole frame is four chunk reads from one shard file, a training patch
+  # touches one to four. One UTC day (96 steps) per shard, so a stream day
+  # writes exactly one shard file and never shares it.
+  chunks: {time: 1, y: 440, x: 440}
+  shard: {time: 96, y: 880, x: 880}
+  # Blosc-zstd 5 with byte shuffle (zarr's choice for uint16): 18-20 % smaller
+  # than plain zstd 3 at the same write and read speed, measured on a wet, a
+  # mixed and a dry day (31.7 / 7.9 / 3.1 MB against 38.5 / 9.8 / 3.9 MB a day).
+  compressor: blosc
+  compression_level: 5
+  partition_by: [year]
+
+raw_layout: {archive: none, granularity: day}
+
+retention:
+  # Raw files live only for the day being packed; a file that fails its
+  # schema check is kept in raw/.../quarantine/.
+  raw: {keep: false, after: pack}
+  canonical: {keep: true}
+  derived: {keep: true}
+
+attrs:
+  title: EUMETNET OPERA radar rain-rate composite, 15-minute, 2 km, window around the Netherlands
+  institution: EUMETNET OPERA (composite); packed by meteopack
+  source: >-
+    OPERA composites from the EUMETNET open radar data archive
+    (s3://openradar-archive, https://s3.waw3-1.cloudferro.com/openradar-archive/),
+    ODIM HDF5: ODYSSEY QIND_RATE.h5 up to and including 2024-07-05 06:00 UTC,
+    NIMBUS RATE.h5 after. Licence CC BY 4.0, property rights EUMETNET.
+  references: https://eumetnet.github.io/openradardata-documentation/
+  comment: >-
+    uint16 codes, mm/h = 0.01 * code. Code 0 is NO RAIN (the file's undetect:
+    observed, no precipitation). 65535 = nodata (outside the coverage of the
+    contributing radars); 65534 = no data for this frame (the fill; see
+    is_missing_frame / is_corrupt_frame). Rates above 655.33 mm/h are clipped.
+    The window is the native OPERA 2 km grid, not resampled: store pixel
+    [i, j] is native pixel [756 + i, 389 + j]. The per-frame `chain` says which
+    production chain made each frame; the two are not homogeneous and no
+    correction is applied.
+
+variables:
+  - name: rain_rate_mmh
+    source_key: RATE
+    units: mm h-1
+    standard_name: lwe_precipitation_rate
+    long_name: Radar instantaneous rain rate (OPERA composite)
+    valid_min: 0.0
+    valid_max: 655.33
+    no_echo: 0.0   # the file's undetect (-8888000): observed, no rain
+    encoding:
+      dtype: uint16
+      scale: 0.01
+      offset: 0.0
+      missing: 65534       # the fill: a frame with no data
+      out_of_image: 65535  # the file's nodata (-9999000): no radar coverage
+
+frame_variables:
+  - name: chain
+    dtype: uint8
+    fill_value: 0
+    long_name: OPERA production chain that made this frame
+    flag_values: [0, 1, 2]
+    flag_meanings: [no_frame, ODYSSEY, NIMBUS]
+  - name: n_radars
+    dtype: int16
+    fill_value: -1
+    long_name: number of radars listed as contributing in the file's /how/nodes (-1 = no frame)
+  - name: has_nldhl
+    dtype: int8
+    fill_value: -1
+    long_name: Den Helder radar (nldhl) listed in /how/nodes
+    flag_values: [-1, 0, 1]
+    flag_meanings: [no_frame, absent, present]
+  - name: has_nlhrw
+    dtype: int8
+    fill_value: -1
+    long_name: Herwijnen radar (nlhrw) listed in /how/nodes
+    flag_values: [-1, 0, 1]
+    flag_meanings: [no_frame, absent, present]
+
+extra:
+  # Appended to the store's README.md.
+  readme: |
+    ## OPERA specifics
+
+    - **Two chains, one break.** `chain` 1 = ODYSSEY (`QIND_RATE.h5`, up to and
+      including 2024-07-05 06:00, data window T-10..T+5 min), 2 = NIMBUS
+      (`RATE.h5`, from 06:15, instantaneous). Values are as the files give them;
+      calibrate each chain separately.
+    - Codes: 0 = no rain (the file's undetect), 65535 = no radar coverage (nodata),
+      65534 = no data for this frame; rates above 655.33 mm/h are clipped
+      (`n_clipped` in provenance.parquet).
+    - Native OPERA 2 km LAEA grid, not resampled: store pixel [i, j] is native
+      pixel [756 + i, 389 + j] (`attrs["opera_window"]`).
+    - `n_radars`, `has_nldhl`, `has_nlhrw` come from the file's /how/nodes
+      (-1 = no frame); provenance.parquet holds the full node list per file.
+    - The time axis starts 2013-01-01; days never streamed read as missing frames.
+      `days/<YYYY>/<date>.json` says per day what was streamed and what is
+      missing upstream.
+  stream: s3
+  stream_format: opera_odim
+  # The store's time axis starts here and grows forward day by day. It is set
+  # well before the first streamed day so the store can later be filled back
+  # to 2013 without a rebuild: unwritten steps cost no disk and read as missing
+  # frames (is_missing_frame).
+  timeline_origin: "2013-01-01T00:00:00Z"
+  # Where `meteopack stream` starts without --window (to the start of today).
+  stream_start: "2023-11-01T00:00:00Z"
+  s3:
+    endpoint: https://s3.waw3-1.cloudferro.com
+    bucket: openradar-archive
+    # One UTC day's composites (all products; the format picks RATE files).
+    day_prefix: "{day:%Y/%m/%d}/OPERA/COMP/OPERA@"
+    download_workers: 8
+    requests_per_second: 50.0
+  opera:
+    # Last ODYSSEY frame. ODYSSEY up to and including this instant, NIMBUS after.
+    cutover: "2024-07-05T06:00:00Z"
+    gain: 1.0
+    offset: 0.0
+    nodata: -9999000.0
+    undetect: -8888000.0
+    native_grid:
+      projdef: "+proj=laea +lat_0=55.0 +lon_0=10.0 +x_0=1950000.0 +y_0=-2100000.0 +units=m +ellps=WGS84"
+      xsize: 1900
+      ysize: 2200
+      xscale: 2000.0
+      yscale: 2000.0
+      ul_lonlat: [-39.5357864125034, 67.02283275830867]
+      lr_lonlat: [29.421038635578032, 31.98765027794496]
+      corner_tolerance_deg: 0.0001
+    # The store's window, half-open: rows [row0, row0 + ny), cols [col0, col0 + nx).
+    # Must match grid opera_2km_laea_nl (checked at start-up).
+    window: {row0: 756, col0: 389, ny: 880, nx: 880}
+    # Frame variable -> radar id looked up in /how/nodes.
+    flag_radars: {has_nldhl: nldhl, has_nlhrw: nlhrw}
+    # Structural fingerprints (opera.check_schema descriptor) per chain. A file
+    # with another fingerprint that passes every check is packed and reported
+    # as drift; one that fails a check is never packed.
+    pinned_fingerprints:
+      odyssey: 97193e3494218435   # 7 samples 2012-09-15 .. 2024-07-02 12:15
+      nimbus: f4d04f65464c7f58    # 3 samples 2024-08-24 .. 2026-02-15

@@ -1,4 +1,12 @@
-"""Stream a KDP product into a gridded store one UTC day at a time.
+"""Stream a remote product into a gridded store one UTC day at a time.
+
+Two remotes (``extra.stream``): ``kdp``, the KNMI Data Platform (a key, a
+quota, :class:`meteopack.core.kdp.KdpClient`), and ``s3``, a public bucket read
+anonymously (:class:`meteopack.core.s3.S3Client`). What the files are - how a
+day is listed, which file fills which time step, how one is checked and
+packed - is the product's *format* (``extra.stream_format``, default
+``knmi_radar_3d``; see :func:`format_for`), so the loop below is the same for
+every product.
 
 For each day: list -> download that day's files (bounded concurrency, one
 shared quota-aware limiter, retries, temp file + atomic rename, size check) ->
@@ -19,6 +27,12 @@ Resumable and idempotent:
 Status records live beside the store, ``days/<YYYY>/<YYYY-MM-DD>.json``, and
 the manifest carries the per-day counts and the schema fingerprints seen
 across the archive (drift report).
+
+A time step's "file" may be a bundle: a format that defines ``download``
+fetches it itself (an NWP run is nine NetCDF files, or twelve members of a
+remote tar, into one directory), a format that defines ``variables`` packs
+several fields per time step, and a check that carries ``file_errors`` /
+``quarantine`` fails single files of a bundle without failing the rest.
 
 Exit codes of :func:`run`: 0 the window is finished (every day done, partial
 or empty), 75 stopped early (time budget or SIGTERM) with days left - run it
@@ -44,6 +58,7 @@ import numpy as np
 
 from meteopack.core import kdp
 from meteopack.core.config import ProductConfig, layer_path
+from meteopack.core.encoding import Encoding
 from meteopack.core.store import gridded, manifest
 from meteopack.core.timeline import Timeline
 from meteopack.sources.radar import knmi_radar_3d as r3d
@@ -64,6 +79,10 @@ LOCK_NAME = ".stream.lock"
 MAX_SCHEMA_DAYS = 2
 
 
+#: The remotes a product can be streamed from (``extra.stream``).
+REMOTES = ("kdp", "s3")
+
+
 @dataclass(slots=True)
 class Settings:
     base_url: str
@@ -76,13 +95,33 @@ class Settings:
     reserve: int
     download_workers: int
     origin: datetime
+    #: ``kdp`` or ``s3``.
+    remote: str = "kdp"
+    #: s3 only: the bucket, and the day's key prefix as a format string of `day`.
+    bucket: str = ""
+    day_prefix: str = ""
 
     @classmethod
     def from_config(cls, cfg: ProductConfig) -> Settings:
+        remote = cfg.extra.get("stream")
+        origin = datetime.fromisoformat(str(cfg.extra["timeline_origin"])) \
+            if cfg.extra.get("timeline_origin") else None
+        if remote == "s3":
+            spec = dict(cfg.extra.get("s3") or {})
+            if not spec or origin is None:
+                raise ValueError(f"{cfg.store_id}: an s3 stream needs extra.s3 and "
+                                 f"extra.timeline_origin")
+            return cls(
+                base_url=str(spec["endpoint"]), dataset=str(spec["bucket"]), version="",
+                prefix="", key_files=[], rates={},
+                default_rate=float(spec.get("requests_per_second", 50.0)), reserve=0,
+                download_workers=int(spec.get("download_workers", 8)),
+                origin=origin if origin.tzinfo else origin.replace(tzinfo=UTC),
+                remote="s3", bucket=str(spec["bucket"]), day_prefix=str(spec["day_prefix"]))
         spec = dict(cfg.extra.get("kdp") or {})
-        if cfg.extra.get("stream") != "kdp" or not spec:
-            raise ValueError(f"{cfg.store_id} is not a KDP stream product (extra.stream/kdp)")
-        origin = datetime.fromisoformat(str(cfg.extra["timeline_origin"]))
+        if remote != "kdp" or not spec or origin is None:
+            raise ValueError(f"{cfg.store_id} is not a streamed product "
+                             f"(extra.stream: one of {REMOTES}, with its settings)")
         return cls(
             base_url=str(spec.get("base_url", kdp.DEFAULT_BASE_URL)),
             dataset=str(spec["dataset"]),
@@ -149,6 +188,107 @@ def _write_json(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
+class Knmi3dFormat:
+    """The KNMI 3D radar composite on the KDP: what `Stream` asks of a format.
+
+    A format answers, for one product: how one day is listed, which listed file
+    fills which time step, how one file is checked and packed, which
+    `source_layout_id` a packed frame gets, and what the manifest says about
+    the encoding. Another product supplies its own (`format_for`); the loop in
+    `Stream` never looks inside a file.
+    """
+
+    def __init__(self, cfg: ProductConfig, settings: Settings) -> None:
+        self.cfg = cfg
+        self.settings = settings
+        self.schema = r3d.Schema.from_config(cfg)
+        self.target: Encoding = r3d.target_encoding(cfg)
+        self.layout_names = r3d.LAYOUT_NAMES
+        self.pinned = frozenset({cfg.schema_fingerprint} if cfg.schema_fingerprint else ())
+        self.frame_shape = (len(cfg.levels.values), self.schema.ny, self.schema.nx)
+
+    def list_day(self, client, day: datetime) -> list:
+        begin = f"{self.settings.prefix}{day:%Y%m%d}0000"
+        end = f"{self.settings.prefix}{day:%Y%m%d}2359~"
+        return client.list_files(begin=begin, end=end)
+
+    def select(self, files, day: datetime) -> dict[datetime, object]:
+        out = {}
+        for remote in files:
+            when = r3d.filename_time(remote.filename)
+            if when is None or _day(when) != day:
+                continue
+            out[when] = remote
+        return out
+
+    def pack(self, path: Path, when: datetime):
+        return r3d.pack_file(path, self.cfg, self.schema, self.target)
+
+    def layout(self, packed) -> int:
+        return (r3d.LAYOUT_V1 if not self.pinned or packed.check.fingerprint in self.pinned
+                else r3d.LAYOUT_UNKNOWN)
+
+    def frame_values(self, packed) -> dict:
+        return {}
+
+    def provenance(self, packed) -> dict:
+        return {"scale_factor": packed.check.scale_factor,
+                "add_offset": packed.check.add_offset}
+
+    def store_attrs(self) -> dict:
+        return {}
+
+    def manifest_extra(self) -> dict:
+        enc = self.target
+        return {
+            "encoding": {"dtype": str(enc.dtype), "scale": enc.scale, "offset": enc.offset,
+                         "no_echo_code": 0, "not_observed_code": enc.out_of_image,
+                         "missing_frame_code": enc.missing,
+                         "formula": "dBZ = 0.5 * code - 32"},
+            "levels": self.cfg.levels.model_dump(),
+            "orientation": "north-up (y descending), flipped from the south-up source",
+            "source": {"api": self.settings.base_url, "dataset": self.settings.dataset,
+                       "version": self.settings.version,
+                       "files": f"{self.settings.prefix}*.nc"},
+        }
+
+
+#: ``extra.stream_format`` -> "module:class". Built lazily: a format's reader
+#: is imported only by the product that uses it.
+FORMATS = {
+    "knmi_radar_3d": "meteopack.jobs.stream_kdp:Knmi3dFormat",
+    "opera_odim": "meteopack.sources.radar.opera:OperaFormat",
+    "harmonie_cy43": "meteopack.sources.nwp.knmi_harmonie:HarmonieFormat",
+}
+
+
+def format_for(cfg: ProductConfig, settings: Settings):
+    import importlib
+
+    name = str(cfg.extra.get("stream_format", "knmi_radar_3d"))
+    if name not in FORMATS:
+        raise ValueError(f"{cfg.store_id}: unknown stream_format {name!r}; known: "
+                         f"{sorted(FORMATS)}")
+    module, _, attr = FORMATS[name].partition(":")
+    return getattr(importlib.import_module(module), attr)(cfg, settings)
+
+
+def make_client(settings: Settings, requests_per_second: float | None = None):
+    """The remote client the settings describe."""
+    if settings.remote == "s3":
+        from meteopack.core import s3
+
+        return s3.S3Client(settings.base_url, settings.bucket,
+                           requests_per_second=requests_per_second or settings.default_rate)
+    # An explicit rate applies to whichever key is in use.
+    rates = {} if requests_per_second else settings.rates
+    return kdp.KdpClient(
+        settings.dataset, settings.version,
+        key_files=settings.key_files, base_url=settings.base_url,
+        rates=rates, default_rate=requests_per_second or settings.default_rate,
+        reserve=settings.reserve)
+
+
 class Stream:
     """The per-day loop. One instance per process; one process per store (locked)."""
 
@@ -157,26 +297,27 @@ class Stream:
                  download_workers: int | None = None,
                  pack_workers: int | None = None,
                  redo: bool = False,
-                 requests_per_second: float | None = None) -> None:
+                 requests_per_second: float | None = None,
+                 fmt=None) -> None:
         self.cfg = cfg
         self.root = Path(root)
         self.settings = Settings.from_config(cfg)
-        # An explicit rate applies to whichever key is in use.
-        rates = {} if requests_per_second else self.settings.rates
-        self.client = client or kdp.KdpClient(
-            self.settings.dataset, self.settings.version,
-            key_files=self.settings.key_files, base_url=self.settings.base_url,
-            rates=rates, default_rate=requests_per_second or self.settings.default_rate,
-            reserve=self.settings.reserve)
+        self.fmt = fmt or format_for(cfg, self.settings)
+        self.client = client or make_client(self.settings, requests_per_second)
         self.download_workers = download_workers or self.settings.download_workers
         self.pack_workers = pack_workers or max(1, min(8, os.cpu_count() or 1))
         self.redo = redo
-        self.schema = r3d.Schema.from_config(cfg)
-        self.target = r3d.target_encoding(cfg)
-        self.var = cfg.variables[0].name
+        self.target = self.fmt.target
+        #: Field name -> target encoding. One field unless the format packs several.
+        self.variables: dict[str, Encoding] = dict(
+            getattr(self.fmt, "variables", None) or {cfg.variables[0].name: self.target})
+        self.var = next(iter(self.variables))
         self.cadence = cfg.cadence
         self.per_day = int(timedelta(days=1) / self.cadence)
         self.pinned = cfg.schema_fingerprint
+        #: Every fingerprint that is not drift (a format may pin several).
+        self.pinned_all: frozenset[str] = frozenset(self.fmt.pinned)
+        self._readme_written = False
 
     # ------------------------------------------------------------ download
 
@@ -195,16 +336,10 @@ class Stream:
         self.client.refresh_key()
         before = self.client.requests_made
         out = Fetched(day=day, key_file=str(self.client.key.path if self.client.key else ""))
-        begin = f"{self.settings.prefix}{day:%Y%m%d}0000"
-        end = f"{self.settings.prefix}{day:%Y%m%d}2359~"
         t1 = time.perf_counter()
-        files = self.client.list_files(begin=begin, end=end)
+        files = self.fmt.list_day(self.client, day)
         out.list_s = time.perf_counter() - t1
-        for remote in files:
-            when = r3d.filename_time(remote.filename)
-            if when is None or _day(when) != day:
-                continue
-            out.listed[when] = remote
+        out.listed.update(self.fmt.select(files, day))
         wanted = self._slots_wanted(day)
         todo = {w: f for w, f in out.listed.items() if wanted is None or w in wanted}
         out.skipped_known = len(out.listed) - len(todo)
@@ -214,10 +349,15 @@ class Stream:
         stats0 = dict(getattr(self.client, "stats", {}) or {})
         t_dl = time.perf_counter()
 
+        fetch = getattr(self.fmt, "download", None)
+
         def one(item):
             when, remote = item
             s = time.perf_counter()
-            raw = self.client.download(remote, target / remote.filename)
+            if fetch is not None:  # a bundle: the format knows how to fetch it
+                raw = fetch(self.client, remote, target)
+            else:
+                raw = self.client.download(remote, target / remote.filename)
             return when, raw, time.perf_counter() - s
 
         with cf.ThreadPoolExecutor(self.download_workers, thread_name_prefix="dl") as pool:
@@ -252,9 +392,23 @@ class Stream:
         if day < origin:
             raise ValueError(f"{day:%Y-%m-%d} is before the store's origin {origin:%Y-%m-%d}")
         path = gridded.zarr_path(self.root, self.cfg.store_id)
+        if not self._readme_written:
+            from meteopack.core import readme
+
+            readme.store_readme(self.cfg, store_dir(self.cfg, self.root))
+            self._readme_written = True
         if not (path / "zarr.json").exists():
             gridded.initialise(self.cfg, self.root, Timeline(origin, end, self.cadence))
-            gridded.refresh_attrs(self.cfg, self.root, layout_names=r3d.LAYOUT_NAMES)
+            gridded.refresh_attrs(self.cfg, self.root, layout_names=self.fmt.layout_names)
+            extra_attrs = self.fmt.store_attrs()
+            array_attrs = getattr(self.fmt, "array_attrs", dict)()
+            if extra_attrs or array_attrs:
+                import zarr
+
+                group = zarr.open_group(path, mode="r+")
+                group.attrs.update(extra_attrs)
+                for name, attrs in array_attrs.items():
+                    group[name].attrs.update(attrs)
         else:
             gridded.extend(self.cfg, self.root, Timeline(origin, end, self.cadence))
 
@@ -266,22 +420,24 @@ class Stream:
         fresh = wanted is None
         write_slots = slots if fresh else sorted(wanted)
         index = {w: i for i, w in enumerate(write_slots)}
-        nz = len(self.cfg.levels.values)
-        ny, nx = self.schema.ny, self.schema.nx
         n = len(write_slots)
 
-        codes = np.full((n, nz, ny, nx), self.target.missing, dtype=self.target.dtype)
+        codes = {name: np.full((n, *self.fmt.frame_shape), enc.missing, dtype=enc.dtype)
+                 for name, enc in self.variables.items()}
         missing = np.ones(n, dtype=bool)
         corrupt = np.zeros(n, dtype=bool)
         layout = np.full(n, r3d.LAYOUT_MISSING, dtype="int16")
         record = np.full(n, -1, dtype="int64")
+        # The product's own per-frame values; a frame not packed keeps the fill.
+        frames = {v.name: np.full(n, v.fill_value, dtype=v.dtype)
+                  for v in self.cfg.frame_variables}
         checks: dict[datetime, r3d.FileCheck] = {}
         pack_s: list[float] = []
         provenance: list[dict] = []
 
         def one(item):
             when, path = item
-            return when, r3d.pack_file(path, self.cfg, self.schema, self.target)
+            return when, self.fmt.pack(path, when)
 
         jobs = [(w, p) for w, p in sorted(fetched.paths.items()) if w in index]
         with cf.ThreadPoolExecutor(self.pack_workers, thread_name_prefix="pack") as pool:
@@ -298,17 +454,21 @@ class Stream:
                     logger.error("stream: %s NOT packed: %s", remote.filename,
                                  "; ".join(packed.check.errors))
                 else:
-                    codes[i] = packed.codes
+                    # A dict for a multi-field format; a field it lacks stays missing.
+                    fields = packed.codes if isinstance(packed.codes, dict) \
+                        else {self.var: packed.codes}
+                    for name, frame in fields.items():
+                        if frame is not None:
+                            codes[name][i] = frame
                     missing[i] = False
-                    layout[i] = (r3d.LAYOUT_V1 if not self.pinned
-                                 or packed.check.fingerprint == self.pinned
-                                 else r3d.LAYOUT_UNKNOWN)
+                    layout[i] = self.fmt.layout(packed)
+                    for name, value in self.fmt.frame_values(packed).items():
+                        frames[name][i] = value
                 provenance.append({
                     "source_record_id": int(record[i]), "filename": remote.filename,
                     "first_time": when.replace(tzinfo=None), "n_bytes": remote.size,
                     "last_modified": remote.last_modified or "",
-                    "scale_factor": packed.check.scale_factor,
-                    "add_offset": packed.check.add_offset,
+                    **self.fmt.provenance(packed),
                     "schema_fingerprint": packed.check.fingerprint or "",
                     "packed": packed.codes is not None,
                     "errors": "; ".join(packed.check.errors),
@@ -325,13 +485,16 @@ class Stream:
             self._ensure_store(day)
             times = np.array([np.datetime64(w.replace(tzinfo=None), "ns")
                               for w in write_slots])[keep]
+            dims = gridded.dims_for(self.cfg)
             ds = xr.Dataset(
                 # A view, not a copy, when the whole day is written: 4.9 GB.
-                {self.var: (gridded.DIMS_3D, codes if keep.all() else codes[keep]),
+                {**{name: (dims, block if keep.all() else block[keep])
+                    for name, block in codes.items()},
                  "is_missing_frame": (("time",), missing[keep]),
                  "is_corrupt_frame": (("time",), corrupt[keep]),
                  "source_layout_id": (("time",), layout[keep]),
-                 "source_record_id": (("time",), record[keep])},
+                 "source_record_id": (("time",), record[keep]),
+                 **{name: (("time",), values[keep]) for name, values in frames.items()}},
                 coords={"time": times})
             t_w = time.perf_counter()
             result = gridded.write(ds, self.cfg, self.root)
@@ -367,28 +530,37 @@ class Stream:
             raise RuntimeError(f"{day:%Y-%m-%d}: provenance flags did not read back as written")
         packed = np.flatnonzero(keep & ~missing & ~corrupt)
         for i in {int(packed[0]), int(packed[-1])} if packed.size else ():
-            back = np.asarray(group[self.var][int(rows[i])])
-            if not np.array_equal(back, codes[i]):
-                raise RuntimeError(f"{day:%Y-%m-%d}: frame {write_slots[i]} did not read back")
+            for name, block in codes.items():
+                back = np.asarray(group[name][int(rows[i])])
+                if not np.array_equal(back, block[i]):
+                    raise RuntimeError(f"{day:%Y-%m-%d}: {name} at {write_slots[i]} did not "
+                                       f"read back")
 
     def _shard_bytes(self, day: datetime) -> int:
         row = (day - self.settings.origin) // self.cadence
         shard = row // self.per_day
-        base = gridded.zarr_path(self.root, self.cfg.store_id) / self.var / "c" / str(shard)
-        return sum(p.stat().st_size for p in base.rglob("*") if p.is_file()) if base.exists() else 0
+        total = 0
+        for name in self.variables:
+            base = gridded.zarr_path(self.root, self.cfg.store_id) / name / "c" / str(shard)
+            if base.exists():
+                total += sum(p.stat().st_size for p in base.rglob("*") if p.is_file())
+        return total
 
     def _status(self, fetched: Fetched, slots, checks, pack_s, write_s, wall_s, pack_wall_s):
         previous = None if self.redo else read_status(self.cfg, self.root, fetched.day)
         packed = {datetime.fromisoformat(t) for t in (previous or {}).get("packed_times", [])}
         packed |= {w for w, c in checks.items() if c.ok}
         schema_failed = {c.name: c.errors for c in checks.values() if not c.ok}
+        # Single files of a bundle that failed while the rest was packed.
+        for c in checks.values():
+            schema_failed.update(getattr(c, "file_errors", None) or {})
         missing_upstream = [w for w in slots if w not in fetched.listed]
         not_packed = [w for w in slots if w in fetched.listed and w not in packed]
         fingerprints: dict[str, int] = {}
         for c in checks.values():
             if c.fingerprint:
                 fingerprints[c.fingerprint] = fingerprints.get(c.fingerprint, 0) + 1
-        drift = sorted(fp for fp in fingerprints if self.pinned and fp != self.pinned)
+        drift = sorted(fp for fp in fingerprints if self.pinned_all and fp not in self.pinned_all)
         storage: dict[str, int] = {}
         for c in checks.values():
             if c.storage:
@@ -444,6 +616,7 @@ class Stream:
                 "day_wall_s": round(wall_s, 2),
             },
             "shard_bytes": self._shard_bytes(fetched.day),
+            **(getattr(self.fmt, "status_extra", lambda c: {})(checks)),
             "code_version": manifest.code_version(),
             "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
@@ -453,7 +626,25 @@ class Stream:
         quarantine = layer_path(self.root, "raw", self.cfg.source, self.cfg.product) / "quarantine"
         for when, path in fetched.paths.items():
             check = checks.get(when)
-            if check is not None and not check.ok:
+            if path.is_dir():
+                # A bundle: a failed time step goes aside whole; otherwise the
+                # files that failed go to quarantine/<bundle>/ and the rest is deleted.
+                if check is not None and not check.ok:
+                    quarantine.mkdir(parents=True, exist_ok=True)
+                    with contextlib.suppress(OSError):
+                        shutil.move(str(path), quarantine / path.name)
+                    continue
+                bad = set(getattr(check, "quarantine", None) or ())
+                for item in sorted(path.iterdir()):
+                    if item.name in bad:
+                        (quarantine / path.name).mkdir(parents=True, exist_ok=True)
+                        with contextlib.suppress(OSError):
+                            shutil.move(str(item), quarantine / path.name / item.name)
+                    elif item.is_file():
+                        item.unlink(missing_ok=True)
+                with contextlib.suppress(OSError):
+                    path.rmdir()
+            elif check is not None and not check.ok:
                 quarantine.mkdir(parents=True, exist_ok=True)
                 with contextlib.suppress(OSError):
                     shutil.move(str(path), quarantine / path.name)
@@ -487,25 +678,17 @@ class Stream:
                 continue
             entry = schemas.setdefault(c.fingerprint, {
                 "count": 0, "first": c.name, "last": c.name, "descriptor": c.descriptor,
-                "pinned": c.fingerprint == self.pinned})
+                "pinned": c.fingerprint in self.pinned_all})
             entry["count"] += 1
             entry["first"] = min(entry["first"], c.name)
             entry["last"] = max(entry["last"], c.name)
-        enc = self.target
         extra.update({
             "days": dict(sorted(days.items())),
             "schema_fingerprints": schemas,
             "storage_layouts": layouts,
             "pinned_schema_fingerprint": self.pinned,
-            "encoding": {"dtype": str(enc.dtype), "scale": enc.scale, "offset": enc.offset,
-                         "no_echo_code": 0, "not_observed_code": enc.out_of_image,
-                         "missing_frame_code": enc.missing,
-                         "formula": "dBZ = 0.5 * code - 32"},
-            "levels": self.cfg.levels.model_dump(),
             "grid_id": self.cfg.grid_id,
-            "orientation": "north-up (y descending), flipped from the south-up source",
-            "source": {"api": self.settings.base_url, "dataset": self.settings.dataset,
-                       "version": self.settings.version, "files": f"{self.settings.prefix}*.nc"},
+            **self.fmt.manifest_extra(),
         })
         n_records = sum(int(d.get("packed", 0)) for d in days.values())
         times = sorted(days)
@@ -612,7 +795,7 @@ def run(cfg: ProductConfig, root: Path, start: datetime, end: datetime, *,
                 schema_days += 1 if status["schema_failed"] else 0
                 log(f"SCHEMA: {status['date']}: {len(status['schema_failed'])} file(s) failed "
                     f"their check, fingerprints {status['schema_fingerprints']} "
-                    f"(pinned {stream.pinned})")
+                    f"(pinned {sorted(stream.pinned_all)})")
                 if schema_days >= MAX_SCHEMA_DAYS:
                     log(f"error: schema failures on {schema_days} consecutive days; stopping. "
                         f"See {status_path(cfg, root, day)}")
@@ -640,4 +823,5 @@ def run(cfg: ProductConfig, root: Path, start: datetime, end: datetime, *,
 
 
 __all__ = ["EXIT_CREDENTIALS", "EXIT_DONE", "EXIT_ERROR", "EXIT_MORE", "EXIT_SCHEMA",
-           "Settings", "Stream", "read_status", "run", "status_path"]
+           "FORMATS", "Knmi3dFormat", "Settings", "Stream", "format_for", "make_client",
+           "read_status", "run", "status_path"]
