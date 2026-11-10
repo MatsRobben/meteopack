@@ -25,11 +25,12 @@ grid_id: opera_2km_laea_nl
 
 store:
   kind: gridded
-  # One time step per inner chunk in 2 x 2 spatial tiles of 440 x 440: a
-  # whole frame is four chunk reads from one shard file, a training patch
-  # touches one to four. One UTC day (96 steps) per shard, so a stream day
-  # writes exactly one shard file and never shares it.
-  chunks: {time: 1, y: 440, x: 440}
+  # One whole frame per inner chunk: training reads whole frames, so spatial
+  # tiles would only add requests. 2 x 2 tiles of 440 measured the same size
+  # (31.7 / 7.9 / 3.1 against 31.7 / 8.0 / 3.1 MB on a wet, a mixed and a dry
+  # day) and the same frame read time (4-9 ms). One UTC day (96 steps) per
+  # shard, so a stream day writes exactly one shard file and never shares it.
+  chunks: {time: 1, y: 880, x: 880}
   shard: {time: 96, y: 880, x: 880}
   # Blosc-zstd 5 with byte shuffle (zarr's choice for uint16): 18-20 % smaller
   # than plain zstd 3 at the same write and read speed, measured on a wet, a
@@ -113,8 +114,9 @@ extra:
 
     - **Two chains, one break.** `chain` 1 = ODYSSEY (`QIND_RATE.h5`, up to and
       including 2024-07-05 06:00, data window T-10..T+5 min), 2 = NIMBUS
-      (`RATE.h5`, from 06:15, instantaneous). Values are as the files give them;
-      calibrate each chain separately.
+      (`RATE.h5`, from 06:15, instantaneous). Exception: 2024-12-03..09 are
+      ODYSSEY (NIMBUS published nothing those days). Values are as the files
+      give them; calibrate each chain separately by `chain`, not by date.
     - Codes: 0 = no rain (the file's undetect), 65535 = no radar coverage (nodata),
       65534 = no data for this frame; rates above 655.33 mm/h are clipped
       (`n_clipped` in provenance.parquet).
@@ -122,18 +124,17 @@ extra:
       pixel [756 + i, 389 + j] (`attrs["opera_window"]`).
     - `n_radars`, `has_nldhl`, `has_nlhrw` come from the file's /how/nodes
       (-1 = no frame); provenance.parquet holds the full node list per file.
-    - The time axis starts 2013-01-01; days never streamed read as missing frames.
-      `days/<YYYY>/<date>.json` says per day what was streamed and what is
-      missing upstream.
+    - The time axis starts 2021-01-01 00:00 UTC (the start of RainPro-NL
+      pretraining). `days/<YYYY>/<date>.json` says per day what was streamed
+      and what is missing upstream.
   stream: s3
   stream_format: opera_odim
-  # The store's time axis starts here and grows forward day by day. It is set
-  # well before the first streamed day so the store can later be filled back
-  # to 2013 without a rebuild: unwritten steps cost no disk and read as missing
-  # frames (is_missing_frame).
-  timeline_origin: "2013-01-01T00:00:00Z"
+  # The store's time axis starts here and grows forward day by day: 2021-01,
+  # the start of RainPro-NL pretraining (matches the GFS archive). The axis
+  # only grows forward; data before this needs a rebuild with an earlier origin.
+  timeline_origin: "2021-01-01T00:00:00Z"
   # Where `meteopack stream` starts without --window (to the start of today).
-  stream_start: "2023-11-01T00:00:00Z"
+  stream_start: "2021-01-01T00:00:00Z"
   s3:
     endpoint: https://s3.waw3-1.cloudferro.com
     bucket: openradar-archive
@@ -144,6 +145,13 @@ extra:
   opera:
     # Last ODYSSEY frame. ODYSSEY up to and including this instant, NIMBUS after.
     cutover: "2024-07-05T06:00:00Z"
+    # Whole UTC days after the cutover that take ODYSSEY QIND_RATE anyway:
+    # NIMBUS published no RATE file at all on these days while ODYSSEY
+    # published all 96 (archive scan 2026-11-09). An explicit list, never a
+    # "whatever exists" rule; every file still passes the full schema check,
+    # and `chain` says ODYSSEY.
+    odyssey_fallback_days: ["2024-12-03", "2024-12-04", "2024-12-05", "2024-12-06",
+                            "2024-12-07", "2024-12-08", "2024-12-09"]
     gain: 1.0
     offset: 0.0
     nodata: -9999000.0

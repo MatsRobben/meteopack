@@ -44,7 +44,7 @@ def tiny_cfg():
     spec["window"] = {"row0": ROW0, "col0": COL0, "ny": NY, "nx": NX}
     extra["opera"] = spec
     store = cfg.store.model_copy(update={
-        "chunks": {"time": 1, "y": NY // 2, "x": NX // 2},
+        "chunks": {"time": 1, "y": NY, "x": NX},
         "shard": {"time": 96, "y": NY, "x": NX},
         "compression_level": 1,
     })
@@ -153,6 +153,7 @@ def test_nodes_in_every_chains_spelling():
     assert opera.parse_nodes(b"'behel','nlhrw'") == ["behel", "nlhrw"]
     assert opera.parse_nodes("behel, bewid, behel") == ["behel", "bewid"]
     assert opera.parse_nodes(None) == []
+    assert opera.parse_nodes(b"none") == []          # an empty composite: no radar
 
 
 def test_select_takes_one_file_per_step_from_the_right_chain():
@@ -173,10 +174,46 @@ def test_select_takes_one_file_per_step_from_the_right_chain():
         "0545": "OPERA@20240705T0545@0@QIND_RATE.h5",
         "0600": "OPERA@20240705T0600@0@QIND_RATE.h5",
         "0615": "OPERA@20240705T0615@0@RATE.h5"}
-    # A stray ODYSSEY file long after the cutover is ignored.
-    stray = fmt.select([remote("OPERA@20241205T1200@0@QIND_RATE.h5")],
-                       datetime(2024, 12, 5, tzinfo=UTC))
+    # A stray ODYSSEY file long after the cutover is ignored...
+    stray = fmt.select([remote("OPERA@20241212T1200@0@QIND_RATE.h5")],
+                       datetime(2024, 12, 12, tzinfo=UTC))
     assert stray == {}
+
+
+def test_configured_fallback_days_take_odyssey_and_only_those():
+    cfg = tiny_cfg()
+    fmt = opera.OperaFormat(cfg, stream_kdp.Settings.from_config(cfg))
+    days = sorted(fmt.schema.odyssey_fallback_days)
+    assert [d.isoformat() for d in days] == [f"2024-12-0{k}" for k in range(3, 10)]
+
+    def remote(name):
+        return RemoteFile(name, 1, key=name)
+
+    for day, want in ((datetime(2024, 12, 3, tzinfo=UTC), "QIND_RATE"),
+                      (datetime(2024, 12, 9, tzinfo=UTC), "QIND_RATE"),
+                      (datetime(2024, 12, 2, tzinfo=UTC), "RATE"),
+                      (datetime(2024, 12, 10, tzinfo=UTC), "RATE")):
+        names = [f"OPERA@{day:%Y%m%d}T2345@0@QIND_RATE.h5", f"OPERA@{day:%Y%m%d}T2345@0@RATE.h5"]
+        picked = fmt.select([remote(n) for n in names], day)
+        assert [r.filename.split("@")[-1] for r in picked.values()] == [f"{want}.h5"], day
+        assert fmt.schema.chain_for(day + timedelta(hours=23, minutes=45)) == (
+            opera.ODYSSEY if want == "QIND_RATE" else opera.NIMBUS)
+
+
+def test_a_fallback_day_still_checks_every_file(tmp_path):
+    s = schema()
+    when = datetime(2024, 12, 5, 12, 0, tzinfo=UTC)
+    good = write_odim(tmp_path, when, opera.ODYSSEY)
+    nimbus = write_odim(tmp_path, when, opera.NIMBUS)
+    (tmp_path / "bad").mkdir()
+    bad = write_odim(tmp_path / "bad", when, opera.ODYSSEY, gain=0.5)
+    with h5py.File(good) as f:
+        assert opera.check_schema(f, good.name, s, s.chain_for(when)).ok
+    with h5py.File(nimbus) as f:
+        check = opera.check_schema(f, nimbus.name, s, s.chain_for(when))
+        assert any("cutover assigns to ODYSSEY" in e for e in check.errors)
+    with h5py.File(bad) as f:
+        assert not opera.check_schema(f, bad.name, s, s.chain_for(when)).ok
 
 
 # ------------------------------------------------------------------ schema
@@ -219,6 +256,7 @@ WHEN = datetime(2024, 3, 1, 12, 0, tzinfo=UTC)
     ({"shape": (NATIVE_Y, NATIVE_X - 1)}, "shape"),
     ({"name": "OPERA@20240301T1207@0@QIND_RATE.h5"}, "cadence"),
     ({"nodes": []}, "/how/nodes"),
+    ({"nodes": ["none"]}, "/how/nodes"),
 ])
 def test_schema_drift_is_caught_and_never_packed(tmp_path, kwargs, message):
     path = write_odim(tmp_path, WHEN, opera.ODYSSEY, **kwargs)

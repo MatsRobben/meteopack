@@ -19,9 +19,11 @@ Two production chains make the rain rate, and the series breaks between them:
 Both overlap on 2024-07-05 05:30-06:00; the cutover is a configured instant
 (``extra.opera.cutover``, the last ODYSSEY frame) and every slot takes exactly
 the chain the rule names, so the overlap never produces two frames for one
-time step, and stray files of the wrong chain (ODYSSEY files reappear on
-2024-12-03..09) are ignored. Which chain made each frame is stored per frame
-(``chain``); nothing is calibrated across the break here.
+time step, and stray files of the wrong chain are ignored. The one exception
+is an explicit list of whole UTC days (``extra.opera.odyssey_fallback_days``)
+on which NIMBUS published no rain rate at all and ODYSSEY did - 2024-12-03..09:
+those days take ODYSSEY, under the same checks. Which chain made each frame is
+stored per frame (``chain``); nothing is calibrated across the break here.
 
 Facts that each corrupt a store if missed:
 
@@ -49,7 +51,7 @@ import time
 import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +113,8 @@ def parse_nodes(text: str | bytes | None) -> list[str]:
 
     ODYSSEY writes ``NOD:frnan,NOD:frbou,...``, NIMBUS ``'behel','bejab',...``
     and CIRRUS ``behel, bewid, ...``; all become ``["frnan", "frbou", ...]``.
+    An empty composite says ``none`` (17 ODYSSEY files in 2023-2024, every
+    pixel nodata): that is no radar, not a radar called "none".
     """
     if text is None:
         return []
@@ -121,7 +125,7 @@ def parse_nodes(text: str | bytes | None) -> list[str]:
         token = token.strip()
         if token.upper().startswith("NOD:"):
             token = token[4:]
-        if token:
+        if token and token.lower() not in ("none", "null", "nan"):
             out.append(token.lower())
     return list(dict.fromkeys(out))
 
@@ -152,6 +156,8 @@ class Schema:
     nx: int
     cutover: datetime
     cadence_seconds: int = 900
+    #: Whole UTC days after the cutover that take ODYSSEY anyway (NIMBUS absent).
+    odyssey_fallback_days: frozenset[date] = frozenset()
 
     @classmethod
     def from_config(cls, cfg: ProductConfig) -> Schema:
@@ -173,6 +179,8 @@ class Schema:
             ny=int(window["ny"]), nx=int(window["nx"]),
             cutover=cutover if cutover.tzinfo else cutover.replace(tzinfo=UTC),
             cadence_seconds=int(cfg.cadence_seconds or 900),
+            odyssey_fallback_days=frozenset(
+                date.fromisoformat(str(d)) for d in spec.get("odyssey_fallback_days") or ()),
         )
         schema.check_grid(cfg)
         return schema
@@ -199,6 +207,13 @@ class Schema:
         if grid.proj4.split() != self.projdef.split():
             raise ValueError(f"{cfg.store_id}: grid {grid.id} proj4 {grid.proj4!r} is not "
                              f"the files' {self.projdef!r}")
+
+    def chain_for(self, when: datetime) -> str:
+        """The chain this time step is taken from: the cutover rule, except on a
+        configured ODYSSEY fallback day."""
+        if when.astimezone(UTC).date() in self.odyssey_fallback_days:
+            return ODYSSEY
+        return chain_for(when, self.cutover)
 
     @property
     def window(self) -> dict[str, int]:
@@ -549,13 +564,13 @@ class OperaFormat:
             when, product = parsed
             if when.date() != day.date():
                 continue
-            if product != PRODUCTS[chain_for(when, self.schema.cutover)]:
+            if product != PRODUCTS[self.schema.chain_for(when)]:
                 continue
             out[when] = remote
         return out
 
     def pack(self, path: Path, when: datetime) -> PackedFile:
-        return pack_file(path, self.schema, self.target, chain_for(when, self.schema.cutover))
+        return pack_file(path, self.schema, self.target, self.schema.chain_for(when))
 
     def layout(self, packed: PackedFile) -> int:
         return LAYOUT_OF_CHAIN[packed.check.chain]
@@ -594,6 +609,7 @@ class OperaFormat:
                              "note": "store pixel [i, j] is native pixel "
                                      "[row0 + i, col0 + j]; half-open bounds"},
             "chain_cutover": s.cutover.isoformat(),
+            "odyssey_fallback_days": sorted(d.isoformat() for d in s.odyssey_fallback_days),
         }
 
     def manifest_extra(self) -> dict:
@@ -605,6 +621,8 @@ class OperaFormat:
                          "formula": f"mm/h = {enc.scale:g} * code"},
             "window": self.schema.window,
             "chain_cutover": self.schema.cutover.isoformat(),
+            "odyssey_fallback_days": sorted(d.isoformat()
+                                            for d in self.schema.odyssey_fallback_days),
             "orientation": "north-up (rows run south), as the source",
             "source": {"endpoint": self.settings.base_url, "bucket": self.settings.bucket,
                        "day_prefix": self.settings.day_prefix,

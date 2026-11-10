@@ -179,15 +179,15 @@ the raw HDF5 never accumulates.
 | code 65534 | **no data for this frame** (the fill); the frame is flagged `is_missing_frame` or `is_corrupt_frame` |
 | code 65533 | 655.33 mm/h: anything higher is clipped to it and counted per file (`n_clipped`) |
 | grid | `opera_2km_laea_nl`: OPERA's own LAEA grid (`+proj=laea +lat_0=55 +lon_0=10 +x_0=1950000 +y_0=-2100000 +ellps=WGS84`, metres), **not resampled**; store pixel `[i, j]` is native pixel `[756 + i, 389 + j]` of the 2200 x 1900 composite (`attrs["opera_window"]`). 880 x 880 pixels: the 1536 km KNMI training square around 52.2N 5.3E spans native cols 408-1249 and rows 775-1616, plus 19 px on every side. `x`, `y` are cell centres in metres; `lat`, `lon` per cell |
-| chunks | one time step in 2 x 2 tiles of 440 x 440; one UTC day (96 steps) per shard; blosc-zstd 5 with byte shuffle |
-| time axis | from 2013-01-01 00:00 UTC, so the store can be filled back without a rebuild; steps never streamed read as missing frames |
+| chunks | one whole 880 x 880 frame per chunk (training reads whole frames); one UTC day (96 steps) per shard; blosc-zstd 5 with byte shuffle |
+| time axis | from 2021-01-01 00:00 UTC (the start of RainPro-NL pretraining), growing forward day by day; earlier data would need a rebuild with an earlier `timeline_origin` |
 
 Two production chains made the rain rate, and **the series breaks between
 them**:
 
 | chain | files | until / from | data window | `chain` | `source_layout_id` |
 |---|---|---|---|---|---|
-| ODYSSEY | `OPERA@YYYYMMDDTHHMM@0@QIND_RATE.h5` (ODIM 2.0) | up to and including 2024-07-05 06:00 | T-10 .. T+5 min | 1 | 2 |
+| ODYSSEY | `OPERA@YYYYMMDDTHHMM@0@QIND_RATE.h5` (ODIM 2.0) | up to and including 2024-07-05 06:00, and 2024-12-03..09 (below) | T-10 .. T+5 min | 1 | 2 |
 | NIMBUS | `OPERA@YYYYMMDDTHHMM@0@RATE.h5` (ODIM 2.4) | from 2024-07-05 06:15 | instantaneous at T | 2 | 3 |
 
 Both chains publish 05:30-06:00 on 2024-07-05; the cutover rule takes exactly
@@ -227,11 +227,23 @@ that fails is never packed: its frame is flagged corrupt, the file is kept in
 structural fingerprint of each chain is pinned in the product config
 (`extra.opera.pinned_fingerprints`); others are reported as drift.
 
-Known gaps in the archive (no rain-rate file at all): 2024-12-03..09 (only
-ODYSSEY files exist those days, which the cutover rule ignores),
-2025-05-02..15, 2026-05-24..25, and several partial days (e.g. 2024-02-20,
+**ODYSSEY fallback days.** On 2024-12-03..09 NIMBUS published no rain rate
+at all while ODYSSEY published every step; those seven days are listed in
+`extra.opera.odyssey_fallback_days` and take the ODYSSEY files (`chain` = 1),
+under the same checks. Only listed days do this - elsewhere a file of the
+wrong chain is ignored, never used to fill a gap. Select chains by `chain`,
+not by date.
+
+Known gaps in the archive (no rain-rate file at all): 2025-05-02..15, 2026-05-24..25, and several partial days (e.g. 2024-02-20,
 2025-05-01, 2025-11-05). Per-day status: `days/<YYYY>/<YYYY-MM-DD>.json`
 (`done`, `partial`, `empty`), as for the 3D composite.
+
+Empty composites are not packed: 17 ODYSSEY files (2023-10-30, 2023-11-06,
+2024-06-09, 2024-06-11) list `/how/nodes` as `none` and hold nodata
+everywhere; they fail the check and their frames are flagged
+`is_corrupt_frame`. ODYSSEY files of 2021-01-11 .. 2021-03-01 also carry NaN
+pixels (about 2 % of the window, 2,647 files); they are stored as nodata
+(65535) and counted in `n_nan`.
 
 Upstream artefacts that are packed as they are: ODYSSEY frames carry a few
 persistent hot pixels with absurd rates (e.g. up to 63,958 mm/h at the
