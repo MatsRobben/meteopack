@@ -1,0 +1,22 @@
+# Cleaned RTCOR timeline over the whole archive: every frame passes the clutter cleaner
+# (src/meteopack/datasets/rtcor_clean.py) on the full grid before cropping and encoding.
+# UTC ranges are half-open; start null is the first source frame, end null the last.
+source: /vol/knmimo-nobackup/users/mrobben/meteopack_data/packed/radar/knmi_radar/rtcor_5min/v1/dataset.zarr
+output: /vol/knmimo-nobackup/users/mrobben/meteopack_data/training/radar/rtcor_central256_clean/v1
+start: null
+end: null
+clean: true
+cadence_seconds: 300
+crop: [254, 510, 222, 478]  # y start/stop, x start/stop
+encoding:
+  dry_threshold_mm: 0.01  # <= 0.01 mm is dry
+  step_mm: 0.02            # ties round up; values above 5.08 mm saturate
+storage:
+  chunk_frames: 4
+  shard_frames: 288
+  zstd_level: 3
+samples:
+  history: 4
+  forecast: 18
+  stride: 4
+  origin: '2023-11-01T00:00:00Z'

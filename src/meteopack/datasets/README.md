@@ -17,3 +17,17 @@ Read `samples.parquet` to select a split. For each row use `start_idx` to read 2
 The builder manifest records source-read, encoding, output-write and index times. Use `TimelineDataset(path, 'train')` or `TimelineDataset(path, 'validation')` for a small NumPy reader, or adapt its contract to PyTorch.
 
 For a full RTCOR build, submit the generator to a compute node using your cluster's Slurm configuration. This workspace has a local wrapper at `slurm/datasets/rtcor_full.sbatch`; Slurm wrappers are deliberately excluded from the repository because they contain user-specific paths and account settings. The default YAML also contains workspace-specific paths: update them before running elsewhere. The final dataset is `meteopack_data/training/radar/rtcor_central256/v1`. If interrupted, rerun with the same configuration and source to resume completed shards; only one job may write to that output at a time.
+
+## Cleaned RTCOR (clutter removal)
+
+`configs/datasets/rtcor_clean.yaml` builds the same timeline over the whole archive (2018-12 onwards) with `clean: true`. Every frame is first cleaned on the full 765 x 700 grid by `rtcor_clean.py`, using the previous and next source frame as context, and only then cropped and encoded. The cleaner makes the pre-2023 processing chain look like the post-2023 one: sea clutter, anomalous propagation, interference spikes and wind farms are removed. It applies the same procedure to every period; new-chain frames lose about 0.2-1 % of their echo. Nothing is dropped. Clutter becomes dry, spike pixels are refilled from the neighbouring frames and their surroundings, and pixels outside the common radar footprint become code 255. The module docstring lists the nine steps and their parameters. The fixed inputs (tile model, static clutter map, footprint, radar positions) are in `assets/rtcor_clean_v5.npz`, which `scripts/rtcor_clean_assets.py` builds from the clutter study outputs.
+
+Install the optional dependencies with `uv sync --extra clean` (scipy, pySTEPS, OpenCV). Cleaning takes about 1.2 s per frame, which is roughly 260 CPU hours for the archive, so build shards in parallel:
+
+```bash
+python -m meteopack.datasets.rtcor --config configs/datasets/rtcor_clean.yaml --prepare
+python -m meteopack.datasets.rtcor --config configs/datasets/rtcor_clean.yaml --worker K --workers N   # K = 0..N-1, in parallel
+python -m meteopack.datasets.rtcor --config configs/datasets/rtcor_clean.yaml                         # index and manifest
+```
+
+Workers can be stopped and restarted; completed shards are kept. Start the final run only after all workers have finished. Frame status 4 (`not_cleaned`) marks the first and last frame of the source archive, which have no context. The manifest's `cleaning` entry records the cleaner version, the hashes of its code and inputs, and totals: frames cleaned, frames with the warm-season scene threshold, spike pixels, and wet pixels and summed codes before and after cleaning. The protection lineage restarts at every shard boundary (once a day).
