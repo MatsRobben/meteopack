@@ -18,6 +18,8 @@ it); storage, scheduling, validation and bookkeeping are shared.
 | `knmi_radar/composite3d_5min` | 3D radar reflectivity, 32 levels 0.375-15.875 km, `(time, z, y, x)` uint8, 2024-05-07- | **streamed from the KNMI Data Platform** (`meteopack stream`); tested end to end on 5 days (2026-11-09), full archive waiting for a bulk API key - see [docs/stores.md](docs/stores.md#the-3d-radar-composite) |
 | `opera/rate_15min` | EUMETNET OPERA European radar rain rate, 15 min, native 2 km LAEA, 880 x 880 window around the 1536 km KNMI training square, uint16 0.01 mm/h; ODYSSEY to 2024-07-05 06:00, NIMBUS after (per-frame `chain`) | **streamed from the public OPERA archive** (`meteopack stream opera`); **built and validated** (2026-11-09): 2021-01-01 .. 2026-11-08, 202,938 of 205,248 frames (98.87 %), 17 empty composites flagged corrupt, 21.5 GB - see [docs/stores.md](docs/stores.md#the-opera-rain-rate-composite) |
 | `knmi_harmonie/cy43_nl_2km`, `cy43_nl_4km` | KNMI HARMONIE-AROME Cy43 NL forecasts, every hourly run from 2024-06-25, leads +0..+12 h, 10 near-surface fields (MSLP, T2m, RH2m, u10/v10, gust, mixed-layer depth, cloud base, visibility, 1 h precip) on HARMONIE's own lat/lon grid, not reprojected: native 390 x 390 (~2 km) or 2 x 2 block means 195 x 195 (~4 km); `(time=run, lead_time, y, x)` 16-bit | **streamed from the KNMI Data Platform** (`meteopack stream knmi_harmonie`; NetCDF to 2026-01-07, P1 GRIB after); trial-run and validated (2026-11-09), full run not yet launched - see [docs/stores.md](docs/stores.md#harmonie-arome-cy43-nl) |
+| `noaa_gfs/state_1h_0p25` | NOAA GFS 0.25 deg, the 122 RainPro-8 input fields (instantaneous), hourly valid times from the newest run (lead 0-5 h, previous run as fallback), native grid cropped to 8W-19.5E x 44.5-60N (63 x 111, the 1536 km model frame plus 2 points), uint16 per-field scale/offset, 2021- | **streamed from NOAA's AWS archive** with byte-range reads (`meteopack stream noaa_gfs --product state_1h_0p25`, which also fills `prate_0p25`); trial-run and validated (2026-11-09), full run not yet launched - see [docs/stores.md](docs/stores.md#the-gfs-nwp-stores) |
+| `noaa_gfs/prate_0p25` | NOAA GFS one-hour mean precipitation rate per run (time = run start), leads 1-15 h as `prate_f01..f15`, de-averaged from GFS's 6-hourly-resetting means, same native window, uint16 0.002 mm/h, 2021- | filled by the same stream |
 | `knmi_insitu/obs_10min` | KNMI automatic weather stations, 2012- | **packed and validated** (2026-11-05): 49.0 M rows, 73 stations |
 | `dwd/stations_10min` | German stations inside the radar footprint, 10 min, 2010- | **re-fetched, packed and validated** (2026-11-06): 390 M rows, 539 reporting stations (568 with metadata), closed stations included, to 2026-11-06 |
 | `dmi/stations_10min` | Danish stations, 10 min, 2012- | **packed and validated**: 75.0 M rows, 115 stations |
@@ -57,7 +59,7 @@ Python 3.12 and [uv](https://docs.astral.sh/uv/):
 ```bash
 git clone https://github.com/MatsRobben/meteopack.git
 cd meteopack
-uv sync --extra radar            # + --extra satellite for SEVIRI, --extra dev for tests
+uv sync --extra radar            # + --extra satellite for SEVIRI, --extra nwp for GFS (ecCodes), --extra dev for tests
 uv run meteopack --help
 ```
 
@@ -170,7 +172,7 @@ flowchart LR
 | `fetch` | downloads, in parallel, atomically, rate-limited, retried, integrity-checked; records why each unit ended | `raw/`, `_bookkeeping/` |
 | `parse` | parses raw files and reports what they hold | nothing |
 | `pack` | parses and writes the store | `packed/` |
-| `stream` | for products served by an API or a public bucket (the KNMI 3D radar composite, the OPERA composite, HARMONIE forecasts): per day list, download, check every file's schema, pack, delete the raw files, write a status record; resumable | `packed/` (raw only transiently) |
+| `stream` | for products served by an API or a public bucket (the KNMI 3D radar composite, the OPERA composite, HARMONIE forecasts, NOAA GFS): per day list, download, check every file's schema, pack, delete the raw files, write a status record; resumable | `packed/` (raw only transiently) |
 | `validate` | asks whether the store is *usable*, not merely present | nothing |
 | `derive` | builds training bricks, station matrices and splits; regularises irregular stores; QC flags for WOW-NL | `training/` (QC: `packed/stations/wow_nl/qc`) |
 | `catalog <source>` | what is fetched and packed for a source; `--gaps`: what is missing and why | nothing |

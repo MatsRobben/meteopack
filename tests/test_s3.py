@@ -107,3 +107,50 @@ def test_a_non_hdf5_body_is_refused(tmp_path: Path):
                       session=Session([("https://h/b/x.h5", body)]))
     with pytest.raises(FetchError, match="not an HDF5"):
         client.download(RemoteFile("x.h5", len(body), key="x.h5"), tmp_path / "x.h5")
+
+
+class RangeSession:
+    """Serves one object, honouring (or, with `ignore_range`, ignoring) a Range header."""
+
+    def __init__(self, body: bytes, *, ignore_range: bool = False, short: int = 0):
+        self.body = body
+        self.ignore_range = ignore_range
+        self.short = short
+        self.calls: list[tuple[str, dict | None]] = []
+
+    def get(self, url, headers=None, **kw):
+        self.calls.append((url, headers))
+        if url.endswith("/missing"):
+            return Resp(b"", 404)
+        if not headers or self.ignore_range:
+            return Resp(self.body)
+        lo, _, hi = headers["Range"].removeprefix("bytes=").partition("-")
+        part = self.body[int(lo): None if hi == "" else int(hi) + 1]
+        if self.short:
+            part, self.short = part[:-1], self.short - 1
+        return Resp(part, 206)
+
+
+def test_byte_range_reads_return_exactly_the_bytes_asked_for():
+    s = RangeSession(bytes(range(100)))
+    client = S3Client("https://b.s3.example.com", "", requests_per_second=0, session=s,
+                      backoff=0)
+    assert client.get_bytes("k/f", 10, 19) == bytes(range(10, 20))
+    assert client.get_bytes("k/f", 95) == bytes(range(95, 100))
+    # A virtual-hosted endpoint: no bucket in the path.
+    assert s.calls[0] == ("https://b.s3.example.com/k/f", {"Range": "bytes=10-19"})
+    assert client.stats["bytes"] == 15
+    assert client.get_text("missing") is None
+
+
+def test_a_short_or_unranged_answer_is_retried_then_refused():
+    s = RangeSession(bytes(range(100)), short=1)
+    client = S3Client("https://h", "b", requests_per_second=0, session=s, backoff=0)
+    assert client.get_bytes("f", 0, 9) == bytes(range(10))      # one short reply, retried
+    from meteopack.core.http import IntegrityError
+
+    s = RangeSession(bytes(range(100)), ignore_range=True)
+    client = S3Client("https://h", "b", requests_per_second=0, session=s, backoff=0,
+                      retries=1)
+    with pytest.raises(IntegrityError):
+        client.get_bytes("f", 10, 19)

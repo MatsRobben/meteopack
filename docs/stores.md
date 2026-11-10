@@ -5,7 +5,7 @@ data root. Everything you need to read it is in the store itself - every store
 directory has a `README.md` generated from its config - so this page is the
 general picture.
 
-## Gridded stores (radar, satellite)
+## Gridded stores (radar, satellite, NWP)
 
 ```
 packed/radar/knmi_radar/rtcor_5min/v1/
@@ -277,6 +277,9 @@ codes, the reserved codes, per-run flags, `provenance.parquet`, per-day
 status - is as for the radar stores, with "frame" meaning one run. Forecast
 stores keep the model's own grid: nothing is reprojected at pack time.
 
+The GFS stores (below) predate the lead-time axis: the state store is indexed
+by valid time, and the precipitation store holds one variable per lead.
+
 ### HARMONIE-AROME Cy43 NL
 
 KNMI's HARMONIE-AROME Cy43 (UWC-West) forecasts for the NL domain, every
@@ -376,6 +379,127 @@ superseded 4 km stereographic reprojection (11 days, 234 runs) validated the
 reading, unit conversion, P1/NetCDF agreement, schema checks, gap flagging,
 kill-and-resume and georeferencing that this design reuses; its numbers are in
 `claude_scratch/2026-11-09_harmonie/validation/` and the branch history.
+
+### The GFS NWP stores
+
+Two stores hold NOAA GFS 0.25 degree forecasts on GFS's **own grid, not
+resampled**, cropped to a window around the 1536 km RainPro-NL model frame
+(`knmi_stereo_16km_1536`: KNMI polar-stereographic, centred x = 350 km,
+y = -4032 km, edges x -418..1118 km, y -4800..-3264 km). Regridding to the
+model grid happens at load time. Both are filled by one stream,
+`meteopack stream noaa_gfs --product state_1h_0p25`, from NOAA's public AWS
+archive (`s3://noaa-gfs-bdp-pds`, anonymous). Nothing raw is kept: the stream
+reads each file's `.idx`, fetches only the wanted GRIB messages with HTTP
+byte-range requests (adjacent messages in one request), checks, decodes,
+crops and encodes them in memory. A message that fails its check is written
+to `raw/nwp/noaa_gfs/state_1h_0p25/quarantine/` with the reason, never packed.
+
+**`packed/nwp/noaa_gfs/state_1h_0p25/v1/`** - the 122 input fields of
+RainPro-8 (Pablos et al., ICLR 2026, Appendix I, Table 11), hourly, by valid
+time.
+
+| | |
+|---|---|
+| time | valid hour H, 1 h cadence, axis from 2021-01-01 00 UTC |
+| source | run `floor6(H)` (00/06/12/18 UTC) at lead `H - floor6(H)` = 0-5 h: the newest run started at or before H, no latency emulated. If that file is absent upstream: the previous run at lead 6-11 (`is_fallback = 1`) |
+| fields | 122 variables `(time, y, x)`, one per (GFS variable, level), e.g. `tmp_850hpa`, `cape_255_0hpa_agl`, `rh_atm`, `lftx4_sfc`; always the **instantaneous** GRIB field (`anl` / `L hour fcst`), never a time mean. The list, with units, steps and availability: the product config, or `gfs_122_variables.tsv` in the trial notes |
+| codes | uint16, `value = scale_factor * code + add_offset` per field (array attrs); 65534 = field not available for this frame (absent upstream, or failed its check); 65535 = undefined at this pixel (GRIB bitmap: SNOD/WEASD over sea). `xr.open_zarr` decodes both to NaN |
+| encoding | per field a fixed physical range mapped onto codes 0..65533, step chosen as a round number >= range / 65533 (e.g. T 0.002 K, RH 0.002 %, MSLP 0.4 Pa, CAPE 0.2 J/kg, specific humidity 2e-9 .. 8e-7 kg/kg by level). Values outside the range are clipped and counted per day (none in the trials) |
+| grid | `gfs_0p25_latlon_nl`: GFS 0.25 deg points 8.00W..19.50E x 60.00N..44.50N (63 rows north first x 111 columns); store pixel `[i, j]` = GFS row `120 + i`, column `(1408 + j) mod 1440`. The model frame spans 7.30W-18.91E, 45.07N-59.40N; the window is the 0.25 deg nodes enclosing it plus 2 more on every side, so bilinear interpolation at load time has all its neighbours. `lat`/`lon` per point (and `y`/`x` = lat/lon, degrees) |
+| load-time regridding | `meteopack.sources.nwp.gfs.Regridder(lon, lat, SourceGrid(...))` interpolates to any target lon/lat: bilinear with GRIB-masked neighbours dropped and the weights renormalised; the per-field hint `extra.gfs.fields.<name>.regrid` in the product config says **nearest** for CRAIN, CSNOW, CFRZR, CICEP and CPOFP (0/1 flags; CPOFP's "no precipitation" is -50 %) |
+| units | GRIB's own (K, Pa, m, kg/kg, %, J/kg ...), except PRATE in mm/h (x 3600) |
+| chunks | one hour per inner chunk (63 x 111), 7 days per shard; blosc-zstd 5, byte shuffle |
+
+Per frame, beside the provenance flags (`is_corrupt_frame` = some field of the
+frame failed its check; `source_layout_id` 2 = GFS v15 flat path, 3 = v16
+`atmos/` path; `source_record_id` -> `provenance.parquet`, one row per run and
+lead used):
+
+| array | holds |
+|---|---|
+| `source_run_time` | run start, seconds since 1970 (-1 no frame) |
+| `source_lead_h` | lead in hours (-1 no frame) |
+| `is_fallback` | 1 = from the previous run, 0 = newest run, -1 no frame |
+| `n_fields_missing` | how many of the 122 fields are not available in this frame |
+
+**`packed/nwp/noaa_gfs/prate_0p25/v1/`** - precipitation rate per run.
+
+| | |
+|---|---|
+| time | **run start** (00/06/12/18 UTC), 6 h cadence |
+| fields | `prate_f01` .. `prate_f15`: mean rate (mm/h) over lead hours `L-1 .. L`, i.e. valid at run + L h. One variable per lead because the gridded store has no lead axis yet; maps 1:1 onto a `(time, lead, y, x)` layout once it has |
+| codes | uint16, `mm/h = 0.002 * code`; 65534 = lead not available |
+| per frame | `n_leads_missing` (-1 no run) |
+| grid | the same native window as the state store |
+| chunks | one run per inner chunk, 30 days (120 runs) per shard |
+
+A model at issue time t0 takes run `floor6(t0)` and the leads that cover
+t0 + 1 h .. t0 + 8 h (leads 1..14; 15 is kept as margin).
+
+The one-hour means are **de-averaged** from GFS's PRATE time means
+(`A-L hour ave fcst`), whose window restarts every 6 h (f001 = mean 0-1,
+f002 = mean 0-2, ..., f007 = mean 6-7): `mean(L-1, L) = (L-A) m(A, L) -
+(L-1-A) m(A, L-1)`, with the window start A read from each message, not
+assumed. GRIB packing makes a few per cent of the de-averaged values slightly
+negative (down to -0.014 mm/h in v16 trial days, -0.18 mm/h in v15); they are
+clipped to 0 and counted per day in the status record.
+
+#### What the archive holds (scan of every run 2021-01-01 .. 2026-11-08)
+
+| period | what | effect on the stores |
+|---|---|---|
+| 2021-01-01 .. 2021-02-25 18z | only leads f000, f003, f006, ... (a 3-hourly backfill, uploaded 2024-04-16) | state: hours not divisible by 3 missing (the previous run has the same gap); prate: no one-hour means, every lead missing |
+| 7 runs: 2021-02-02 00z, 02-03 12/18z, 02-04 12z, 02-06 12/18z, 02-07 12z | absent | state: their hours missing; prate: run missing |
+| 2021-01-01 .. 2021-03-22 06z (GFS v15, path without `atmos/`) | no CAPE/CIN 90-0 hPa, no LCDC/MCDC, TCDC entire atmosphere only as a time mean; SPFH on pressure levels and ICETK only in `pgrb2b` (read from there) | those 5 fields missing (a time mean is not substituted for an instantaneous field) |
+| 2021-02-26 .. 2023-02-02, and 2023-05-01 | no CLMR on pressure levels (present in the Jan-Feb 2021 backfill) | 4 CLMR fields missing |
+| 2021-02-26 00z .. now | f000-f015 hourly, every run complete | all 122 fields from 2023-02-03 (except 2023-05-01) |
+
+The GRIB signature (discipline, category, number, level) of every one of the
+122 fields is the same in v15 and v16 files; no field changes meaning across
+the upgrade as far as the metadata says.
+
+```python
+import xarray as xr
+st = xr.open_zarr(".../packed/nwp/noaa_gfs/state_1h_0p25/v1/dataset.zarr", consolidated=False)
+pr = xr.open_zarr(".../packed/nwp/noaa_gfs/prate_0p25/v1/dataset.zarr", consolidated=False)
+t0 = "2024-01-02T13:25"
+frame = st.sel(time=t0, method="pad")             # the hour at or before t0 (decoded, NaN = n/a)
+run = pr.sel(time=t0, method="pad")               # the newest run at or before t0
+```
+
+Per day, `days/<YYYY>/<date>.json` in the state store says which run and lead
+made each hour, which fields were absent upstream or failed a check, which
+precipitation leads are missing, what was clipped, and the transfer and
+timings. Day states: `done` (every frame packed or confirmed absent
+upstream), `partial` (a transfer failed; a rerun redoes the day), `empty`.
+
+Checked on 2026-11-09. The pipeline first ran with regridding to the 16 km
+frame (trial days 2021-01-10, 2021-03-22..23, 2022-08-15..18, 2024-01-02,
+2025-07-01..04, 2026-11-07); the native-grid stores were then re-run and
+re-checked on 2021-03-22 (v15) and 2024-01-02 (v16):
+
+* all 122 fields at 4 valid hours (v15 lead 0 and 2, v16 lead 1 and 5),
+  re-fetched and picked at the store's own `lat`/`lon` (which also checks the
+  georeferencing): the store is within half a quantisation step everywhere,
+  and fields absent upstream are entirely 65534 (an earlier check of the
+  regridded layout covered 7 hours across all eras the same way);
+* the de-averaged one-hour rates against hourly differences of the APCP
+  accumulations (an independent route) over 40-62N, 12W-25E: correlation
+  0.983-0.9998 for the v16 runs 2024-01-02 12z and 2026-11-07 06z, area means
+  within 1 % on most leads (worst 7 %), mean absolute difference
+  0.005-0.017 mm/h (APCP itself is packed to 0.0625 mm); the v15 run
+  2021-03-22 06z correlates 0.93-0.998. The store equals the native
+  de-averaged rate to half a step;
+* georeferencing: GFS orography's coastline and the sea mask of WEASD sit on
+  the Natural Earth coastline, and the model frame lies inside the window
+  with its margin;
+* the wet day 2024-01-02, regridded to 16 km, against RTCOR averaged onto the
+  same cells:
+  hourly domain means correlate 0.86 and peak in the same hours; GFS's daily
+  total is ~2x RTCOR's (RTCOR is known to underestimate in winter) - a sanity
+  check, not a verification;
+* a stream killed (SIGKILL) mid-day resumes: done days are skipped, the
+  interrupted day is redone whole.
 
 ## Points stores (station networks)
 

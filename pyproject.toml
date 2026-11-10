@@ -17,7 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 satellite = ["satpy>=0.50", "eumdac>=3.0"]
-nwp = ["cfgrib>=0.9", "eccodes>=2.38"]
+# eccodeslib: the ecCodes C library as a wheel (eccodes itself bundles it only on Windows)
+nwp = ["cfgrib>=0.9", "eccodes>=2.38", "eccodeslib>=2.38; sys_platform == 'linux'"]
 radar = ["h5py>=3.12", "h5netcdf>=1.4"]
 # RTCOR clutter cleaner (datasets/rtcor_clean.py): optical flow and image filters
 clean = ["scipy>=1.13", "pysteps>=1.10", "opencv-python-headless>=4.8"]

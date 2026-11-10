@@ -1,0 +1,101 @@
+# NOAA GFS 0.25 degree precipitation rate PER RUN: the one-hour mean rate over each lead hour
+# (L-1, L], L = 1..15 h, on GFS's native 0.25 deg grid cropped like the state store
+# (gfs_0p25_latlon_nl, 63 x 111 points). Not resampled.
+#
+# Filled by the SAME stream as the state store: `meteopack stream noaa_gfs --product
+# state_1h_0p25` (meteopack.jobs.stream_gfs). This product cannot be streamed on its own.
+#
+# Time = RUN START (00/06/12/18 UTC, cadence 6 h); one variable per lead, prate_f01 ..
+# prate_f15 = mean rate over lead hours 0-1 .. 14-15, i.e. valid at run + L h. A model at
+# issue time t0 uses run floor6(t0) and the leads covering t0+1h .. t0+8h (leads 1..14).
+#
+# De-averaged from GFS's PRATE time means ("A-L hour ave fcst"), whose window restarts every
+# 6 h: mean(L-1, L) = (L-A) m(A, L) - (L-1-A) m(A, L-1), the window start A read from each
+# message (meteopack.sources.nwp.gfs.hourly_means). Slightly negative results from GRIB
+# packing are clipped to 0 (count and minimum in the day status).
+#
+# Layout note: one variable per lead because the gridded store has no lead axis yet; this
+# maps 1:1 onto a (time, lead, y, x) layout once the store core has a named lead axis.
+#
+# 2021-01-01 .. 2021-02-25 the archive has 3-hourly files only: one-hour means cannot be
+# derived and those runs are packed with every lead missing (n_leads_missing = 15).
+source: noaa_gfs
+description: >-
+  NOAA GFS 0.25 deg precipitation rate per run: one-hour means over lead hours 0-1 .. 14-15
+  (prate_f01 .. prate_f15), de-averaged from GFS's 6-hourly-resetting means, native
+  0.25 deg grid cropped to 8W-19.5E x 44.5-60N, uint16 0.002 mm/h.
+product: prate_0p25
+version: 1
+
+cadence_seconds: 21600
+grid_id: gfs_0p25_latlon_nl
+
+store:
+  kind: gridded
+  # One run per inner chunk; 120 runs (30 days) per shard, so the store is ~15 files a
+  # month instead of 15 a day. The stream writes one day into a shard at a time (one
+  # writer, under the stream's lock), which rewrites that shard file.
+  chunks: {time: 1, y: 63, x: 111}
+  shard: {time: 120, y: 63, x: 111}
+  compressor: blosc
+  compression_level: 5
+  partition_by: [year]
+
+raw_layout: {archive: none, granularity: day}
+
+retention:
+  raw: {keep: false, after: pack}
+  canonical: {keep: true}
+  derived: {keep: true}
+
+attrs:
+  title: NOAA GFS 0.25 deg one-hour mean precipitation rate per run and lead, native grid cropped around the Netherlands
+  institution: NOAA/NCEP (GFS); packed by meteopack
+  source: >-
+    NOAA Global Forecast System 0.25 deg forecasts (pgrb2.0p25 PRATE time means), NOAA Open
+    Data Dissemination on AWS, s3://noaa-gfs-bdp-pds (https://noaa-gfs-bdp-pds.s3.amazonaws.com).
+  references: https://www.nco.ncep.noaa.gov/pmb/products/gfs/
+  comment: >-
+    uint16 codes, mm/h = 0.002 * code. 65534 = lead not available for this run. time is the
+    run start; prate_fLL is the mean rate over (time + LL-1 h, time + LL h]. De-averaged
+    from GFS's 6-hourly-resetting PRATE means; negative results of GRIB packing clipped to 0.
+    Native GFS 0.25 deg points, not resampled (see the state store).
+
+variables:
+  - {name: prate_f01, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 0-1 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f02, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 1-2 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f03, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 2-3 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f04, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 3-4 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f05, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 4-5 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f06, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 5-6 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f07, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 6-7 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f08, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 7-8 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f09, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 8-9 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f10, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 9-10 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f11, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 10-11 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f12, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 11-12 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f13, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 12-13 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f14, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 13-14 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+  - {name: prate_f15, source_key: "PRATE:surface", units: "mm h-1", standard_name: lwe_precipitation_rate, long_name: "GFS precipitation rate, mean over lead hours 14-15 after the run start", valid_min: 0, valid_max: 131.066, encoding: {dtype: uint16, scale: 0.002, offset: 0}}
+
+frame_variables:
+  - name: n_leads_missing
+    dtype: int16
+    fill_value: -1
+    long_name: number of the 15 leads not available for this run (-1 = no run)
+
+extra:
+  readme: |
+    ## GFS precipitation specifics
+
+    - time = run start; `prate_fLL` = mean rate (mm/h) over lead hours LL-1 .. LL,
+      valid at time + LL h. One variable per lead (no lead axis in the store yet).
+    - De-averaged from GFS's 6-hourly-resetting PRATE means; negatives from GRIB
+      packing clipped to 0 (count and minimum per day in the state store's
+      `days/<YYYY>/<date>.json`).
+    - 2021-01-01..2021-02-25: 3-hourly files only, no one-hour means (all leads missing).
+  stream: s3
+  stream_job: gfs
+  # Streamed together with this product; see its config.
+  stream_with: state_1h_0p25
+  timeline_origin: "2021-01-01T00:00:00Z"

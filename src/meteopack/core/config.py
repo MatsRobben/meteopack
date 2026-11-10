@@ -36,6 +36,7 @@ SOURCE_CATEGORIES: dict[str, str] = {
     "opera": "radar",
     "eumetsat_seviri": "satellite",
     "knmi_harmonie": "nwp",
+    "noaa_gfs": "nwp",
 }
 
 

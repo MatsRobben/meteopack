@@ -130,7 +130,9 @@ class S3Client:
 
     @property
     def bucket_url(self) -> str:
-        return f"{self.endpoint}/{self.bucket}"
+        """``<endpoint>/<bucket>`` (path style), or the endpoint itself when `bucket` is
+        empty: a virtual-hosted endpoint such as ``https://<bucket>.s3.amazonaws.com``."""
+        return f"{self.endpoint}/{self.bucket}" if self.bucket else self.endpoint
 
     def refresh_key(self) -> bool:
         return False
@@ -161,6 +163,48 @@ class S3Client:
 
     def object_url(self, key: str) -> str:
         return f"{self.bucket_url}/{quote(key)}"
+
+    def get_bytes(self, key: str, start: int | None = None, end: int | None = None) -> bytes:
+        """One object, or its bytes ``[start, end]`` (inclusive; `end` None reads to the end).
+
+        A byte-range read (HTTP ``Range``), for formats with an index of where
+        each record sits - a GRIB file and its ``.idx`` - so only the records
+        wanted cross the network. The answer must be a 206 of exactly the
+        length asked for; anything shorter is retried, then raised as an
+        `IntegrityError`. A missing object raises `http.NotFoundError`.
+        """
+        headers = None
+        if start is not None:
+            headers = {"Range": f"bytes={start}-{'' if end is None else end}"}
+        want = None if start is None or end is None else end - start + 1
+        last: Exception | None = None
+        for attempt in range(self.retries + 1):
+            self.limiter.acquire()
+            self._count()
+            t0 = time.perf_counter()
+            resp = http.get_with_retry(self.object_url(key), session=self.session,
+                                       retries=self.retries, backoff=self.backoff,
+                                       timeout=self.timeout, headers=headers)
+            data = resp.content
+            with self._lock:
+                self.stats["transfer_s"] += time.perf_counter() - t0
+                self.stats["files"] += 1
+                self.stats["bytes"] += len(data)
+            ranged_ok = start is None or resp.status_code == 206 or (start == 0 and end is None)
+            if ranged_ok and (want is None or len(data) == want):
+                return data
+            last = IntegrityError(f"{key} [{start}, {end}]: HTTP {resp.status_code}, "
+                                  f"{len(data)} bytes, wanted {want}")
+            logger.warning("s3: %s (attempt %d)", last, attempt + 1)
+            time.sleep(min(30.0, self.backoff * 2 ** attempt))
+        raise last  # type: ignore[misc]
+
+    def get_text(self, key: str) -> str | None:
+        """A small text object (an index), or None when it does not exist."""
+        try:
+            return self.get_bytes(key).decode()
+        except http.NotFoundError:
+            return None
 
     def _check(self, remote: RemoteFile):
         def check(path: Path):
