@@ -1,11 +1,12 @@
 # Cleaned RTCOR timeline over the whole archive: every frame passes the clutter cleaner
-# (src/meteopack/datasets/rtcor_clean.py) on the full grid before cropping and encoding.
+# (src/meteopack/datasets/rtcor_clean_v14/, old chain only) on the full grid before cropping and encoding.
 # UTC ranges are half-open; start null is the first source frame, end null the last.
 source: /vol/knmimo-nobackup/users/mrobben/meteopack_data/packed/radar/knmi_radar/rtcor_5min/v1/dataset.zarr
 output: /vol/knmimo-nobackup/users/mrobben/meteopack_data/training/radar/rtcor_central256_clean/v1
 start: null
 end: null
 clean: true
+cleaner: v14   # v14 (old chain only, mask unchanged) or v5 (tile model, footprint applied)
 cadence_seconds: 300
 crop: [254, 510, 222, 478]  # y start/stop, x start/stop
 encoding:

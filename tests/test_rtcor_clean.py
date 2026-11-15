@@ -97,7 +97,7 @@ def _source(path, n=30, start='2018-12-01T00:00'):
 
 def _cfg(source, output):
     return {'source': str(source), 'output': str(output), 'start': None, 'end': None, 'clean': True,
-            'cadence_seconds': 300, 'crop': [10, 74, 10, 74],
+            'cleaner': 'v5', 'cadence_seconds': 300, 'crop': [10, 74, 10, 74],
             'encoding': {'dry_threshold_mm': .01, 'step_mm': .02},
             'storage': {'chunk_frames': 4, 'shard_frames': 8, 'zstd_level': 3},
             'samples': {'history': 4, 'forecast': 18, 'stride': 4, 'origin': '2018-12-01T00:00:00Z'}}

@@ -2,10 +2,12 @@
 
 Run: python -m meteopack.datasets.rtcor --config configs/datasets/rtcor.yaml
 
-With `clean: true` in the config every frame is first cleaned with the clutter cleaner
-(rtcor_clean.py) on the full grid, using the neighbouring source frames as context, and then
-cropped and encoded. Shards can be built in parallel: run once with --prepare, then with
---worker K --workers N for K = 0..N-1, then once without options to write the index and manifest.
+With `clean: true` in the config every frame is first cleaned with the clutter cleaner on the
+full grid, using the neighbouring source frames as context, and then cropped and encoded.
+`cleaner` selects it: v14 (default; rtcor_clean_v14/, old chain only, PAD frames of context
+on each side) or v5 (rtcor_clean.py, one frame of context). Shards can be built in parallel:
+run once with --prepare, then with --worker K --workers N for K = 0..N-1, then once without
+options to write the index and manifest.
 """
 from __future__ import annotations
 
@@ -13,9 +15,9 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import time
+from pathlib import Path
 
 import numpy as np
 import zarr
@@ -55,8 +57,19 @@ def _git_revision() -> str | None:
         return None
 
 
-CLEAN_STATS = ('frames_cleaned', 'frames_low_threshold', 'spike_pixels', 'raw_wet_pixels',
-               'clean_wet_pixels', 'raw_sum_code', 'clean_sum_code')
+CLEANERS = ('v14', 'v5')
+
+
+def _cleaner(name: str):
+    """(module, context frames per side, per-frame statistics it reports) of a cleaner version."""
+    if name == 'v14':
+        from . import rtcor_clean_v14 as mod
+        return mod, mod.PAD, mod.STATS
+    if name == 'v5':
+        from . import rtcor_clean as mod
+        return mod, 1, ('low_threshold', 'spike_pixels', 'raw_wet_pixels', 'clean_wet_pixels',
+                        'raw_sum_code', 'clean_sum_code')
+    raise ValueError(f'unknown cleaner {name!r}; choose one of {CLEANERS}')
 
 
 def build(cfg: dict, config_path: Path | None = None, *, prepare: bool = False,
@@ -92,7 +105,8 @@ def build(cfg: dict, config_path: Path | None = None, *, prepare: bool = False,
         raise ValueError('crop outside source grid')
     cleaning = bool(cfg.get('clean', False))
     if cleaning:
-        from . import rtcor_clean
+        cleaner_name = str(cfg.get('cleaner', 'v14'))
+        rtcor_clean, pad, stat_keys = _cleaner(cleaner_name)
         assets = rtcor_clean.load_assets()
         if tuple(rain.shape[1:]) != assets.shape or abs(scale - 0.01) > 1e-12:
             raise ValueError('cleaner assets do not match the source grid or encoding')
@@ -144,7 +158,8 @@ def build(cfg: dict, config_path: Path | None = None, *, prepare: bool = False,
     if prepare:
         return output
     counts = {'thresholded_wet_pixels':0, 'clipped_pixels':0, 'source_missing_pixels':0, 'outside_pixels':0}
-    clean_counts = {key: 0 for key in CLEAN_STATS}
+    clean_keys = ('frames_cleaned',) + (stat_keys if cleaning else ())
+    clean_counts = {key: 0 for key in clean_keys}
     timings = {'source_read_seconds': 0.0, 'cleaning_seconds': 0.0, 'encoding_seconds': 0.0,
                'output_write_seconds': 0.0}
     resumed_shards = 0
@@ -162,23 +177,39 @@ def build(cfg: dict, config_path: Path | None = None, *, prepare: bool = False,
             t = time.perf_counter()
             clean_s, clean_stats = 0.0, {}
             if cleaning:
-                # Full frames plus one source frame either side as context; crop after cleaning.
-                a, b = max(lo+i-1, 0), min(lo+stop+1, len(all_times))
-                full = np.asarray(rain[a:b])
-                read_s = time.perf_counter() - t
-                t = time.perf_counter()
-                cleaned, info = rtcor_clean.clean(full, all_times[a:b], assets)
-                sel = slice(lo+i-a, lo+stop-a)
-                raw = cleaned[sel, y0:y1, x0:x1]
+                # Full frames plus `pad` source frames either side as context; crop after cleaning.
+                # v14 cleans the shard in parts of rtcor_clean.BLOCK frames to bound memory; v5 in one go.
+                part = int(rtcor_clean.BLOCK) if cleaner_name == 'v14' else stop - i
+                read_s, parts, done = 0.0, [], []
+                per_frame = {key: [] for key in stat_keys}
+                for j in range(i, stop, part):
+                    k = min(j + part, stop)
+                    t = time.perf_counter()
+                    a, b = max(lo+j-pad, 0), min(lo+k+pad, len(all_times))
+                    full = np.asarray(rain[a:b])
+                    read_s += time.perf_counter() - t
+                    t = time.perf_counter()
+                    sel = slice(lo+j-a, lo+k-a)
+                    if cleaner_name == 'v14':
+                        # The first and last frame of the source archive have no context: not cleaned.
+                        context = (max(sel.start, 1), max(b - a - sel.stop, 1))
+                        cleaned, info = rtcor_clean.clean(full, all_times[a:b], assets, context=context)
+                    else:
+                        cleaned, info = rtcor_clean.clean(full, all_times[a:b], assets)
+                    parts.append(cleaned[sel, y0:y1, x0:x1])
+                    done.append(np.asarray(info['cleaned'][sel]))
+                    for key in stat_keys:
+                        per_frame[key].append(np.asarray(info[key][sel]))
+                    del full, cleaned, info
+                    clean_s += time.perf_counter() - t
+                raw = np.concatenate(parts)
                 # A frame at either end of the source archive has no context and is not cleaned.
-                status[i:stop][(~info['cleaned'][sel]) & (status[i:stop] == 0)] = 4
+                status[i:stop][(~np.concatenate(done)) & (status[i:stop] == 0)] = 4
                 ok = status[i:stop] == 0
-                clean_stats = {'frames_cleaned': int(ok.sum()),
-                               'frames_low_threshold': int(info['low_threshold'][sel][ok].sum())}
-                for key in CLEAN_STATS[2:]:
-                    clean_stats[key] = int(info[key][sel][ok].sum())
-                del full, cleaned
-                clean_s = time.perf_counter() - t
+                clean_stats = {'frames_cleaned': int(ok.sum())}
+                for key in stat_keys:
+                    clean_stats[key] = int(np.concatenate(per_frame[key])[ok].sum())
+                del parts
             else:
                 raw=np.asarray(rain[lo+i:lo+stop,y0:y1,x0:x1])
                 read_s = time.perf_counter() - t
@@ -239,7 +270,8 @@ def build(cfg: dict, config_path: Path | None = None, *, prepare: bool = False,
         'paired_3d':False,'completed':True}
     if cleaning:
         manifest['cleaning'] = {**identity['cleaner'], 'statistics': clean_counts,
-            'statistics_scope': 'usable frames, full grid inside the common footprint; sums in source codes'}
+            'statistics_scope': 'usable frames, full grid on valid pixels (v5: inside the common '
+                                'footprint); sums in source codes'}
     write_json(output / 'manifest.json',manifest)
     return output
 
