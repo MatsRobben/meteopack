@@ -29,23 +29,6 @@ import numpy as np
 from scipy import sparse
 
 K3 = np.ones((3, 3), np.uint8)
-_GRID = {}
-
-
-def _grid(shape):
-    if shape not in _GRID:
-        yy, xx = np.mgrid[0:shape[0], 0:shape[1]].astype(np.float32)
-        _GRID[shape] = (xx, yy)
-    return _GRID[shape]
-
-
-def _pairs(a, b, na, nb):
-    """sparse counts (na+1, nb+1) of label pairs (a, b) over pixels (1-D int arrays)."""
-    m = (a > 0) & (b > 0)
-    a, b = a[m], b[m]
-    if len(a) == 0:
-        return sparse.csr_matrix((na + 1, nb + 1))
-    return sparse.csr_matrix((np.ones(len(a), np.float32), (a, b)), shape=(na + 1, nb + 1))
 
 
 def build_links(labs, ns, flows, *, tol=True, lagrange=True, euler=True, norm="own"):

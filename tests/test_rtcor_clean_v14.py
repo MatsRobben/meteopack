@@ -102,7 +102,7 @@ def test_clean_blocks_and_context(old_run):
         v14.clean(codes[:, :100], times(T))
 
 
-def test_registered_post_stage_runs_after_guard(old_run):
+def test_registered_post_and_final_stages(old_run):
     codes, out = old_run
     calls = []
 
@@ -114,6 +114,12 @@ def test_registered_post_stage_runs_after_guard(old_run):
     assert calls == [2]
     valid = codes < 65534
     assert np.array_equal(res[valid], np.minimum(out // 2, out)[valid])
+
+    def raise_all(ctx, cur):                                    # a final stage may not raise or touch the mask
+        return np.full_like(cur, 60000), None
+    v14.register_stage('test_raise', raise_all)
+    res = v14.clean_window(codes, times(len(codes)), final=('test_raise',))
+    assert np.array_equal(res, codes)                           # clipped back to the raw codes
 
 
 def test_tree_tables_evaluate_like_a_hand_made_tree():

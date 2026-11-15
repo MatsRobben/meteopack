@@ -41,16 +41,6 @@ def usable(flags, T):
     return ok
 
 
-def copy_frozen(codes, out, flags):
-    """In a half of frame t that is a copy of t-1, pixels with t-1's code get t-1's output (in place)."""
-    for t in range(1, len(codes)):
-        for bit, sl in HALVES:
-            if flags[t] & bit:
-                same = codes[t][sl] == codes[t - 1][sl]
-                out[t][sl] = np.where(same, out[t - 1][sl], out[t][sl])
-    return out
-
-
 def removed_mask(codes, st, RM):
     """(T, H, W) bool: pixels of the objects removed by the object decision RM."""
     out = np.zeros(codes.shape, bool)

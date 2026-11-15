@@ -34,7 +34,8 @@ How it works, in plain words (stages run in this order on one window of frames):
 11. Realism guard. An edit of stages 6-9 that carves inside coherent rain (makes a hole, or bites into kept
     echo along most of its boundary) is undone, and lowered pixels with strong neighbours are restored.
     Losing some rain that looks like clutter is accepted; holes, slits and half showers are not.
-12. Added stages (window.register_stage, `post`): run after the guard, before the frozen-half copy.
+12. Added stages (window.register_stage): in `stages` (before the vote and guard), in `post` (after the
+    guard, before the frozen-half copy) or in `final` (on the finished output).
 
 Entry points:
     clean(codes, times, assets=None, *, context=1)  -> (cleaned, info)   the dataset builder's contract

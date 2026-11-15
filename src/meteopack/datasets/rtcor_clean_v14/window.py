@@ -13,9 +13,9 @@ Stages: 1 object decision (decide: track-pooled classifier margin + 3 min(aggr, 
 g = 1 up to 50 px, 0 from 500 px; hysteresis along tracks), 2 spikes (v10.spike_stage), 3 frozen copy,
 4 hot spots (hotspots.hot_stage), 5 weak transient echo (weak.weak_stage), then the pixel stages named in
 `stages` (stages.<name>_stage or register_stage), the vote (stages.consistency), the realism guard
-(stages.realism_guard), the stages named in `post`, and the frozen-half copy. New-chain frames (times >=
-2023-01-31 10:45 UTC) are returned unchanged; without `times` every frame is old chain. Codes >= 65534 pass
-unchanged; values are never raised; no echo is added.
+(stages.realism_guard), the stages named in `post`, the frozen-half copy, and the stages named in `final`.
+New-chain frames (times >= 2023-01-31 10:45 UTC) are returned unchanged; without `times` every frame is old
+chain. Codes >= 65534 pass unchanged; values are never raised; no echo is added.
 """
 from __future__ import annotations
 
@@ -153,24 +153,29 @@ def stage_fn(name):
 
 # ------------------------------------------------------------------ main
 def clean_window(codes, times=None, aggr=1.0, *, st=None, weak=True, hotspots=True,
-                 aggr_smooth=0, stages=DEFAULT_STAGES, post=(), guard=True, ret_info=False, **kw):
+                 aggr_smooth=0, stages=DEFAULT_STAGES, post=(), final=(), guard=True, ret_info=False, **kw):
     """Clean one window (T, 765, 700) uint16 -> same; equals the research v12 clean_window(..., period="chain")
-    bit for bit when post=(). kw: track kw (tracks.DEFAULTS), spike_kw, wedge, wedge_kw, streak_kw, hot-spot
+    bit for bit when post=() and final=(). kw: track kw (tracks.DEFAULTS), spike_kw, wedge, wedge_kw, streak_kw, hot-spot
     STAGE_DEFAULTS keys, weak.DEFAULTS keys, OBJ_DEFAULTS keys, stage kw dicts <name>_kw, smooth_kw, guard_kw.
     post: stage names run after the realism guard (not reverted by it), before the frozen-half copy.
+    final: stage names run on the finished output (after the frozen-half copy), then clipped to the raw codes.
+    aggr: scalar, (T,), (T, ny, nx), or a callable aggr(codes, times) returning one of those.
     st: a precomputed v10 stage (it is not modified)."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         return _clean_window(codes, times, aggr, st=st, weak=weak, hotspots=hotspots, aggr_smooth=aggr_smooth,
-                             stages=stages, post=post, guard=guard, ret_info=ret_info, **kw)
+                             stages=stages, post=post, final=final, guard=guard, ret_info=ret_info, **kw)
 
 
-def _clean_window(codes, times, aggr, *, st, weak, hotspots, aggr_smooth, stages, post, guard, ret_info, **kw):
+def _clean_window(codes, times, aggr, *, st, weak, hotspots, aggr_smooth, stages, post, final, guard, ret_info,
+                  **kw):
     codes = np.asarray(codes)
     T = len(codes)
     old = np.ones(T, bool) if times is None else (np.asarray(times).astype("datetime64[ns]") < NEW_CHAIN)
     if not old.any():
         return (codes.copy(), {}) if ret_info else codes.copy()
+    if callable(aggr):
+        aggr = aggr(codes, times)
     A = Aggr(aggr, T, aggr_smooth)
     valid = codes < MISSING
     # --- 1-3: v10 with the aggr object decision
@@ -198,6 +203,7 @@ def _clean_window(codes, times, aggr, *, st, weak, hotspots, aggr_smooth, stages
     v11ish = out
     info = {"v11ish": v11ish}
     # --- 6-10: new stages
+    ctx = None
     if A.max() > 0 and stages:
         ctx = SG.Context(codes, st, A, valid)
         lvmin = np.full(codes.shape, 60000, np.float16)
@@ -224,5 +230,10 @@ def _clean_window(codes, times, aggr, *, st, weak, hotspots, aggr_smooth, stages
             out, _ = stage_fn(name)(ctx, out, **kw.get(name + "_kw", {}))
         out = frozen_copy(codes, out, st["flags"])
         out = np.where(valid, np.minimum(out, v11ish), codes).astype(codes.dtype)
+    if final:
+        ctx = SG.Context(codes, st, A, valid) if ctx is None else ctx
+        for name in final:
+            out, _ = stage_fn(name)(ctx, out, **kw.get(name + "_kw", {}))
+        out = np.where(valid, np.minimum(out, codes), codes).astype(codes.dtype)
     out = np.where(old[:, None, None], out, codes).astype(codes.dtype)
     return (out, info) if ret_info else out

@@ -30,10 +30,6 @@ DEFAULTS = dict(side_max=0.1, win=30, wet_share=0.8, ca_min=15, min_run=30, max_
 _VAL = {}
 
 
-def _rowbox(X, lo, hi):
-    return SK._rowmean(X, lo, hi)
-
-
 def _valid_counts(si, idx, inside, v):
     key = si
     if key not in _VAL or not np.array_equal(_VAL[key][0], v):

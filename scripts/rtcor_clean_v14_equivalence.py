@@ -5,10 +5,10 @@ Run each side in its own process (the research code changes global OpenCV state 
     python scripts/rtcor_clean_v14_equivalence.py --side research    # research outputs -> --cache
     python scripts/rtcor_clean_v14_equivalence.py --side port        # port outputs, compared with them
 
-Research side: proto/v12/cleaner.py clean_window(codes, times, aggr=1.0, period="chain") from the clutter study
-workspace (--work); with --research-module another cleaner file with the same call (e.g. the final v14).
-Port side: meteopack.datasets.rtcor_clean_v14.clean_window(codes, times, 1.0), and clean(codes, times,
-context=PAD) (one block) on the same window. Windows (PAD = 7 context frames on each side, 24 core frames):
+Research side: --research-module (default WORK/proto/v12/cleaner.py; the final base is proto/v14/cleaner.py)
+clean_window(codes, times, **RESEARCH_KW), RESEARCH_KW = --research-kw (default {"aggr": 1.0, "period": "chain"}).
+Port side: meteopack.datasets.rtcor_clean_v14.clean_window(codes, times, **PORT_KW) and clean(codes, times,
+context=PAD, **PORT_KW) (one block) on the same window; PORT_KW = --port-kw (default {}: the port's defaults). Windows (PAD = 7 context frames on each side, 24 core frames):
   heat   2022-07-19 22:15 (heatwave night; research cache raw_heat_n2215.npz)
   flood  2021-07-14 11:00 (research cache raw_flood_2021-07-14.npz)
   spikes 2021-07-08 06:30 (research cache raw_spikes_2021-07-08.npz)
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import resource
 import sys
@@ -61,7 +62,12 @@ def main() -> int:
     p.add_argument('--side', choices=('research', 'port'), required=True)
     p.add_argument('--work', type=Path, default=WORK)
     p.add_argument('--cache', type=Path, default=CACHE)
-    p.add_argument('--research-module', type=Path, default=None, help='default WORK/proto/v12/cleaner.py')
+    p.add_argument('--research-module', type=Path, default=None,
+                   help='research cleaner file (default WORK/proto/v12/cleaner.py)')
+    p.add_argument('--research-kw', default='{"aggr": 1.0, "period": "chain"}',
+                   help='JSON keyword arguments of the research clean_window call')
+    p.add_argument('--port-kw', default='{}', help='JSON keyword arguments of the port clean_window / clean call')
+    p.add_argument('--no-score', action='store_true', help='skip the v13 score comparison')
     p.add_argument('--windows', nargs='*', default=list(WINDOWS))
     args = p.parse_args()
     args.cache.mkdir(parents=True, exist_ok=True)
@@ -75,11 +81,11 @@ def main() -> int:
         for name in args.windows:
             codes, times = window(name, args.work, args.cache)
             t = time.perf_counter()
-            out = C.clean_window(codes, times, aggr=1.0, period='chain')
+            out = C.clean_window(codes, times, **json.loads(args.research_kw))
             dt = time.perf_counter() - t
             np.save(args.cache / f'research_{name}.npy', out)
-            sc = RS.clutter_score(codes, times)
-            np.savez(args.cache / f'research_score_{name}.npz', **sc)
+            if not args.no_score:
+                np.savez(args.cache / f'research_score_{name}.npz', **RS.clutter_score(codes, times))
             print(f'{name}: research {dt / len(codes):.2f} s/frame, changed px {int((out != codes).sum())}, '
                   f'peak RSS {rss_mb():.0f} MB', flush=True)
         return 0
@@ -90,9 +96,10 @@ def main() -> int:
         codes, times = window(name, args.work, args.cache)
         ref = np.load(args.cache / f'research_{name}.npy')
         t = time.perf_counter()
-        out = V14.clean_window(codes, times, 1.0)
+        pkw = json.loads(args.port_kw)
+        out = V14.clean_window(codes, times, **pkw)
         dt = time.perf_counter() - t
-        out2, info = V14.clean(codes, times, context=PAD)
+        out2, _ = V14.clean(codes, times, context=PAD, **pkw)
         same = out.dtype == ref.dtype and np.array_equal(out, ref)
         core = slice(PAD, len(codes) - PAD)
         same2 = np.array_equal(out2[core], ref[core]) and np.array_equal(out2[:PAD], codes[:PAD]) and \
@@ -101,10 +108,12 @@ def main() -> int:
         raised = int((out > codes).sum())
         new = times >= np.datetime64('2023-01-31T10:45')
         newok = np.array_equal(out[new], codes[new])
-        rsc = np.load(args.cache / f'research_score_{name}.npz')
-        psc = V14.score.clutter_score(codes, times)
-        score_ok = all(np.array_equal(psc[k], rsc[k]) for k in rsc.files)
-        ok = same and same2 and mask and raised == 0 and newok and score_ok
+        score_ok = None
+        if not args.no_score:
+            rsc = np.load(args.cache / f'research_score_{name}.npz')
+            psc = V14.score.clutter_score(codes, times)
+            score_ok = all(np.array_equal(psc[k], rsc[k]) for k in rsc.files)
+        ok = same and same2 and mask and raised == 0 and newok and score_ok is not False
         bad += not ok
         nd = int((out != ref).sum())
         print(f'{name}: {"PASS" if ok else "FAIL"} clean_window==research {same} ({nd} px differ), '
