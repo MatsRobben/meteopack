@@ -7,7 +7,8 @@ Changes against v12 (proto/v12/cleaner.py, md5 ce231133...):
     (1 + smoothstep((load - 0.20) / 0.25), rate limit 0.1 per 5 min); every stage reads it through ctx.A.
   - three stage slots as in the meteopack port: stages (default BASE_STAGES = v12 stages without texture, before
     the vote and the guard), post (default POST_STAGES = fixclut, spikes2, stc from proto/<name>/stage.py, after
-    the guard) and final (on the finished output); missing external stages are skipped (info["skipped"]).
+    the guard) and final (default FINAL_STAGES = residue: flat remnants / fragments of removed clutter, on the
+    finished output); missing external stages are skipped (info["skipped"]).
     aggr may also be a callable.
   - memory: after the base, ctx.st keeps only flr and flags; ret_info stores per-stage level maps only with
     ret_info="levels".
@@ -62,7 +63,7 @@ the proto/spikes2 spike stage).
 Stages run in the order of `stages` (v12 default support, dash, texture, outlier, lines; v14 default without texture);
 the vote runs after all.
 """
-# Ported from research proto/v14/cleaner.py (md5 1b1c444cc06b323b70502c4b6af028d9),
+# Ported from research proto/v14/cleaner.py (md5 7f7d852cd05f9a7b62c00dce13a6d7c4),
 # by port_tools/sync_research.py: only imports / loading edited.
 from __future__ import annotations
 
@@ -336,7 +337,7 @@ def auto_aggr(codes, times=None, *, a_min=1.0, a_max=2.0, lo=0.20, width=0.25, r
 # for one atlas speckle instance (21 -> 20 of 47) and one 38-px TEST speckle object.
 BASE_STAGES = ("support", "dash", "outlier", "lines")
 POST_STAGES = ("fixclut", "spikes2", "stc")                              # after the guard (not reverted by it)
-FINAL_STAGES = ()                                                        # on the finished output
+FINAL_STAGES = ("residue",)                                              # on the finished output
 
 
 def _clean_window(codes, times=None, aggr=None, *, st=None, weak=True, hotspots=True, period="chain", maps=None, hot=None,
@@ -449,7 +450,7 @@ def _clean_window(codes, times=None, aggr=None, *, st=None, weak=True, hotspots=
     return (out, info) if ret_info else out
 
 
-for _n in ("fixclut", "spikes2", "stc"):
+for _n in ("fixclut", "spikes2", "stc", "residue"):
     register_stage(_n, getattr(ext_stages, _n + "_stage"))
 
 

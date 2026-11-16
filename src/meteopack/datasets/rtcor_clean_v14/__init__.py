@@ -46,14 +46,24 @@ Post stages (after the guard, so it cannot undo them; they run at every aggr):
     lifetime; a clutter lobe attached to rain is cut where it joins.
 12. Spikes (second pass, spikes2). Interference rays and strobes in each Dutch radar's polar grid: straight
     top-hat lines at constant azimuth that flash or stay fixed in polar coordinates while rain moves; tracked
-    through the window. Under a ray the rain is rebuilt from the rain beside it (no slit, no lowered band).
+    through the window. Under a ray the rain is rebuilt from the rain beside it (no slit, no lowered band):
+    the sides are read from the stage input, missing data or the image edge beside a ray counts as unknown
+    (never as dry), clear air needs dry evidence on both sides, and where a ray crosses the flank of a rain
+    area the strip is held at the level of the wetter side (no dark stripe through the rain edge).
 13. Consistency (stc). Rain moves with the flow and changes smoothly over 5-10 minutes; noise does not. Each
     pixel is compared with the neighbouring frames (t+-1, t+-2) along the motion: echo with no similar echo
     nearby there is clamped to the supported level, or removed when nothing supports it (small flashes,
     granular speckle, dash fields, intense noise spots in and around rain). Weak drizzle is never removed and
     whole objects are treated alike (no half showers, no pin holes). Where the clutter load is high, thin
-    1-2 px granules and dashes that cannot form a coherent rain body are also removed.
-Then the frozen-half copy again. More stages can be added with window.register_stage in the slots `stages`
+    1-2 px granules and dashes that cannot form a coherent rain body are also removed. A neighbour region
+    where a radar contributed only every second or third cycle (a dropout) is no evidence at all, and where
+    the clutter load is low, pixels inside a smooth coherent rain core are never lowered or removed.
+Then the frozen-half copy again, and the final stage on the finished output:
+14. Residue. Faint leftovers of removed clutter, only where the clutter load is high (aggr >= 1.8): small
+    objects that are mostly lowered or at the lowest class without a coherent core, small fragments sitting
+    in a neighbourhood where much more echo was removed than kept, and small specks with no echo along the
+    motion in the frames before and after. Decisions are made consistent along the motion (removed in t-1 and
+    t+1 -> removed at t; kept around -> kept). Large coherent rain is never touched. More stages can be added with window.register_stage in the slots `stages`
 (before the vote and guard), `post` (after the guard) or `final` (on the finished output).
 
 Entry points:
@@ -68,7 +78,8 @@ RESEARCH_MD5. The fixed inputs (geography, interference azimuths, coverage, hot-
 model, the tree models as plain arrays) are in assets/rtcor_clean_v14.npz, built by
 scripts/rtcor_clean_v14_assets.py. Module map: window (pipeline, decision, automatic aggr, stage registry),
 objects/feats (1), tracks (pooling), v10/spikes/streaks/streaks_site/wedge (2-3), hotspots (4), weak (5),
-stages/texfeat/quality (6-10), ext_stages (adapters of 11-13), fixclut (11), spikes2* (12), stc (13),
+stages/texfeat/quality (6-10), ext_stages (adapters of 11-14), fixclut (11), spikes2* (12), stc (13),
+residue (14),
 score (aggr), stale (frozen halves), assets (inputs and tree evaluation).
 """
 from __future__ import annotations
@@ -121,13 +132,14 @@ BLOCK = 24                      # frames cleaned per call of clean_window
 AGGR = None                     # automatic: window.auto_aggr from the v13 clutter load of 32-km tiles
 # research sources of this port (clutter study research/rtcor_clutter_v8/proto), md5 of the ported file
 RESEARCH_MD5 = {
-    'v14/cleaner.py': '1b1c444cc06b323b70502c4b6af028d9', 'v14/stages.py': '89c5730930de76778bd0cf04ec955345',
+    'v14/cleaner.py': '7f7d852cd05f9a7b62c00dce13a6d7c4', 'v14/stages.py': '89c5730930de76778bd0cf04ec955345',
     'v14/texfeat.py': '389f3f306f3d6604c12895fa354e31b8', 'v13/score.py': 'e788eb185e08ea1c1058ad1bd0dd0bdc', 'v13/model.json': '4490a393b16d16ef9833d9087f8e6cba',
     'fixclut/fixclut.py': 'add03a0cc84dc68e78a91163c2be6135', 'fixclut/stage.py': '6c6272e036690ac6534a0f67dbd919a5',
-    'spikes2/spikes2.py': '33847d6b9985f46feb06c59158594f33', 'spikes2/polar.py': '88667960f454bde1f2d8c59c6a4d0278',
+    'spikes2/spikes2.py': 'a2a83f20a9692e6f1725f06446c4fed7', 'spikes2/polar.py': '88667960f454bde1f2d8c59c6a4d0278',
     'spikes2/features.py': '9641fcbf8282c7159b0e07e054318d59', 'spikes2/s2common.py': '73ff28a657177b98307aec82818372ea',
-    'spikes2/stage.py': 'c2f0860fa2bbcd732baa2dfee44ac1fc', 'stc/stc.py': 'e7d0c34f90e5edb29699719eae3b75ee',
+    'spikes2/stage.py': 'c2f0860fa2bbcd732baa2dfee44ac1fc', 'stc/stc.py': '299746e2d4d1faa7040e489d1b0043f0',
     'stc/stage.py': '4a557bf33a7cf08552e126acdd5b98b9',
+    'residue/residue.py': 'fbc9010583549fac50fa254f606ad2c3', 'residue/stage.py': '33642fce33436f316fb042f7e934b787',
 }
 STATS = ('changed_pixels', 'raw_wet_pixels', 'clean_wet_pixels', 'raw_sum_code', 'clean_sum_code')
 

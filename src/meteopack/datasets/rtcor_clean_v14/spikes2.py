@@ -39,7 +39,7 @@ Method (details and numbers in NOTES.md):
            hole, no lowered band; never below 1 code where rain is beside the strip; never above the input.
      rims  1 px outside the measured width: half-way blend between input and est (no seam, no hollow outline).
 """
-# Ported from research proto/spikes2/spikes2.py (md5 33847d6b9985f46feb06c59158594f33),
+# Ported from research proto/spikes2/spikes2.py (md5 a2a83f20a9692e6f1725f06446c4fed7),
 # by port_tools/sync_research.py: only imports / loading edited.
 from __future__ import annotations
 
@@ -361,7 +361,7 @@ def strip_pixels(si, a_c, hw, r_in, r_out, rim, rb=None, hwb=None):
     return idx[ok], r[ok], q[ok], wk[ok]
 
 
-def fix_ray(out_t, src_t, ray, p, k_hint=None):
+def fix_ray(out_t, src_t, ray, p, k_hint=None, ref_t=None):
     """returns (pixel idx, new values, info) for one ray in one frame, or None."""
     si, a_c, hw = ray["site"], ray["a_c"], ray["hw"]
     rim = p["rim"]
@@ -378,6 +378,7 @@ def fix_ray(out_t, src_t, ray, p, k_hint=None):
     core = np.abs(q) <= wk + 0.5
     # rain beside the strip (from the frame being cleaned), interpolated across
     Wd = wk + rim
+    REF = out_t if ref_t is None else ref_t             # sides read from the stage input (not from rays already cleaned)
     offs = np.array(p["offs"], np.float32)
     # vectorised side samples (offset depends on the pixel's own strip half width)
     cy, cx = SITES[si]
@@ -389,18 +390,23 @@ def fix_ray(out_t, src_t, ray, p, k_hint=None):
             y = np.rint(cy + r * np.sin(th)).astype(np.int64)
             x = np.rint(cx + r * np.cos(th)).astype(np.int64)
             ins = (y >= 0) & (y < H) & (x >= 0) & (x < W)
-            v = out_t[np.where(ins, y, 0), np.where(ins, x, 0)].astype(np.float32)
+            v = REF[np.where(ins, y, 0), np.where(ins, x, 0)].astype(np.float32)
             vals.append(np.where(ins & (v < MISSING), v, np.nan))
         V = np.sort(np.stack(vals), 0)                     # NaN last
         n = (~np.isnan(V)).sum(0)
-        med = np.where(n >= 2, V[np.clip((n - 1) // 2, 0, 2), np.arange(V.shape[1])], np.where(n == 1, V[0], 0.0))
-        sides.append(np.nan_to_num(med))
+        # outside the domain / missing data is unknown, never dry
+        med = np.where(n >= 2, V[np.clip((n - 1) // 2, 0, 2), np.arange(V.shape[1])], np.nan)
+        sides.append(med)
     Lv, Rv = sides
+    known = ~np.isnan(Lv) | ~np.isnan(Rv)
+    both = ~np.isnan(Lv) & ~np.isnan(Rv)
+    Lv, Rv = np.where(np.isnan(Lv), Rv, Lv), np.where(np.isnan(Rv), Lv, Rv)   # one side unknown: the other side
+    Lv, Rv = np.nan_to_num(Lv), np.nan_to_num(Rv)
     frac = np.clip((q + Wd) / np.maximum(2 * Wd, 1e-3), 0, 1)
     I = Lv + (Rv - Lv) * frac
     Zo = cur ** B_EXP
     Zr = raw ** B_EXP
-    clear = (Lv == 0) & (Rv == 0)
+    clear = (Lv == 0) & (Rv == 0) & both              # clear air needs in-domain dry evidence on BOTH sides
     # ray power k (Z / r^2) from this frame's clear-air ray pixels (detection source)
     ca_px = clear & core & (raw > 0)
     k = k95 = np.nan
@@ -461,8 +467,11 @@ def fix_ray(out_t, src_t, ray, p, k_hint=None):
     # the ray is small against the echo: subtract it, keep the echo (rain: vs the median ray power; clear air: vs its
     # 95th percentile, so the ray's own strong pixels are not taken for a shower)
     dom = np.where(clear, False, Zo >= p["dom"] * Zk)
-    est = np.where(dom, sub, np.clip(sub, p["lo_f"] * I, p["hi_f"] * I))
-    est = np.where((I >= 0.5) & (cur >= 1), np.maximum(est, 1.0), est)
+    # in rain the strip is held at the level of the WETTER side (a ray crossing the flank of a rain area has one dry
+    # side: interpolating towards it made a dark stripe through the rain edge)
+    Iw = np.maximum(I, np.maximum(Lv, Rv))
+    est = np.where(dom, sub, np.clip(sub, p["lo_f"] * Iw, p["hi_f"] * Iw))
+    est = np.where((Iw >= 0.5) & (cur >= 1), np.maximum(est, 1.0), est)
     est = np.minimum(est, cur)
     if p["protect"]:
         est = protect_showers(idx, r, cur, est, sub, clear & use & okv, k, p)
@@ -470,7 +479,7 @@ def fix_ray(out_t, src_t, ray, p, k_hint=None):
     est = np.where(rimpx, cur - 0.5 * (cur - est), est)
     new = np.floor(est + 0.5)
     new = np.minimum(new, cur)
-    chg = use & okv & (new < cur)
+    chg = use & okv & known & (new < cur)
     sb = np.flatnonzero(seg)
     ext = (r_in + sb.min() * p["blk"], (p["r_cov"] if (ray["edge"] and not ray["carry"]) else r_in + (sb.max() + 1) * p["blk"]))
     return idx[chg], new[chg].astype(np.uint16), dict(k=(k, k95), nseg=int(seg.sum()), n=int(chg.sum()), ext=ext)
@@ -486,11 +495,15 @@ def _side_median(F, si, a_c, r, off):
         x = np.rint(cx + r * np.cos(th)).astype(np.int64)
         ins = (y >= 0) & (y < H) & (x >= 0) & (x < W)
         v = F[np.where(ins, y, 0), np.where(ins, x, 0)].astype(np.float32)
-        vals.append(np.where(ins & (v < MISSING), v, 0.0))
-    return np.median(np.stack(vals), 0)
+        vals.append(np.where(ins & (v < MISSING), v, np.nan))
+    V = np.stack(vals)
+    ok = (~np.isnan(V)).sum(0) >= 2
+    with np.errstate(all="ignore"):
+        m = np.nanmedian(np.where(ok[None], V, 0.0), 0)
+    return np.where(ok, m, np.nan)                      # outside / missing: unknown
 
 
-def sweep_corridor(out_t, ray, ext, k, p):
+def sweep_corridor(out_t, ray, ext, k, p, ref_t=None):
     """Once a ray is established, every echo in its azimuth corridor (strip + max(2 px, 0.75 deg) each side) over the
     ray's range extent is removed where the rain beside the corridor at the same range is dry on both sides (median of
     3 points 1-3 px outside the corridor): thin bright cores, dashes, stubs and skirts out in clear air go, also when
@@ -512,9 +525,10 @@ def sweep_corridor(out_t, ray, ext, k, p):
     if not wetp.any():
         return idx[:0]
     idx, r, q, wc, v = idx[wetp], r[wetp], q[wetp], wc[wetp], v[wetp]
-    lft = _side_median(out_t, si, a_c, r, [-(wc + d) for d in (1.0, 2.0, 3.0)])
-    rgt = _side_median(out_t, si, a_c, r, [(wc + d) for d in (1.0, 2.0, 3.0)])
-    z = (lft == 0) & (rgt == 0)
+    REF = out_t if ref_t is None else ref_t
+    lft = _side_median(REF, si, a_c, r, [-(wc + d) for d in (1.0, 2.0, 3.0)])
+    rgt = _side_median(REF, si, a_c, r, [(wc + d) for d in (1.0, 2.0, 3.0)])
+    z = (lft == 0) & (rgt == 0)                         # NaN (outside / missing) is never dry
     if p["protect"] and np.isfinite(k) and z.sum() >= 12:
         ys, xs = idx // W, idx % W
         y0, x0 = ys.min(), xs.min()
@@ -595,14 +609,14 @@ def remove_spikes(codes, times=None, strength=1.0, ret_info=False, raw=None, **k
                 hint = None
                 if carry:
                     hint = info["rays"].get((ray["src"], ray["site"], round(ray["a_c"], 2)), {}).get("k")
-                res = fix_ray(out[t], src[t], ray, p, hint)
+                res = fix_ray(out[t], src[t], ray, p, hint, ref_t=codes[t])
                 if res is None:
                     continue
                 idx, vals, ri = res
                 o = out[t].reshape(-1)
                 o[idx] = np.minimum(o[idx], vals)
                 if p["sweep"] and ri["nseg"] > 0:
-                    zi = sweep_corridor(out[t], ray, ri["ext"], ri["k"][0], p)
+                    zi = sweep_corridor(out[t], ray, ri["ext"], ri["k"][0], p, ref_t=codes[t])
                     o[zi] = 0
                     ri["swept"] = int(len(zi))
                 info["rays"][(t, ray["site"], round(ray["a_c"], 2))] = dict(ri, carry=carry, hw=ray["hw"], r0=ray["r0"],

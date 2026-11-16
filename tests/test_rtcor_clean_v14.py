@@ -125,19 +125,34 @@ def test_registered_post_and_final_stages(old_run):
 
 @pytest.fixture(scope='module')
 def base_run(old_run):
-    """The window cleaned without the post stages (aggr 1): reference for the single-stage runs."""
+    """The window cleaned without the post and final stages (aggr 1): reference for the single-stage runs."""
     codes, _ = old_run
-    return v14.clean_window(codes, times(len(codes)), 1.0, post=())
+    return v14.clean_window(codes, times(len(codes)), 1.0, post=(), final=())
 
 
 @pytest.mark.parametrize('name', v14.POST_STAGES)
 def test_each_post_stage_keeps_the_contract(old_run, base_run, name):
     codes, _ = old_run
-    res = v14.clean_window(codes, times(len(codes)), 1.0, post=(name,))
+    res = v14.clean_window(codes, times(len(codes)), 1.0, post=(name,), final=())
     invalid = codes >= 65534
     assert res.dtype == np.uint16 and np.array_equal(res[invalid], codes[invalid])
     assert (res <= base_run).all() and (res <= codes).all()     # only lowers what the base kept
-    new = v14.clean_window(codes, times(len(codes), '2024-07-19T22:00'), 1.0, post=(name,))
+    new = v14.clean_window(codes, times(len(codes), '2024-07-19T22:00'), 1.0, post=(name,), final=())
+    assert np.array_equal(new, codes)
+
+
+def test_residue_final_stage_keeps_the_contract(old_run):
+    codes, _ = old_run
+    T = len(codes)
+    assert v14.FINAL_STAGES == ('residue',)
+    base = v14.clean_window(codes, times(T), 2.0, post=(), final=())     # aggr 2: the residue gate is open
+    res = v14.clean_window(codes, times(T), 2.0, post=(), final=('residue',))
+    invalid = codes >= 65534
+    assert res.dtype == np.uint16 and np.array_equal(res[invalid], codes[invalid])
+    assert (res <= base).all() and (res <= codes).all()
+    big = slice(2, -2), slice(380, 520), slice(180, 340)                 # the coherent rain area is untouched
+    assert np.array_equal(res[big], base[big])
+    new = v14.clean_window(codes, times(T, '2024-07-19T22:00'), 2.0, post=(), final=('residue',))
     assert np.array_equal(new, codes)
 
 

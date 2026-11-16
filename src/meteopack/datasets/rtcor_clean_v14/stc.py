@@ -75,7 +75,7 @@ STRENGTH s (scalar, (T,) or (T, ny, nx) on any coarse grid, bilinear): 0 = off, 
   r0(s) = r_base / sqrt(s) (clipped [r_min, r_max]), delta = ln(1 + m_k / s), need-2 rule from s >= s_need2.
   The disk radius uses the frame's mean s over wet px; delta and the need rule use the per-pixel s.
 """
-# Ported from research proto/stc/stc.py (md5 e7d0c34f90e5edb29699719eae3b75ee),
+# Ported from research proto/stc/stc.py (md5 299746e2d4d1faa7040e489d1b0043f0),
 # by port_tools/sync_research.py: only imports / loading edited.
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ DEFAULTS = dict(
     copy_share=0.8, copy_min=10, copy_box=7,
     inv_max=0.5, smooth=1.0, smooth_min=2.0, hole_nb=5, obj=True, obj_rm=0.3, obj_big=60, app_max=12, weak0=2.5, flash_rm=True,
     dropout=True, drop_tile=16, drop_ratio=0.3, drop_min=0.05,
-    hard_rm=True, hard_ratio=0.3,
+    hard_rm=True, hard_ratio=0.3, reserve_always=True, core_protect=True, core_dev=0.35,
     ccf=True, ccf_lo=0.30, ccf_hi=0.65, ccf_on=0.25, ccf_l3=0.5, ccf_l1=1.5, ccf_rim=2, ccf_rough=None,
     ccf_tc=True, ccf_tc_dil=2, ccf_tc_share=0.5, ccf_obj=0.5, ccf_tmax=3, ccf_core_keep=30,
     ccf_gran=True, ccf_gon=0.05, ccf_gran_g=0.5, ccf_gran_d=0.2, ccf_gran_nmin=10, ccf_gran_lo=0.8,
@@ -489,6 +489,21 @@ def coherent_core(out, valid, old, V, G, HARD, *, ccf_on=0.25, ccf_l3=0.75, ccf_
     return out, st
 
 
+def _smooth_core(c, wet, max_dev=0.35):
+    """bool (H, W): px of the 3 x 3 opening of wet whose 3 x 3 mean deviation of ln(code) from its 3 x 3 median
+    (over interior px) is below max_dev: smooth coherent rain."""
+    core = cv2.morphologyEx(wet.view(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)).astype(bool)
+    if not core.any():
+        return core
+    q = np.zeros(c.shape, np.uint8)
+    q[wet] = np.clip(1 + np.rint(SC * np.log(np.maximum(c[wet], 1))), 1, 255)
+    dv = np.abs(q.astype(np.float32) - cv2.medianBlur(q, 3)) / SC
+    inter = cv2.erode(wet.view(np.uint8), np.ones((3, 3), np.uint8)).astype(np.float32)
+    num = cv2.boxFilter(dv * inter, -1, (3, 3), normalize=False)
+    den = cv2.boxFilter(inter, -1, (3, 3), normalize=False)
+    return core & (num / np.maximum(den, 1) < max_dev)
+
+
 # ------------------------------------------------------------------ main
 def stc_clean(cur, raw, times=None, strength=1.0, ret_info=False, *, flags=None, V=None, SIG=None, ccf_gate=None, **kw):
     """See module doc. kw: DEFAULTS keys. flags: lib/stale frozen flags of raw (computed if None).
@@ -543,6 +558,7 @@ def stc_clean(cur, raw, times=None, strength=1.0, ret_info=False, *, flags=None,
             dil[key] = (d, lv, lm, iv)
         return dil[key]
 
+    Gpre = ccf_level(raw, times, S, ccf_gate, **p) if (p["ccf"] or p["core_protect"]) else None
     for t in range(T):
         dil = {k_: v_ for k_, v_ in dil.items() if abs(k_[0] - t) <= kmax}
         if not old[t]:
@@ -582,9 +598,11 @@ def stc_clean(cur, raw, times=None, strength=1.0, ret_info=False, *, flags=None,
             # a copy is no independent evidence: same content as t, or as the neighbour next to it toward t
             ex = (ct[u] == ct[t]) | (X[u][ys, xs] if k > 0 else X[u + 1][ys, xs])
             ok = iv <= p["inv_max"]
-            if DROP is not None:
-                ok &= ~DROP[u][np.minimum(syc // dt, DROP.shape[1] - 1), np.minimum(sxc // dt, DROP.shape[2] - 1)]
             av = ins & ~ex & (ok | (sup > 0))
+            if DROP is not None:
+                # hotfix 03:45: a dropout tile (radar contributing only every 2nd / 3rd cycle) is no evidence at all,
+                # also where it kept some weak echo (weak, not zero: the clamp capped the full frames at 3 x it)
+                av &= ~DROP[u][np.minimum(syc // dt, DROP.shape[1] - 1), np.minimum(sxc // dt, DROP.shape[2] - 1)]
             cols[k] = (sup, lev, lmn, av)
         if not cols:
             continue
@@ -593,7 +611,8 @@ def stc_clean(cur, raw, times=None, strength=1.0, ret_info=False, *, flags=None,
         SU, LE, LMN, AV = [], [], [], []
         for k, (sup, lev, lmn, av) in cols.items():
             if k in reserve:
-                av = av & (nprim < p["need2_min"])          # reserve leads only where primaries are short
+                if not p["reserve_always"]:
+                    av = av & (nprim < p["need2_min"])      # reserve leads only where primaries are short
             SU.append(sup); LE.append(lev); LMN.append(lmn); AV.append(av)
         SU = np.stack(SU).astype(np.int16); LE = np.stack(LE).astype(np.int16); AV = np.stack(AV)
         LMN = np.stack(LMN).astype(np.int16)
@@ -612,6 +631,13 @@ def stc_clean(cur, raw, times=None, strength=1.0, ret_info=False, *, flags=None,
         min_rm = np.where(s >= p["s_rm1"], 1, 2)
         rem = (nav >= min_rm) & ((msel <= 0) if p["rm_on_level"] else (sel <= 0))
         clamp = (nav >= p["min_nav_clamp"]) & ~rem & (qc > allowed)
+        if p["core_protect"] and (rem.any() or clamp.any()):
+            # hotfix 03:45: where the v13 gate is closed, px inside a smooth coherent core (3 x 3 opening of wet, local
+            # granularity low) are neither lowered nor removed; only isolated / thin / granular px are
+            Lt = _px(Gpre, t) if Gpre is not None else np.zeros((H, W), np.float32)
+            prot = _smooth_core(c, wet, p["core_dev"]) & (Lt <= p["ccf_gon"])
+            pr = prot[ys, xs]
+            rem &= ~pr; clamp &= ~pr
         if not (rem.any() or clamp.any()):
             continue
         # reduction field in q units (inf for removed)
@@ -703,7 +729,7 @@ def stc_clean(cur, raw, times=None, strength=1.0, ret_info=False, *, flags=None,
             level[t][remm] = 0
     # coherent-core filter in heavy-clutter regions + removal of hard-clamped dashes outside cores
     if p["ccf"] or HARD is not None:
-        G = ccf_level(raw, times, S, ccf_gate, **p) if p["ccf"] else None
+        G = Gpre if p["ccf"] else None
         out, cst = coherent_core(out, valid, old, V, G, HARD, **p)
         info.update(cst)
         if level is not None:

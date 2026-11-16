@@ -5,12 +5,15 @@ fixclut  fixed-clutter / anaprop cleaner on the raw window, applied to `out` (no
 spikes2  interference rays in each NL radar's polar grid; level 0 where changed
 stc      motion-compensated spatio-temporal consistency filter, strength = scale x aggr (ctx.A.a); level 0 where
          changed
+residue  final slot: residual specks / flashes / dash remnants on the finished output (no ctx.s2mask in the
+         default run, as in the research in-slot run); level 0 where removed
 """
 from __future__ import annotations
 
 import numpy as np
 
 from . import fixclut as FC
+from . import residue as RS
 from . import spikes2 as S2
 from . import stc as STC
 
@@ -32,3 +35,10 @@ def stc_stage(ctx, out, *, strength=None, scale=1.0, **kw):
     # v12 convention: level = aggr at which the pixel was changed (inf = kept); stc changes at any aggr > 0
     lev = np.where(np.isfinite(lev), np.float16(0.0), np.float16(np.inf)).astype(np.float16)
     return new, lev
+
+
+def residue_stage(ctx, out, **kw):
+    new = RS.residue_clean(out, ctx.codes, ctx.flags, ctx.st["flr"], ctx.A.a, getattr(ctx, "times", None),
+                           s2mask=getattr(ctx, "s2mask", None), **kw)
+    level = np.where(new < out, 0.0, np.inf).astype(np.float32)
+    return new, level
