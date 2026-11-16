@@ -2,54 +2,74 @@
 
 The KNMI RTCOR archive changed processing chain on 2023-01-31 10:45 UTC. Frames of the old chain hold much
 more non-meteorological echo: interference spikes, sea clutter and anomalous propagation, wind farms and other
-fixed clutter, speckle and one-frame bursts. This cleaner removes that echo from old-chain frames so that they
-can serve as clean, temporally consistent training targets. New-chain frames pass unchanged.
+fixed clutter, speckle, dash fields, flashes and one-frame bursts. This cleaner removes that echo from old-chain
+frames so that they can serve as clean, temporally consistent training targets. New-chain frames pass unchanged.
 
 Rules. Only RTCOR itself is used (no gauges, no other radars). The radar mask never changes: codes >= 65534
 (missing, outside) pass unchanged. A value is never raised and echo is never added: every output pixel is
-<= the raw pixel. Frame t is decided with the help of up to PAD = 7 frames on each side.
+<= the raw pixel. Frame t is decided with the help of up to PAD = 7 frames on each side. Missing data and
+frozen copies are never counted as evidence either way. Losing some rain that looks like clutter is accepted;
+holes, slits, bites, half showers and rain that blinks on and off are not.
+
+Aggressiveness. One number per pixel, aggr in [1, 2], set automatically: a small model scores how much of the
+echo in each 32-km tile looks like clutter (granular texture for its density, more so over sea), smoothed over
++-45 min (score.py). Clean tiles get aggr 1, tiles with a clutter load of 0.20-0.45 ramp up to 2; the map may
+change by at most 0.1 per 5 minutes, so decisions do not jump in time. Every stage reads its strength from it.
 
 How it works, in plain words (stages run in this order on one window of frames):
  1. Objects. Echo connected after closing 1-px gaps forms objects. A classifier (two gradient-boosted tree
     models, ~50 features: intensity, texture, shape, geography, how the object overlaps its neighbours in
     time when moved along the motion, ray patterns from the radars) scores each object as clutter or rain.
     The scores are pooled along object tracks over about +-30 min, so one frame cannot flip a decision.
-    Small tracked objects get a bias toward removal (aggressiveness aggr); large objects are never removed
-    whole, they are left to the pixel stages.
- 2. Spikes. Thin radial rays from the Dutch radars (interference) are found per radar in polar coordinates.
-    In clear air the ray is removed; over rain, the ray's extra power is subtracted down to the rain beside it.
+    Small tracked objects get a bias toward removal; large objects are never removed whole.
+ 2. Spikes (first pass). Thin radial rays from the Dutch radars are found per radar in polar coordinates. In
+    clear air a ray is removed; over rain, its extra power is subtracted down to the rain beside it. Seeds
+    that move with the rain are dropped first (a far-range rain band radial to a radar is not a ray).
  3. Frozen halves. In the old chain one half of a frame is often an exact copy of the previous frame. Copied
     halves never count as evidence and get the previous frame's cleaned output.
  4. Hot spots. Pixels that show isolated echo far more often than their surroundings (a climatological map
-    per processing chain) are fixed clutter. Echo sitting on such a spot is removed unless it is rain moving
-    through (found along the motion before and after).
+    per processing chain) are fixed clutter; echo on them is removed unless it is rain moving through.
  5. Weak transient echo. Small objects with no echo along the motion in the frames before and after.
  6. Temporal support. Echo with no support along the motion (or in place) in t-3..t+3 on both sides:
-    bursts, one-frame dash fields, flicker. Missing data in a neighbour frame is no evidence either way.
+    bursts, one-frame dash fields, flicker.
  7. Radial dashes. Thin lines radial to a Dutch radar that do not move with the flow.
  8. Speckle texture. Fragmented, granular echo inside larger objects, judged along the motion.
  9. Outliers and lines (aggr > 1). Single hot pixels and thin bright lines in weak surroundings that are
     absent before and after.
-10. Vote. Removals are made consistent along the motion over t-1, t, t+1.
-11. Realism guard. An edit of stages 6-9 that carves inside coherent rain (makes a hole, or bites into kept
-    echo along most of its boundary) is undone, and lowered pixels with strong neighbours are restored.
-    Losing some rain that looks like clutter is accepted; holes, slits and half showers are not.
-12. Added stages (window.register_stage): in `stages` (before the vote and guard), in `post` (after the
-    guard, before the frozen-half copy) or in `final` (on the finished output).
+10. Vote. Removals of 6-9 are made consistent along the motion over t-1, t, t+1.
+11. Realism guard. An edit of 6-9 that carves inside coherent rain (makes a hole, or bites into kept echo
+    along most of its boundary) is undone, and lowered pixels with strong neighbours are restored.
+Post stages (after the guard, so it cannot undo them; they run at every aggr):
+12. Fixed clutter (fixclut). Earth-fixed echo stays in place while the rain around it moves with the flow:
+    echo that persists at the same place over 15-30 min (more than it persists along the motion), or whose
+    footprint and internal pattern stay fixed for 30-45 min in clear air, is removed per object for its whole
+    lifetime; a clutter lobe attached to rain is cut where it joins.
+13. Spikes (second pass, spikes2). Interference rays and strobes in each Dutch radar's polar grid: straight
+    top-hat lines at constant azimuth that flash or stay fixed in polar coordinates while rain moves; tracked
+    through the window. Under a ray the rain is rebuilt from the rain beside it (no slit, no lowered band).
+14. Consistency (stc). Rain moves with the flow and changes smoothly over 5-10 minutes; noise does not. Each
+    pixel is compared with the neighbouring frames (t+-1, t+-2) along the motion: echo with no similar echo
+    nearby there is clamped to the supported level, or removed when nothing supports it (small flashes,
+    granular speckle, dash fields, intense noise spots in and around rain). Weak drizzle is never removed and
+    whole objects are treated alike (no half showers, no pin holes). Where the clutter load is high, thin
+    1-2 px granules and dashes that cannot form a coherent rain body are also removed.
+Then the frozen-half copy again. More stages can be added with window.register_stage in the slots `stages`
+(before the vote and guard), `post` (after the guard) or `final` (on the finished output).
 
 Entry points:
     clean(codes, times, assets=None, *, context=1)  -> (cleaned, info)   the dataset builder's contract
-    clean_window(codes, times, aggr=1.0, ...)        -> cleaned          one window, research-equivalent
+    clean_window(codes, times, aggr=None, ...)       -> cleaned          one window, research-equivalent
 `clean` cleans frames context..T-context in blocks of BLOCK frames, each with up to PAD neighbouring frames on
-both sides (memory stays ~1.4 GB per process). Frames outside are context only and are returned unchanged.
+both sides. Frames outside are context only and are returned unchanged.
 
-Port of the research cleaner proto/v12 (frozen; md5 in research proto/v12/final/md5.txt) of the clutter study
-research/rtcor_clutter_v8, called as clean_window(codes, times, aggr=1, period="chain"); equal bit for bit
-(scripts/rtcor_clean_v14_equivalence.py). The fixed inputs (geography, interference azimuths, coverage,
-hot-spot maps, the tree models as plain arrays) are in assets/rtcor_clean_v14.npz, built by
-scripts/rtcor_clean_v14_assets.py. Module map: objects/feats (stage 1 evidence), tracks (pooling),
-window (decision and pipeline), v10/spikes/streaks/streaks_site/wedge (2-3), hotspots (4), weak (5),
-stages/texfeat/quality (6-11), stale (frozen halves), assets (inputs and tree evaluation).
+Port of the final research cleaner proto/v14 (clean_window(codes, times) with its defaults) of the clutter
+study research/rtcor_clutter_v8, equal bit for bit (scripts/rtcor_clean_v14_equivalence.py); research md5s in
+RESEARCH_MD5. The fixed inputs (geography, interference azimuths, coverage, hot-spot maps, the clutter-score
+model, the tree models as plain arrays) are in assets/rtcor_clean_v14.npz, built by
+scripts/rtcor_clean_v14_assets.py. Module map: window (pipeline, decision, automatic aggr, stage registry),
+objects/feats (1), tracks (pooling), v10/spikes/streaks/streaks_site/wedge (2-3), hotspots (4), weak (5),
+stages/texfeat/quality (6-11), ext_stages (adapters of 12-14), fixclut (12), spikes2* (13), stc (14),
+score (aggr), stale (frozen halves), assets (inputs and tree evaluation).
 """
 from __future__ import annotations
 
@@ -61,12 +81,16 @@ import numpy as np
 from . import assets as _assets
 from . import score
 from .assets import ASSETS, Assets, load_assets
-from .window import DEFAULT_STAGES, NEW_CHAIN, clean_window, register_stage
+from .window import (AUTO_DEFAULTS, BASE_STAGES, FINAL_STAGES, NEW_CHAIN, POST_STAGES, SEED_MC_DEFAULTS,
+                     auto_aggr, clean_window, register_stage)
 
 __all__ = [
     'ASSETS',
     'BLOCK',
-    'DEFAULT_STAGES',
+    'BASE_STAGES',
+    'FINAL_STAGES',
+    'POST_STAGES',
+    'auto_aggr',
     'MISSING',
     'OUTSIDE',
     'PAD',
@@ -81,11 +105,21 @@ __all__ = [
     'score',
 ]
 
-VERSION = 'v14-base'            # v12 base; becomes 'v14' when the final stages land
+VERSION = 'v14'
 MISSING, OUTSIDE = 65534, 65535
 PAD = 7                         # neighbouring frames used on each side of a block
 BLOCK = 24                      # frames cleaned per call of clean_window
-AGGR = 1.0
+AGGR = None                     # automatic: window.auto_aggr from the v13 clutter load of 32-km tiles
+# research sources of this port (clutter study research/rtcor_clutter_v8/proto), md5 of the ported file
+RESEARCH_MD5 = {
+    'v14/cleaner.py': '30f30c178fb633681f45f84a8e640a2c', 'v14/stages.py': '89c5730930de76778bd0cf04ec955345',
+    'v14/texfeat.py': '389f3f306f3d6604c12895fa354e31b8', 'v13/score.py': 'e788eb185e08ea1c1058ad1bd0dd0bdc',
+    'fixclut/fixclut.py': 'add03a0cc84dc68e78a91163c2be6135', 'fixclut/stage.py': '6c6272e036690ac6534a0f67dbd919a5',
+    'spikes2/spikes2.py': '33847d6b9985f46feb06c59158594f33', 'spikes2/polar.py': '88667960f454bde1f2d8c59c6a4d0278',
+    'spikes2/features.py': '9641fcbf8282c7159b0e07e054318d59', 'spikes2/s2common.py': '73ff28a657177b98307aec82818372ea',
+    'spikes2/stage.py': 'c2f0860fa2bbcd732baa2dfee44ac1fc', 'stc/stc.py': '98872b8935c55f75e288016a3b6916c0',
+    'stc/stage.py': '4a557bf33a7cf08552e126acdd5b98b9',
+}
 STATS = ('changed_pixels', 'raw_wet_pixels', 'clean_wet_pixels', 'raw_sum_code', 'clean_sum_code')
 
 
@@ -95,7 +129,9 @@ def fingerprint() -> dict:
     for f in sorted(Path(__file__).parent.glob('*.py')):
         h.update(f.name.encode()); h.update(f.read_bytes())
     return {'version': VERSION, 'code_sha256': h.hexdigest(), 'assets_sha256': _assets.sha256(),
-            'aggr': AGGR, 'stages': list(DEFAULT_STAGES), 'pad': PAD, 'block': BLOCK}
+            'aggr': 'auto' if AGGR is None else AGGR, 'auto': dict(AUTO_DEFAULTS), 'seed_mc': dict(SEED_MC_DEFAULTS),
+            'stages': list(BASE_STAGES), 'post': list(POST_STAGES), 'final': list(FINAL_STAGES),
+            'pad': PAD, 'block': BLOCK, 'research_md5': dict(RESEARCH_MD5)}
 
 
 def clean(codes, times, assets: Assets | None = None, *, context: int | tuple[int, int] = 1,

@@ -31,9 +31,11 @@ STAGE_DEFAULTS = dict(rain_frac=0.25, ring_frac=0.25, inside_frac=0.6, zone=1, r
 NEW_MAP_FROM = np.datetime64("2023-02", "M")
 
 
-def window_map(times):
+def window_map(times, maps=None, period="chain", hot=None):
     """Hot map for the window: the processing chain of the window's middle time, by month (research
-    climmap window_map with period="chain"). None without times."""
+    climmap window_map with period="chain", the only period ported). None without times."""
+    if maps is not None or hot is not None or period != "chain":
+        raise ValueError('only the packaged hot maps (period="chain") are available')
     if times is None or len(times) == 0:
         return None
     tm = np.asarray(times)[len(times) // 2]
