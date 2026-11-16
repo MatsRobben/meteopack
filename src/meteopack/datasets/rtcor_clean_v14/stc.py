@@ -75,7 +75,7 @@ STRENGTH s (scalar, (T,) or (T, ny, nx) on any coarse grid, bilinear): 0 = off, 
   r0(s) = r_base / sqrt(s) (clipped [r_min, r_max]), delta = ln(1 + m_k / s), need-2 rule from s >= s_need2.
   The disk radius uses the frame's mean s over wet px; delta and the need rule use the per-pixel s.
 """
-# Ported from research proto/stc/stc.py (md5 98872b8935c55f75e288016a3b6916c0),
+# Ported from research proto/stc/stc.py (md5 e7d0c34f90e5edb29699719eae3b75ee),
 # by port_tools/sync_research.py: only imports / loading edited.
 from __future__ import annotations
 
@@ -114,6 +114,7 @@ DEFAULTS = dict(
     hard_rm=True, hard_ratio=0.3,
     ccf=True, ccf_lo=0.30, ccf_hi=0.65, ccf_on=0.25, ccf_l3=0.5, ccf_l1=1.5, ccf_rim=2, ccf_rough=None,
     ccf_tc=True, ccf_tc_dil=2, ccf_tc_share=0.5, ccf_obj=0.5, ccf_tmax=3, ccf_core_keep=30,
+    ccf_gran=True, ccf_gon=0.05, ccf_gran_g=0.5, ccf_gran_d=0.2, ccf_gran_nmin=10, ccf_gran_lo=0.8,
     ccf_pix=False, ccf_p0=0.5, ccf_p1=0.8, ccf_pbox=9, ccf_pmin=8,
     flow_sigma=3.0, flow_eps=0.05, flow_vmax=12.0,
 )
@@ -346,7 +347,8 @@ def _warp(mask, v4, sgn):
 
 
 def coherent_core(out, valid, old, V, G, HARD, *, ccf_on=0.25, ccf_l3=0.75, ccf_l1=1.5, ccf_rim=2, ccf_rough=None,
-                  ccf_tc=True, ccf_tc_dil=2, ccf_tc_share=0.5, ccf_obj=0.5, ccf_core_keep=30, **_):
+                  ccf_tc=True, ccf_tc_dil=2, ccf_tc_share=0.5, ccf_obj=0.5, ccf_core_keep=30, ccf_gran=True, ccf_gon=0.05,
+                  ccf_gran_g=0.5, ccf_gran_d=0.2, ccf_gran_nmin=10, ccf_gran_lo=0.8, **_):
     """At 1 km rain is coherent: bodies >= 2-3 px wide with a ragged rim <= 1-2 px; speckle, dash fields and sea
     clutter granules are 1-2 px wide and broken. Per pixel level L = strength x v13 gate (G, coarse grid):
       L < ccf_on: off;  ccf_on <= L < ccf_l3: core = 2 x 2 opening, rim ccf_rim;  L >= ccf_l3: 3 x 3 opening, rim
@@ -359,7 +361,8 @@ def coherent_core(out, valid, old, V, G, HARD, *, ccf_on=0.25, ccf_l3=0.75, ccf_
     out = out.copy()
     wet = (out > 0) & (out < MISSING) & valid
     KEEP = np.ones(out.shape, bool); RMV = np.zeros(out.shape, bool)
-    st = {"ccf_removed": 0, "ccf_restored_tc": 0, "ccf_removed_tc": 0, "hard_removed": 0}
+    GHI = np.zeros(out.shape, bool); GLO = np.zeros(out.shape, bool)
+    st = {"ccf_removed": 0, "ccf_restored_tc": 0, "ccf_removed_tc": 0, "hard_removed": 0, "gran_removed": 0}
     for t in range(T):
         if not old[t] or not wet[t].any():
             continue
@@ -371,11 +374,32 @@ def coherent_core(out, valid, old, V, G, HARD, *, ccf_on=0.25, ccf_l3=0.75, ccf_
         if G is None:
             continue
         L = _px(G, t)
-        if (L >= ccf_on).any():
+        if (L >= ccf_on).any() or (ccf_gran and (L > ccf_gon).any()):
             k2, _ = _keep_mask(w, 2, ccf_rim, out[t], ccf_rough)
             k31, _ = _keep_mask(w, 3, 1, out[t], ccf_rough)
             keep = np.where(L >= ccf_l1, k31, np.where(L >= ccf_l3, k3, k2))
             r = w & ~keep & (L >= ccf_on)
+            gran = None
+            if ccf_gran and (L > ccf_gon).any():
+                # object granularity (iteration 3): over interior px (3 x 3 all wet) the deviation of ln(code) from its
+                # 3 x 3 median; G = mean deviation, D = share > 0.7. Objects above BOTH thresholds (set above the
+                # p99 of labelled rain and rain-as-old convection, NOTES) inside the gate (L > ccf_gon) go whole;
+                # the solid-body safety does not protect them.
+                q = np.zeros(w.shape, np.uint8)
+                q[w] = np.clip(1 + np.rint(SC * np.log(out[t][w])), 1, 255)
+                dv = np.abs(q.astype(np.float32) - cv2.medianBlur(q, 3)) / SC
+                inter = cv2.erode(w.view(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+                n_, lab_ = cv2.connectedComponents(w.view(np.uint8), connectivity=8)
+                ni = np.bincount(lab_[inter], minlength=n_)
+                Gm = np.bincount(lab_[inter], weights=dv[inter], minlength=n_) / np.maximum(ni, 1)
+                Dm = np.bincount(lab_[inter], weights=(dv[inter] > 0.7), minlength=n_) / np.maximum(ni, 1)
+                Lm = np.bincount(lab_[w], weights=L[w], minlength=n_) / np.maximum(np.bincount(lab_[w], minlength=n_), 1)
+                base = (ni >= ccf_gran_nmin) & (Lm > ccf_gon)
+                hi = base & (Gm >= ccf_gran_g) & (Dm >= ccf_gran_d)
+                lo = base & (Gm >= ccf_gran_g * ccf_gran_lo) & (Dm >= ccf_gran_d * ccf_gran_lo)
+                hi[0] = lo[0] = False
+                GHI[t] = hi[lab_] & w
+                GLO[t] = lo[lab_] & w
             if r.any() and ccf_obj > 0:
                 # object consistency: an object losing >= ccf_obj of its px goes whole; otherwise only its thin
                 # parts (outside the 2 x 2 opening: dashes, spokes, granules attached to it) go, no interior holes
@@ -392,6 +416,42 @@ def coherent_core(out, valid, old, V, G, HARD, *, ccf_on=0.25, ccf_l3=0.75, ccf_
                 thin = w & ~cv2.morphologyEx(w.view(np.uint8), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8)).astype(bool)
                 r = (whole[lab] & w & (L >= ccf_on)) | (r & thin)
             RMV[t] |= r; KEEP[t] &= ~r
+    if ccf_gran and G is not None and GHI.any():
+        # temporal hysteresis of the granular decision along the motion: candidate at t = HI object, or LO object
+        # overlapping an advected HI object at t-1 / t+1; final = candidate in >= 2 of t-1, t, t+1 (an object is
+        # not removed in one frame and kept in the next because its granularity wobbles around the threshold)
+        K8g = np.ones((2 * ccf_tc_dil + 1, 2 * ccf_tc_dil + 1), np.uint8)
+        adv = lambda M, t, u: cv2.dilate(_warp(M[u], V[t], +1 if u < t else -1).view(np.uint8), K8g).astype(bool)
+
+        def objshare(t, M):
+            n, lab = cv2.connectedComponents(wet[t].view(np.uint8), connectivity=8)
+            npx = np.maximum(np.bincount(lab[wet[t]], minlength=n), 1)
+            return (np.bincount(lab[wet[t] & M], minlength=n) / npx)[lab] * wet[t]
+        CAND = np.zeros(out.shape, bool)
+        for t in range(T):
+            if not old[t] or not (GLO[t].any() or GHI[t].any()):
+                continue
+            nb = np.zeros((H, W), bool)
+            for u in (t - 1, t + 1):
+                if 0 <= u < T and GHI[u].any():
+                    nb |= adv(GHI, t, u)
+            CAND[t] = GHI[t] | (GLO[t] & (objshare(t, nb) >= 0.3))
+        def ov(t, u):
+            if not (0 <= u < T) or not CAND[u].any():
+                return np.zeros((H, W), bool)
+            k = u - t
+            m = cv2.dilate(_warp(CAND[u], V[t] * abs(k), -1 if k > 0 else +1).view(np.uint8), K8g).astype(bool)
+            return objshare(t, m) >= 0.3
+        for t in range(T):
+            if not old[t] or not wet[t].any():
+                continue
+            o1, o_1, o2, o_2 = ov(t, t + 1), ov(t, t - 1), ov(t, t + 2), ov(t, t - 2)
+            # granular at t and at a neighbour; or granular on both sides; or in the two frames before / after (the
+            # first / last frame of a granular object is not spared because it measured smooth just then)
+            g = ((CAND[t] & (o1 | o_1)) | (o1 & o_1) | (o_1 & o_2) | (o1 & o2)) & wet[t]
+            if g.any():
+                st["gran_removed"] += int((g & ~RMV[t]).sum())
+                RMV[t] |= g; KEEP[t] &= ~g
     if ccf_tc and G is not None:
         K8 = np.ones((2 * ccf_tc_dil + 1, 2 * ccf_tc_dil + 1), np.uint8)
         RM2 = RMV.copy()

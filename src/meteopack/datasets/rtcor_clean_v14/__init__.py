@@ -81,22 +81,31 @@ import numpy as np
 from . import assets as _assets
 from . import score
 from .assets import ASSETS, Assets, load_assets
-from .window import (AUTO_DEFAULTS, BASE_STAGES, FINAL_STAGES, NEW_CHAIN, POST_STAGES, SEED_MC_DEFAULTS,
-                     auto_aggr, clean_window, register_stage)
+from .window import (
+    AUTO_DEFAULTS,
+    BASE_STAGES,
+    FINAL_STAGES,
+    NEW_CHAIN,
+    POST_STAGES,
+    SEED_MC_DEFAULTS,
+    auto_aggr,
+    clean_window,
+    register_stage,
+)
 
 __all__ = [
     'ASSETS',
-    'BLOCK',
     'BASE_STAGES',
+    'BLOCK',
     'FINAL_STAGES',
-    'POST_STAGES',
-    'auto_aggr',
     'MISSING',
     'OUTSIDE',
     'PAD',
+    'POST_STAGES',
     'STATS',
     'VERSION',
     'Assets',
+    'auto_aggr',
     'clean',
     'clean_window',
     'fingerprint',
@@ -117,7 +126,7 @@ RESEARCH_MD5 = {
     'fixclut/fixclut.py': 'add03a0cc84dc68e78a91163c2be6135', 'fixclut/stage.py': '6c6272e036690ac6534a0f67dbd919a5',
     'spikes2/spikes2.py': '33847d6b9985f46feb06c59158594f33', 'spikes2/polar.py': '88667960f454bde1f2d8c59c6a4d0278',
     'spikes2/features.py': '9641fcbf8282c7159b0e07e054318d59', 'spikes2/s2common.py': '73ff28a657177b98307aec82818372ea',
-    'spikes2/stage.py': 'c2f0860fa2bbcd732baa2dfee44ac1fc', 'stc/stc.py': '98872b8935c55f75e288016a3b6916c0',
+    'spikes2/stage.py': 'c2f0860fa2bbcd732baa2dfee44ac1fc', 'stc/stc.py': 'e7d0c34f90e5edb29699719eae3b75ee',
     'stc/stage.py': '4a557bf33a7cf08552e126acdd5b98b9',
 }
 STATS = ('changed_pixels', 'raw_wet_pixels', 'clean_wet_pixels', 'raw_sum_code', 'clean_sum_code')
