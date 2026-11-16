@@ -43,7 +43,9 @@ Post stages (after the guard, so it cannot undo them; they run at every aggr):
 11. Fixed clutter (fixclut). Earth-fixed echo stays in place while the rain around it moves with the flow:
     echo that persists at the same place over 15-30 min (more than it persists along the motion), or whose
     footprint and internal pattern stay fixed for 30-45 min in clear air, is removed per object for its whole
-    lifetime; a clutter lobe attached to rain is cut where it joins.
+    lifetime; a clutter lobe attached to rain is cut where it joins. A clear-air hit only counts when the
+    same footprint is also removed in another frame within 15 min, and a solid body (a moving shower) that
+    merges with or passes a clutter spot keeps every part outside the clutter footprint.
 12. Spikes (second pass, spikes2). Interference rays and strobes in each Dutch radar's polar grid: straight
     top-hat lines at constant azimuth that flash or stay fixed in polar coordinates while rain moves; tracked
     through the window. Under a ray the rain is rebuilt from the rain beside it (no slit, no lowered band):
@@ -134,7 +136,7 @@ AGGR = None                     # automatic: window.auto_aggr from the v13 clutt
 RESEARCH_MD5 = {
     'v14/cleaner.py': '7f7d852cd05f9a7b62c00dce13a6d7c4', 'v14/stages.py': '89c5730930de76778bd0cf04ec955345',
     'v14/texfeat.py': '389f3f306f3d6604c12895fa354e31b8', 'v13/score.py': 'e788eb185e08ea1c1058ad1bd0dd0bdc', 'v13/model.json': '4490a393b16d16ef9833d9087f8e6cba',
-    'fixclut/fixclut.py': 'add03a0cc84dc68e78a91163c2be6135', 'fixclut/stage.py': '6c6272e036690ac6534a0f67dbd919a5',
+    'fixclut/fixclut.py': 'bd8d9e99275efba61eddc3059a3700e2', 'fixclut/stage.py': '6c6272e036690ac6534a0f67dbd919a5',
     'spikes2/spikes2.py': 'a2a83f20a9692e6f1725f06446c4fed7', 'spikes2/polar.py': '88667960f454bde1f2d8c59c6a4d0278',
     'spikes2/features.py': '9641fcbf8282c7159b0e07e054318d59', 'spikes2/s2common.py': '73ff28a657177b98307aec82818372ea',
     'spikes2/stage.py': 'c2f0860fa2bbcd732baa2dfee44ac1fc', 'stc/stc.py': '299746e2d4d1faa7040e489d1b0043f0',

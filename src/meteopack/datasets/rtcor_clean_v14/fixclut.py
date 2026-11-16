@@ -28,7 +28,7 @@ Iteration 2 (2026-11-16):
  8. lobes (lobe=True): the part of a larger object inside the footprint removed BOTH before and after t (within
     -+4 frames) is cut when <= 30 % of its boundary touches the rest of the object (clutter attached to rain).
 """
-# Ported from research proto/fixclut/fixclut.py (md5 add03a0cc84dc68e78a91163c2be6135),
+# Ported from research proto/fixclut/fixclut.py (md5 bd8d9e99275efba61eddc3059a3700e2),
 # by port_tools/sync_research.py: only imports / loading edited.
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ DEFAULTS = dict(
     obj_max=1500,           # objects larger than this are never removed whole (capped instead)
     cap=False,              # (removed in iteration 2; kept as a no-op key)
     static=True,            # clear-air earth-fixed rule (object footprint + log-rate pattern fixed for 30-45 min)
-    st_min=8, st_nl=3, st_c=0.6, st_j=0.6, st_ci=0.3, st_pk=0.1, st_pre=0.5, st_pre_c=0.2,
+    st_min=8, st_nl=3, st_c=0.6, st_j=0.6, st_ci=0.3, st_pk=0.1, st_pre=0.5, st_pre_c=0.2, st_confirm=0.5, prop_pk=None, rescue=30, st_solid=60,
     prop=True, prop_share=0.6,
     lobe=True, lobe_min=20, lobe_contact=0.3, lobe_c=-1.0,   # two-sided lobe cut; lobe_c > -1 adds a pattern test
     obj_min=21,             # smaller objects are removed only when inside the flagged area of a removed object's
@@ -289,6 +289,7 @@ def fixclut_clean(cur, raw, times=None, strength=1.0, ret_info=False, **kw):
         near_big = cv2.dilate(big[lab].astype(np.uint8), np.ones((17, 17), np.uint8)).astype(bool)
         frag = np.bincount(lab.ravel(), weights=near_big.ravel(), minlength=len(cnt)) > 0
         rmobj[t] = whole & ((cnt >= p["obj_min"]) | frag)
+    why = [np.where(w, 1, 0).astype(np.uint8) for w in rmobj]       # 1 motion, 2 static, 3 prop (per object id)
     info = {}
     tm["motion_decision"] = _time.time() - t0 - sum(tm.values())
     # clear-air earth-fixed rule: footprint AND log-rate pattern stay in place for 30-45 min
@@ -362,7 +363,25 @@ def fixclut_clean(cur, raw, times=None, strength=1.0, ret_info=False, **kw):
                 nl, cE, J, cI, pk = object_static_feats(Lr, Wr, U, t, sl, m)   # C=raw tried: worse (NOTES)
                 if (nl >= p["st_nl"] and cE >= p["st_c"] / strength and J >= p["st_j"]
                         and (np.isnan(cI) or cI >= p["st_ci"]) and pk >= p["st_pk"]):
-                    rmobj[t][j] = True; nst += 1
+                    rmobj[t][j] = True; nst += 1; why[t][j] = 2
+        # temporal confirmation (hotfix 2026-11-16, Voorschoten shower): a static hit seeds removal only when the
+        # same place is also removed (static or motion) at another frame within +-3 (>= 30 % overlap, 2 px tolerance)
+        if p["st_confirm"]:
+            hitm = [np.isin(labs[t], np.flatnonzero(why[t] == 2)) if (why[t] == 2).any() else None for t in range(T)]
+            allm = [rmobj[t][labs[t]] if rmobj[t].any() else None for t in range(T)]
+            k5c = np.ones((5, 5), np.uint8)
+            for t in range(T):
+                if hitm[t] is None:
+                    continue
+                nbm = [allm[u] for u in range(t - 3, t + 4) if u != t and 0 <= u < T and allm[u] is not None]
+                sup = cv2.dilate(np.any(nbm, axis=0).astype(np.uint8), k5c).astype(bool) if nbm else np.zeros((H, W), bool)
+                lab = labs[t]
+                for j in np.flatnonzero(why[t] == 2):
+                    m = lab == j
+                    rest = (m & ~sup).astype(np.uint8)
+                    solid = cv2.morphologyEx(rest, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)).sum() >= p["st_solid"] > 0
+                    if (sup & m).sum() < p["st_confirm"] * m.sum() or solid:
+                        rmobj[t][j] = False; why[t][j] = 0; nst -= 1   # unconfirmed, or merged with a solid body
         info["n_static_obj"] = nst
         tm["static"] = _time.time() - t0 - sum(tm.values())
         del Lr, Wr, Wd
@@ -382,6 +401,8 @@ def fixclut_clean(cur, raw, times=None, strength=1.0, ret_info=False, **kw):
             labc = [labs[t][S] for t in range(T)]
             rmm = [rmobj[t][labc[t]] for t in range(T)]
             k5 = np.ones((5, 5), np.uint8)
+            Lr2 = np.stack([cv2.blur(logr(c), (3, 3)) for c in raw]); Wr2 = (raw > 0) & (raw < MISSING)
+            pkc = [dict() for _ in range(T)]
             for order in (range(T), range(T - 1, -1, -1), range(T)):
                 for t in order:
                     if not old[t]:
@@ -394,12 +415,49 @@ def fixclut_clean(cur, raw, times=None, strength=1.0, ret_info=False, **kw):
                     fin = np.bincount(lab.ravel(), weights=foot.ravel(), minlength=len(cnt)) / np.maximum(cnt, 1)
                     sin = np.bincount(lab.ravel(), weights=seed.ravel(), minlength=len(cnt)) / np.maximum(cnt, 1)
                     new = (fin >= p["prop_share"]) & (sin >= 0.8) & (cnt <= p["obj_max"]) & ~rmobj[t]; new[0] = False
+                    if new.any() and p["prop_pk"] is not None:
+                        for j in np.flatnonzero(new):
+                            if cnt[j] < p["obj_min"]:
+                                continue                       # small fragments: no reliable peak test
+                            if j not in pkc[t]:
+                                s0 = ndi.find_objects((labs[t] == j).astype(np.int32))[0]
+                                sl = tuple(slice(max(a.start - 4, 0), a.stop + 4) for a in s0)
+                                pkc[t][j] = object_static_feats(Lr2, Wr2, f["U"], t, sl, labs[t][sl] == j)[4]
+                            if not (pkc[t][j] >= p["prop_pk"]):
+                                new[j] = False                 # NaN (no usable lags) also blocks
                     if new.any():
                         rmobj[t] = rmobj[t] | new; rmm[t] = rmobj[t][lab]; npr += int(new.sum())
+                        why[t][new] = 3
         info["n_prop_obj"] = npr
         tm["prop"] = _time.time() - t0 - sum(tm.values())
     nrm = 0
     RM = [rmobj[t][labs[t]] if rmobj[t].any() else None for t in range(T)]
+    # rescue (hotfix 2026-11-16, Voorschoten shower): a removed object that merged with real rain keeps the part
+    # outside the clutter footprint of t-+1/2 when that part has a solid body (>= rescue px after a 3x3 opening);
+    # only the footprint part is removed. Clutter is earth-fixed, so it lies in the neighbours' footprint.
+    nresc = 0
+    if p["rescue"]:
+        k3r = np.ones((3, 3), np.uint8); k5r = np.ones((5, 5), np.uint8)
+        RM0 = [r.copy() if r is not None else None for r in RM]
+        for t in range(T):
+            if RM0[t] is None or not old[t]:
+                continue
+            nbm = [RM0[u] for u in (t - 2, t - 1, t + 1, t + 2) if 0 <= u < T and RM0[u] is not None]
+            foot = cv2.dilate(np.any(nbm, axis=0).astype(np.uint8), k5r).astype(bool) if nbm else np.zeros((H, W), bool)
+            rest = RM0[t] & ~foot
+            if rest.sum() < p["rescue"]:
+                continue
+            core = cv2.morphologyEx(rest.astype(np.uint8), cv2.MORPH_OPEN, k3r)
+            n_, cl, stt, _ = cv2.connectedComponentsWithStats(core, connectivity=8)
+            keep = np.zeros((H, W), bool)
+            for c in range(1, n_):
+                if stt[c, cv2.CC_STAT_AREA] >= p["rescue"]:
+                    keep |= cl == c
+            if keep.any():
+                keep = cv2.dilate(keep.astype(np.uint8), k3r).astype(bool) & rest
+                RM[t] = RM[t] & ~keep; nresc += int(keep.sum())
+    info["n_rescued_px"] = nresc
+    WHY = np.stack([why[t][labs[t]] * (rmobj[t][labs[t]]) for t in range(T)]) if ret_info else np.zeros((T, 1, 1), np.uint8)
     for t in range(T):
         if old[t] and RM[t] is not None:
             out[t][RM[t]] = 0; nrm += int(RM[t].sum())
@@ -450,11 +508,13 @@ def fixclut_clean(cur, raw, times=None, strength=1.0, ret_info=False, **kw):
                     continue
                 o = out[t][sl]; o[lobe] = 0
                 nlobe += 1; nrm += int(lobe.sum())
+                if ret_info:
+                    WHY[t][sl][lobe] = 4
     info["n_lobe"] = nlobe
     out = np.where(cur >= MISSING, cur, np.minimum(out, cur)).astype(cur.dtype)
     out = np.where(old[:, None, None], out, cur)
     if ret_info:
-        return out, dict(score=score, flag=flag, F=F, tx=tx, Wt=Wt, Fm=f["Fm"], secs=_time.time() - t0, nrm=nrm, tm=tm, **info)
+        return out, dict(score=score, flag=flag, F=F, tx=tx, Wt=Wt, Fm=f["Fm"], secs=_time.time() - t0, nrm=nrm, tm=tm, why=WHY, **info)
     return out
 
 
