@@ -33,21 +33,21 @@ How it works, in plain words (stages run in this order on one window of frames):
  6. Temporal support. Echo with no support along the motion (or in place) in t-3..t+3 on both sides:
     bursts, one-frame dash fields, flicker.
  7. Radial dashes. Thin lines radial to a Dutch radar that do not move with the flow.
- 8. Speckle texture. Fragmented, granular echo inside larger objects, judged along the motion.
- 9. Outliers and lines (aggr > 1). Single hot pixels and thin bright lines in weak surroundings that are
-    absent before and after.
-10. Vote. Removals of 6-9 are made consistent along the motion over t-1, t, t+1.
-11. Realism guard. An edit of 6-9 that carves inside coherent rain (makes a hole, or bites into kept echo
+ 8. Outliers and lines (aggr > 1). Single hot pixels and thin bright lines in weak surroundings that are
+    absent before and after. (The research speckle-texture stage, "texture", is still available but not in
+    the default list BASE_STAGES: it decided per pixel and could cut half a shower; stage 13 covers speckle.)
+ 9. Vote. Removals of 6-8 are made consistent along the motion over t-1, t, t+1.
+10. Realism guard. An edit of 6-8 that carves inside coherent rain (makes a hole, or bites into kept echo
     along most of its boundary) is undone, and lowered pixels with strong neighbours are restored.
 Post stages (after the guard, so it cannot undo them; they run at every aggr):
-12. Fixed clutter (fixclut). Earth-fixed echo stays in place while the rain around it moves with the flow:
+11. Fixed clutter (fixclut). Earth-fixed echo stays in place while the rain around it moves with the flow:
     echo that persists at the same place over 15-30 min (more than it persists along the motion), or whose
     footprint and internal pattern stay fixed for 30-45 min in clear air, is removed per object for its whole
     lifetime; a clutter lobe attached to rain is cut where it joins.
-13. Spikes (second pass, spikes2). Interference rays and strobes in each Dutch radar's polar grid: straight
+12. Spikes (second pass, spikes2). Interference rays and strobes in each Dutch radar's polar grid: straight
     top-hat lines at constant azimuth that flash or stay fixed in polar coordinates while rain moves; tracked
     through the window. Under a ray the rain is rebuilt from the rain beside it (no slit, no lowered band).
-14. Consistency (stc). Rain moves with the flow and changes smoothly over 5-10 minutes; noise does not. Each
+13. Consistency (stc). Rain moves with the flow and changes smoothly over 5-10 minutes; noise does not. Each
     pixel is compared with the neighbouring frames (t+-1, t+-2) along the motion: echo with no similar echo
     nearby there is clamped to the supported level, or removed when nothing supports it (small flashes,
     granular speckle, dash fields, intense noise spots in and around rain). Weak drizzle is never removed and
@@ -68,7 +68,7 @@ RESEARCH_MD5. The fixed inputs (geography, interference azimuths, coverage, hot-
 model, the tree models as plain arrays) are in assets/rtcor_clean_v14.npz, built by
 scripts/rtcor_clean_v14_assets.py. Module map: window (pipeline, decision, automatic aggr, stage registry),
 objects/feats (1), tracks (pooling), v10/spikes/streaks/streaks_site/wedge (2-3), hotspots (4), weak (5),
-stages/texfeat/quality (6-11), ext_stages (adapters of 12-14), fixclut (12), spikes2* (13), stc (14),
+stages/texfeat/quality (6-10), ext_stages (adapters of 11-13), fixclut (11), spikes2* (12), stc (13),
 score (aggr), stale (frozen halves), assets (inputs and tree evaluation).
 """
 from __future__ import annotations
@@ -121,8 +121,8 @@ BLOCK = 24                      # frames cleaned per call of clean_window
 AGGR = None                     # automatic: window.auto_aggr from the v13 clutter load of 32-km tiles
 # research sources of this port (clutter study research/rtcor_clutter_v8/proto), md5 of the ported file
 RESEARCH_MD5 = {
-    'v14/cleaner.py': '30f30c178fb633681f45f84a8e640a2c', 'v14/stages.py': '89c5730930de76778bd0cf04ec955345',
-    'v14/texfeat.py': '389f3f306f3d6604c12895fa354e31b8', 'v13/score.py': 'e788eb185e08ea1c1058ad1bd0dd0bdc',
+    'v14/cleaner.py': '1b1c444cc06b323b70502c4b6af028d9', 'v14/stages.py': '89c5730930de76778bd0cf04ec955345',
+    'v14/texfeat.py': '389f3f306f3d6604c12895fa354e31b8', 'v13/score.py': 'e788eb185e08ea1c1058ad1bd0dd0bdc', 'v13/model.json': '4490a393b16d16ef9833d9087f8e6cba',
     'fixclut/fixclut.py': 'add03a0cc84dc68e78a91163c2be6135', 'fixclut/stage.py': '6c6272e036690ac6534a0f67dbd919a5',
     'spikes2/spikes2.py': '33847d6b9985f46feb06c59158594f33', 'spikes2/polar.py': '88667960f454bde1f2d8c59c6a4d0278',
     'spikes2/features.py': '9641fcbf8282c7159b0e07e054318d59', 'spikes2/s2common.py': '73ff28a657177b98307aec82818372ea',

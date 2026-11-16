@@ -5,9 +5,12 @@
 Changes against v12 (proto/v12/cleaner.py, md5 ce231133...):
   - aggr=None (default) = automatic: auto_aggr() maps the v13 clutter load of 32-km tiles to a (T, ny, nx) aggr map
     (1 + smoothstep((load - 0.20) / 0.25), rate limit 0.1 per 5 min); every stage reads it through ctx.A.
-  - three stage slots as in the meteopack port: stages (default BASE_STAGES = v12, before vote + guard), post
-    (default POST_STAGES = fixclut, spikes2, stc from proto/<name>/stage.py, after the guard) and final (on the
-    finished output); missing external stages are skipped (info["skipped"]). aggr may also be a callable.
+  - three stage slots as in the meteopack port: stages (default BASE_STAGES = v12 stages without texture, before
+    the vote and the guard), post (default POST_STAGES = fixclut, spikes2, stc from proto/<name>/stage.py, after
+    the guard) and final (on the finished output); missing external stages are skipped (info["skipped"]).
+    aggr may also be a callable.
+  - memory: after the base, ctx.st keeps only flr and flags; ret_info stores per-stage level maps only with
+    ret_info="levels".
   - fix of atlas A042 (base, also in v11): wedge seeds that move with the rain are dropped (moving_seeds) before the
     spike stage; a far-range rain band radial to Herwijnen was zeroed / cut into a block with slits.
   - period defaults to "chain" (as every v12 evaluation ran).
@@ -56,9 +59,10 @@ External stages: any name in `stages` that is not in stages.py is loaded from pr
 the proto/spikes2 spike stage).
 12. outlier stage (aggr > 1): single hot pixels > 3x their second-highest neighbour and absent before and after.
 13. lines stage (aggr > 1): thin bright lines of any orientation in weak surroundings, absent before and after.
-Stages run in the order of `stages` (default support, dash, texture, outlier, lines); the vote runs after all.
+Stages run in the order of `stages` (v12 default support, dash, texture, outlier, lines; v14 default without texture);
+the vote runs after all.
 """
-# Ported from research proto/v14/cleaner.py (md5 30f30c178fb633681f45f84a8e640a2c),
+# Ported from research proto/v14/cleaner.py (md5 1b1c444cc06b323b70502c4b6af028d9),
 # by port_tools/sync_research.py: only imports / loading edited.
 from __future__ import annotations
 
@@ -326,7 +330,11 @@ def auto_aggr(codes, times=None, *, a_min=1.0, a_max=2.0, lo=0.20, width=0.25, r
 
 
 # ------------------------------------------------------------------ main
-BASE_STAGES = ("support", "dash", "texture", "outlier", "lines")       # v12 stages (before the vote and the guard)
+# v12 stages before the vote and the guard. The v12 speckle-texture stage ("texture", still available) is not in the
+# default (decision 2026-11-16, stc iteration 3 in post): it decides per pixel and carved atlas A052 (half a shower
+# in one frame); without it A052 is fixed, rain-as-old wet px lost 0.40 -> 0.22 %, TEST rain kept 80.3 -> 80.7 %,
+# for one atlas speckle instance (21 -> 20 of 47) and one 38-px TEST speckle object.
+BASE_STAGES = ("support", "dash", "outlier", "lines")
 POST_STAGES = ("fixclut", "spikes2", "stc")                              # after the guard (not reverted by it)
 FINAL_STAGES = ()                                                        # on the finished output
 
