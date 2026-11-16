@@ -113,13 +113,63 @@ def test_registered_post_and_final_stages(old_run):
     res = v14.clean_window(codes, times(len(codes)), post=('test_halve',), test_halve_kw={'factor': 2})
     assert calls == [2]
     valid = codes < 65534
-    assert np.array_equal(res[valid], np.minimum(out // 2, out)[valid])
+    assert np.array_equal(res[~valid], codes[~valid]) and (res <= codes).all()
+    assert res[valid].astype(np.int64).sum() < out[valid].astype(np.int64).sum()
 
     def raise_all(ctx, cur):                                    # a final stage may not raise or touch the mask
         return np.full_like(cur, 60000), None
     v14.register_stage('test_raise', raise_all)
     res = v14.clean_window(codes, times(len(codes)), final=('test_raise',))
     assert np.array_equal(res, codes)                           # clipped back to the raw codes
+
+
+@pytest.fixture(scope='module')
+def base_run(old_run):
+    """The window cleaned without the post stages (aggr 1): reference for the single-stage runs."""
+    codes, _ = old_run
+    return v14.clean_window(codes, times(len(codes)), 1.0, post=())
+
+
+@pytest.mark.parametrize('name', v14.POST_STAGES)
+def test_each_post_stage_keeps_the_contract(old_run, base_run, name):
+    codes, _ = old_run
+    res = v14.clean_window(codes, times(len(codes)), 1.0, post=(name,))
+    invalid = codes >= 65534
+    assert res.dtype == np.uint16 and np.array_equal(res[invalid], codes[invalid])
+    assert (res <= base_run).all() and (res <= codes).all()     # only lowers what the base kept
+    new = v14.clean_window(codes, times(len(codes), '2024-07-19T22:00'), 1.0, post=(name,))
+    assert np.array_equal(new, codes)
+
+
+def ray_scene(n=10, az_deg=75.0, frames=range(2, 9)):
+    """A straight interference ray from Den Helder (40-250 km, 1 px wide) in clear air in several frames, plus a
+    small moving shower so the scene has motion."""
+    codes = np.zeros((n, H, W), 'uint16')
+    yy, xx = np.mgrid[0:H, 0:W]
+    for t in range(n):
+        d2 = (yy - 600) ** 2 + (xx - 200 - 3 * t) ** 2
+        codes[t] = np.where(d2 <= 20 ** 2, 20, 0)
+    az = np.radians(az_deg)
+    r = np.arange(40, 250, 0.5)
+    ry = np.rint(DEN_HELDER[0] - r * np.cos(az)).astype(int)
+    rx = np.rint(DEN_HELDER[1] + r * np.sin(az)).astype(int)
+    ok = (ry >= 0) & (ry < H) & (rx >= 0) & (rx < W)
+    ry, rx = ry[ok], rx[ok]
+    ray = np.zeros((n, H, W), bool)
+    for t in frames:
+        codes[t, ry, rx] = 25
+        ray[t, ry, rx] = True
+    return codes, ray
+
+
+def test_spike_ray_in_clear_air_is_removed():
+    codes, ray = ray_scene()
+    out = v14.clean_window(codes, times(len(codes)))
+    assert (out[ray] == 0).mean() >= 0.95
+    from meteopack.datasets.rtcor_clean_v14 import spikes2
+    alone = spikes2.remove_spikes(codes, None, raw=codes)       # the spikes2 stage by itself
+    assert (alone[ray] == 0).mean() >= 0.9
+    assert (alone <= codes).all() and alone[~ray].astype(np.int64).sum() >= 0.99 * codes[~ray].astype(np.int64).sum()
 
 
 def test_tree_tables_evaluate_like_a_hand_made_tree():

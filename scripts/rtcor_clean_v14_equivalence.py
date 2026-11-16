@@ -5,8 +5,10 @@ Run each side in its own process (the research code changes global OpenCV state 
     python scripts/rtcor_clean_v14_equivalence.py --side research    # research outputs -> --cache
     python scripts/rtcor_clean_v14_equivalence.py --side port        # port outputs, compared with them
 
-Research side: --research-module (default WORK/proto/v12/cleaner.py; the final base is proto/v14/cleaner.py)
-clean_window(codes, times, **RESEARCH_KW), RESEARCH_KW = --research-kw (default {"aggr": 1.0, "period": "chain"}).
+Research side: --research-module (default WORK/proto/v14/cleaner.py, the final cleaner) clean_window(codes, times,
+**RESEARCH_KW), RESEARCH_KW = --research-kw (default {}: automatic aggr, post = fixclut, spikes2, stc). The v12
+base port (commit 3ffc08d) was checked with --research-module proto/v12/cleaner.py
+--research-kw '{"aggr": 1.0, "period": "chain"}' --port-kw '{"aggr": 1.0, "post": []}' (that port's call).
 Port side: meteopack.datasets.rtcor_clean_v14.clean_window(codes, times, **PORT_KW) and clean(codes, times,
 context=PAD, **PORT_KW) (one block) on the same window; PORT_KW = --port-kw (default {}: the port's defaults). Windows (PAD = 7 context frames on each side, 24 core frames):
   heat   2022-07-19 22:15 (heatwave night; research cache raw_heat_n2215.npz)
@@ -63,8 +65,8 @@ def main() -> int:
     p.add_argument('--work', type=Path, default=WORK)
     p.add_argument('--cache', type=Path, default=CACHE)
     p.add_argument('--research-module', type=Path, default=None,
-                   help='research cleaner file (default WORK/proto/v12/cleaner.py)')
-    p.add_argument('--research-kw', default='{"aggr": 1.0, "period": "chain"}',
+                   help='research cleaner file (default WORK/proto/v14/cleaner.py)')
+    p.add_argument('--research-kw', default='{}',
                    help='JSON keyword arguments of the research clean_window call')
     p.add_argument('--port-kw', default='{}', help='JSON keyword arguments of the port clean_window / clean call')
     p.add_argument('--no-score', action='store_true', help='skip the v13 score comparison')
@@ -72,7 +74,7 @@ def main() -> int:
     args = p.parse_args()
     args.cache.mkdir(parents=True, exist_ok=True)
     if args.side == 'research':
-        f = args.research_module or args.work / 'proto/v12/cleaner.py'
+        f = args.research_module or args.work / 'proto/v14/cleaner.py'
         sys.path.insert(0, str(f.parent))
         spec = importlib.util.spec_from_file_location('research_cleaner', f)
         C = importlib.util.module_from_spec(spec); spec.loader.exec_module(C)
